@@ -1,21 +1,25 @@
-//! A small web page to follow this process's sessions and queue messages
-//! for them, built only on extension hooks.
+//! A small web page to follow sessions and queue messages for them, built
+//! only on extension hooks.
 //!
-//! What it sees: every user-side message as it goes to the model (prompts,
-//! queued and steering messages, profile notes; from `before_request`), tool
-//! calls as they start and end, and the model's text and thinking once its
-//! turn is done (`turn_end`; hooks do not see the stream). A message sent
-//! from the page goes to `Context::send` with `trigger_turn`: during a run it
-//! rides along with the next tool results, when idle it starts a run.
+//! What it sees of this process's open sessions: every user-side message as
+//! it goes to the model (prompts, queued and steering messages, profile
+//! notes; from `before_request`), tool calls as they start and end, and the
+//! model's text and thinking once its turn is done (`turn_end`; hooks do not
+//! see the stream). Other sessions in the same databases (closed, or open in
+//! another rho) are listed too and show their stored history, read-only.
 //!
-//! Listens on `RHO_WEB_UI` (default `127.0.0.1:8787`, `off` to disable); if
-//! the port is taken (another rho), the next free one of the following ten.
-//! `/web` in a session shows its address. Only requests with a localhost
-//! `Host` header and, for sending, a JSON body are accepted, so other web
-//! sites cannot send prompts (DNS rebinding, cross-site form posts).
+//! A message sent from the page is shown in the session's client as a notice
+//! and goes to `Context::send` with `trigger_turn`: during a run it rides
+//! along with the next tool results, when idle it starts a run.
+//!
+//! Listens on `RHO_WEB_UI` (default `0.0.0.0:8787`, `off` to disable); if the
+//! port is taken (another rho), the next free one of the following ten. The
+//! API needs the random token from the link that `/web` shows; the page keeps
+//! it. Only `localhost` or IP addresses are accepted as `Host` (no DNS
+//! rebinding).
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::collections::{BTreeMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,13 +33,17 @@ use rho::extension::{
     Context, Decision, Extension, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
 use rho::provider::{Content, Message, Request as ModelRequest, Role};
+use rho::store::{SessionInfo, Store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const DEFAULT_ADDR: &str = "127.0.0.1:8787";
+const DEFAULT_ADDR: &str = "0.0.0.0:8787";
 const PORT_TRIES: u16 = 10;
 /// Tool output kept per call; the page is for following along.
 const MAX_OUTPUT: usize = 4000;
+/// Sessions in the list.
+const LIST_LIMIT: usize = 100;
+const TOKEN_HEADER: &str = "x-rho-token";
 const PAGE: &str = include_str!("web_ui.html");
 
 pub struct WebUi {
@@ -46,24 +54,33 @@ pub struct WebUi {
     addr: OnceLock<Result<SocketAddr, String>>,
 }
 
-#[derive(Default)]
 struct Hub {
+    /// Required on every API request.
+    token: String,
     sessions: Mutex<BTreeMap<String, View>>,
+    /// The databases of the sessions seen so far, for the stored ones.
+    stores: Mutex<Vec<Store>>,
 }
 
-/// What the page shows of one session.
+/// An open session.
 struct View {
     ctx: Context,
+    log: Timeline,
+    running: bool,
+    /// Context in use after the last request, in tokens.
+    context: u64,
+}
+
+/// What the page shows of a session's conversation.
+#[derive(Default)]
+struct Timeline {
     /// Append-only; the page asks for those after the last one it has.
     events: Vec<Value>,
     /// Model requests so far. Events carry theirs, so the page can put the
     /// model's text (known at the turn's end) before its tool calls.
     turn: u64,
-    running: bool,
     /// Unix ms of the last event.
     updated: u64,
-    /// Context in use after the last request, in tokens.
-    context: u64,
     /// Sent from the page, not yet delivered to the model.
     queued: Vec<String>,
 }
@@ -76,7 +93,23 @@ enum Slot {
     Tool = 2,
 }
 
-impl View {
+impl Timeline {
+    /// A stored conversation. Like live: a user message starts a turn, the
+    /// model's answer belongs to it, a tool result shows with its call.
+    fn from_history(history: &[Message]) -> Self {
+        let mut log = Self::default();
+        for Message { role, content } in history {
+            match role {
+                Role::User => {
+                    log.turn += 1;
+                    log.push_user(content, true);
+                }
+                Role::Assistant => log.push_model(content, true),
+            }
+        }
+        log
+    }
+
     fn push(&mut self, slot: Slot, mut event: Value) {
         event["seq"] = self.events.len().into();
         event["turn"] = self.turn.into();
@@ -132,18 +165,47 @@ impl View {
         }
     }
 
+    /// The summary plus the events from `since` on.
+    fn page(&self, mut summary: Value, since: usize) -> Value {
+        summary["total"] = self.events.len().into();
+        summary["events"] = self.events.get(since..).unwrap_or_default().into();
+        summary
+    }
+}
+
+impl View {
     fn summary(&self, id: &str) -> Value {
         json!({
             "id": id,
             "title": self.ctx.title(),
             "cwd": self.ctx.cwd(),
             "profile": self.ctx.profile().name,
+            "open": true,
             "running": self.running,
-            "updated": self.updated,
+            "updated": self.log.updated,
             "context": self.context,
-            "queued": self.queued,
+            "queued": self.log.queued,
         })
     }
+}
+
+/// A session that is not open in this process.
+fn stored_summary(s: &SessionInfo) -> Value {
+    let mut profile = s.profile.clone();
+    if let Some(first) = profile.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    json!({
+        "id": s.id,
+        "title": s.title,
+        "cwd": s.cwd,
+        "profile": profile,
+        "open": false,
+        "running": false,
+        "updated": s.updated_at,
+        "context": s.last_usage.prompt() + s.last_usage.output,
+        "queued": [],
+    })
 }
 
 fn tool_end(id: &str, output: &str, is_error: bool) -> Value {
@@ -160,16 +222,40 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+fn random_token() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .expect("reading /dev/urandom");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `localhost` or an IP address, with or without port. A DNS rebinding
+/// attack needs a domain name.
+fn local_host(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => host,
+    };
+    let name = name.trim_start_matches('[').trim_end_matches(']');
+    name == "localhost" || name.parse::<IpAddr>().is_ok()
+}
+
 impl Hub {
     fn with(&self, ctx: &Context, f: impl FnOnce(&mut View)) {
         if let Some(view) = self.sessions.lock().unwrap().get_mut(ctx.session_id()) {
             f(view);
         }
     }
+
+    fn stores(&self) -> Vec<Store> {
+        self.stores.lock().unwrap().clone()
+    }
 }
 
 impl WebUi {
-    /// Listens on `RHO_WEB_UI`, default `127.0.0.1:8787`.
+    /// Listens on `RHO_WEB_UI`, default `0.0.0.0:8787`.
     pub fn from_env() -> Self {
         Self::listen(std::env::var("RHO_WEB_UI").unwrap_or_else(|_| DEFAULT_ADDR.into()))
     }
@@ -178,7 +264,11 @@ impl WebUi {
     pub fn listen(listen: impl Into<String>) -> Self {
         Self {
             listen: listen.into(),
-            hub: Arc::default(),
+            hub: Arc::new(Hub {
+                token: random_token(),
+                sessions: Mutex::default(),
+                stores: Mutex::default(),
+            }),
             addr: OnceLock::new(),
         }
     }
@@ -203,10 +293,28 @@ impl WebUi {
             listener.set_nonblocking(true).map_err(|e| e.to_string())?;
             let listener =
                 tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?;
-            let app = router(self.hub.clone(), addr.port());
+            let app = router(self.hub.clone());
             tokio::spawn(async move { axum::serve(listener, app).await });
             Ok(addr)
         })
+    }
+
+    /// The link for `/web`.
+    fn link(&self, session_id: &str) -> String {
+        let addr = match self.serve() {
+            Ok(addr) => *addr,
+            Err(e) => return format!("No web view: {e}"),
+        };
+        let token = &self.hub.token;
+        let link = |host: String| format!("http://{host}/?token={token}#{session_id}");
+        if !addr.ip().is_unspecified() {
+            return format!("Web view: {}", link(addr.to_string()));
+        }
+        format!(
+            "Web view: {}\n\nFrom another device, use this machine's address instead of 127.0.0.1. \
+             Anyone with the link can send prompts.",
+            link(format!("127.0.0.1:{}", addr.port()))
+        )
     }
 }
 
@@ -215,35 +323,30 @@ impl Extension for WebUi {
         let _ = self.serve();
         session.commands.push(SlashCommand {
             name: "web".into(),
-            description: "Show the address of the web view".into(),
+            description: "Show the link to the web view".into(),
             hint: None,
         });
         let ctx = session.ctx.clone();
-        let mut view = View {
-            ctx: ctx.clone(),
-            events: vec![],
-            turn: 0,
-            running: false,
-            updated: now_ms(),
-            context: 0,
-            queued: vec![],
-        };
+        if let Some(store) = ctx.store() {
+            let mut stores = self.hub.stores.lock().unwrap();
+            if !stores.iter().any(|s| s.path() == store.path()) {
+                stores.push(store.clone());
+            }
+        }
+        let mut log = Timeline::default();
         if session.resumed
             && let Some(store) = ctx.store()
             && let Ok(history) = store.history(ctx.session_id()).await
         {
-            for Message { role, content } in &history {
-                // Like live: a user message starts a turn, the model's
-                // answer belongs to it. A tool result shows with its call.
-                match role {
-                    Role::User => {
-                        view.turn += 1;
-                        view.push_user(content, true);
-                    }
-                    Role::Assistant => view.push_model(content, true),
-                }
-            }
+            log = Timeline::from_history(&history);
         }
+        log.updated = now_ms();
+        let view = View {
+            ctx: ctx.clone(),
+            log,
+            running: false,
+            context: 0,
+        };
         self.hub
             .sessions
             .lock()
@@ -257,19 +360,19 @@ impl Extension for WebUi {
 
     async fn before_request(&self, ctx: &Context, request: &mut ModelRequest) {
         self.hub.with(ctx, |v| {
-            v.turn += 1;
+            v.log.turn += 1;
             v.running = true;
             // New since the last request: the prompt, or tool results with
             // queued messages and notes.
             if let Some(last) = request.messages.last() {
-                v.push_user(&last.content, false);
+                v.log.push_user(&last.content, false);
             }
         });
     }
 
     async fn tool_call(&self, ctx: &Context, call: &mut ToolCall) -> Decision {
         self.hub.with(ctx, |v| {
-            v.push(
+            v.log.push(
                 Slot::Tool,
                 json!({"kind": "tool", "id": call.id, "name": call.name, "input": call.input}),
             )
@@ -283,14 +386,14 @@ impl Extension for WebUi {
             // Calls blocked before the hooks ran have no start event.
             end["name"] = call.name.clone().into();
             end["input"] = call.input.clone();
-            v.push(Slot::Tool, end);
+            v.log.push(Slot::Tool, end);
         });
     }
 
     async fn turn_end(&self, ctx: &Context, turn: &TurnEnd<'_>) {
         self.hub.with(ctx, |v| {
             v.context = turn.usage.prompt() + turn.usage.output;
-            v.push_model(turn.assistant, false);
+            v.log.push_model(turn.assistant, false);
         });
     }
 
@@ -299,24 +402,18 @@ impl Extension for WebUi {
         // sets this again.
         self.hub.with(ctx, |v| {
             v.running = false;
-            v.updated = now_ms();
+            v.log.updated = now_ms();
         });
         None
     }
 
     async fn command(&self, ctx: &Context, name: &str, _args: &str) -> Option<String> {
-        if name != "web" {
-            return None;
-        }
-        Some(match self.serve() {
-            Ok(addr) => format!("Web view: http://{addr}/#{}", ctx.session_id()),
-            Err(e) => format!("No web view: {e}"),
-        })
+        (name == "web").then(|| self.link(ctx.session_id()))
     }
 }
 
-fn router(hub: Arc<Hub>, port: u16) -> Router {
-    let allowed = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+fn router(hub: Arc<Hub>) -> Router {
+    let token = hub.token.clone();
     Router::new()
         .route("/", get(|| async { Html(PAGE) }))
         .route("/api/sessions", get(list))
@@ -324,16 +421,26 @@ fn router(hub: Arc<Hub>, port: u16) -> Router {
         .route("/api/sessions/{id}/send", post(send))
         .layer(axum::middleware::from_fn(
             move |req: Request, next: Next| {
-                let ok = req
+                let host_ok = req
                     .headers()
                     .get(header::HOST)
                     .and_then(|h| h.to_str().ok())
-                    .is_some_and(|h| allowed.iter().any(|a| a == h));
+                    .is_some_and(local_host);
+                let token_ok = !req.uri().path().starts_with("/api/")
+                    || req
+                        .headers()
+                        .get(TOKEN_HEADER)
+                        .and_then(|h| h.to_str().ok())
+                        == Some(token.as_str());
+                let refused = match (host_ok, token_ok) {
+                    (false, _) => Some(StatusCode::FORBIDDEN),
+                    (_, false) => Some(StatusCode::UNAUTHORIZED),
+                    _ => None,
+                };
                 async move {
-                    if ok {
-                        next.run(req).await
-                    } else {
-                        StatusCode::FORBIDDEN.into_response()
+                    match refused {
+                        None => next.run(req).await,
+                        Some(status) => status.into_response(),
                     }
                 }
             },
@@ -341,10 +448,25 @@ fn router(hub: Arc<Hub>, port: u16) -> Router {
         .with_state(hub)
 }
 
+/// Open sessions, then stored ones, newest first.
 async fn list(State(hub): State<Arc<Hub>>) -> Json<Value> {
-    let sessions = hub.sessions.lock().unwrap();
-    let mut list: Vec<Value> = sessions.iter().map(|(id, v)| v.summary(id)).collect();
+    let (mut list, mut seen) = {
+        let sessions = hub.sessions.lock().unwrap();
+        let list: Vec<Value> = sessions.iter().map(|(id, v)| v.summary(id)).collect();
+        (list, sessions.keys().cloned().collect::<HashSet<_>>())
+    };
+    for store in hub.stores() {
+        let Ok(page) = store.list(None, None, LIST_LIMIT).await else {
+            continue;
+        };
+        for s in page.sessions {
+            if seen.insert(s.id.clone()) {
+                list.push(stored_summary(&s));
+            }
+        }
+    }
     list.sort_by_key(|s| std::cmp::Reverse(s["updated"].as_u64()));
+    list.truncate(LIST_LIMIT);
     Json(list.into())
 }
 
@@ -359,13 +481,23 @@ async fn events(
     Path(id): Path<String>,
     Query(q): Query<Since>,
 ) -> Response {
-    let sessions = hub.sessions.lock().unwrap();
-    let Some(v) = sessions.get(&id) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let open = {
+        let sessions = hub.sessions.lock().unwrap();
+        sessions
+            .get(&id)
+            .map(|v| v.log.page(v.summary(&id), q.since))
     };
-    let mut out = v.summary(&id);
-    out["events"] = v.events.get(q.since..).unwrap_or_default().into();
-    Json(out).into_response()
+    if let Some(page) = open {
+        return Json(page).into_response();
+    }
+    for store in hub.stores() {
+        if let Ok(Some(info)) = store.session(&id).await {
+            let history = store.history(&id).await.unwrap_or_default();
+            let log = Timeline::from_history(&history);
+            return Json(log.page(stored_summary(&info), q.since)).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
 }
 
 #[derive(Deserialize)]
@@ -373,7 +505,6 @@ struct Send {
     text: String,
 }
 
-/// `Json` insists on `application/json`, which a cross-site form cannot send.
 async fn send(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
@@ -383,13 +514,22 @@ async fn send(
     if text.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty message").into_response();
     }
-    let mut sessions = hub.sessions.lock().unwrap();
-    let Some(v) = sessions.get_mut(&id) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let ctx = {
+        let mut sessions = hub.sessions.lock().unwrap();
+        let Some(v) = sessions.get_mut(&id) else {
+            return (
+                StatusCode::CONFLICT,
+                "This session is not open in this rho; open it in your editor to continue it.",
+            )
+                .into_response();
+        };
+        v.log.queued.push(text.clone());
+        v.log.updated = now_ms();
+        v.ctx.clone()
     };
-    v.queued.push(text.clone());
-    v.updated = now_ms();
-    v.ctx.send(text, true);
+    // So the editor shows where the next run comes from.
+    ctx.notify("Message from the web view", &text, false);
+    ctx.send(text, true);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -397,8 +537,8 @@ async fn send(
 mod tests {
     use super::*;
     use futures::stream::{self, BoxStream, StreamExt};
-    use rho::agent::Agent;
-    use rho::extension::NoFrontend;
+    use rho::agent::{Agent, AgentEvent};
+    use rho::extension::{Frontend, NoFrontend};
     use rho::provider::{Event, Provider, StopReason};
 
     /// Replays one scripted response per request.
@@ -408,6 +548,18 @@ mod tests {
         fn stream(&self, _request: ModelRequest) -> BoxStream<'static, anyhow::Result<Event>> {
             let events = self.0.lock().unwrap().remove(0);
             stream::iter(events.into_iter().map(Ok)).boxed()
+        }
+    }
+
+    /// Records the notices the editor would show.
+    #[derive(Default)]
+    struct Notices(Mutex<Vec<String>>);
+
+    impl Frontend for Notices {
+        fn event(&self, ev: AgentEvent<'_>) {
+            if let AgentEvent::Notice { title, text, .. } = ev {
+                self.0.lock().unwrap().push(format!("{title}: {text}"));
+            }
         }
     }
 
@@ -432,6 +584,22 @@ mod tests {
                 format!("{} {detail}", e["kind"].as_str().unwrap())
             })
             .collect()
+    }
+
+    /// An HTTP client for the web view of `web`, with its token.
+    fn client(web: &WebUi) -> (String, reqwest::Client) {
+        let addr = *web.addr.get().unwrap().as_ref().unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(TOKEN_HEADER, web.hub.token.parse().unwrap());
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        (format!("http://{addr}"), http)
+    }
+
+    async fn get_json(http: &reqwest::Client, url: String) -> Value {
+        http.get(url).send().await.unwrap().json().await.unwrap()
     }
 
     #[tokio::test]
@@ -459,8 +627,9 @@ mod tests {
         let mut agent = Agent::new(provider, "m", rho::tools::builtin());
         agent.extensions.push(web.clone());
         let dir = tempfile::tempdir().unwrap();
+        let notices = Arc::new(Notices::default());
         let mut session = agent
-            .start_session("s1", dir.path(), vec![], Arc::new(NoFrontend))
+            .start_session("s1", dir.path(), vec![], notices.clone())
             .await
             .unwrap();
         agent
@@ -468,16 +637,12 @@ mod tests {
             .await
             .unwrap();
 
-        let addr = *web.addr.get().unwrap().as_ref().unwrap();
-        let http = reqwest::Client::new();
-        let get = |path: &str| {
-            let req = http.get(format!("http://{addr}{path}"));
-            async move { req.send().await.unwrap() }
-        };
-        let list: Value = get("/api/sessions").await.json().await.unwrap();
+        let (base, http) = client(&web);
+        let list = get_json(&http, format!("{base}/api/sessions")).await;
         assert_eq!(list[0]["id"], "s1");
         assert_eq!(list[0]["profile"], "Write");
-        let s: Value = get("/api/sessions/s1").await.json().await.unwrap();
+        assert_eq!(list[0]["open"], true);
+        let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
         assert_eq!(s["running"], false);
         assert_eq!(
             kinds(&s["events"]),
@@ -495,21 +660,27 @@ mod tests {
             .find(|e| e["kind"] == "tool_end")
             .unwrap();
         assert_eq!(end["output"], "hi\n");
-        let page = get("/").await.text().await.unwrap();
+        let page = http.get(&base).send().await.unwrap().text().await.unwrap();
         assert!(page.contains("<title>rho</title>"));
-        let since: Value = get("/api/sessions/s1?since=5").await.json().await.unwrap();
-        assert_eq!(since["events"], json!([]));
-        assert_eq!(get("/api/sessions/nope").await.status(), 404);
+        let since = get_json(&http, format!("{base}/api/sessions/s1?since=5")).await;
+        assert_eq!(
+            (since["events"].clone(), since["total"].clone()),
+            (json!([]), json!(5))
+        );
+        let missing = http.get(format!("{base}/api/sessions/nope")).send().await;
+        assert_eq!(missing.unwrap().status(), 404);
 
-        // Other hosts (DNS rebinding) and non-JSON posts (cross-site forms) are refused.
+        // No token, other hosts (DNS rebinding), non-JSON posts: refused.
+        let anonymous = reqwest::get(format!("{base}/api/sessions")).await.unwrap();
+        assert_eq!(anonymous.status(), 401);
         let foreign = http
-            .get(format!("http://{addr}/api/sessions"))
+            .get(format!("{base}/api/sessions"))
             .header(header::HOST, "evil.example")
             .send()
             .await
             .unwrap();
         assert_eq!(foreign.status(), 403);
-        let send = format!("http://{addr}/api/sessions/s1/send");
+        let send = format!("{base}/api/sessions/s1/send");
         let form = http
             .post(&send)
             .header(header::CONTENT_TYPE, "text/plain")
@@ -520,25 +691,30 @@ mod tests {
         assert_eq!(form.status(), 415);
         assert!(!session.ctx.has_triggered());
 
-        // Queued while idle: it starts a run (ACP does this in the background).
+        // Queued while idle: the editor is told, and it starts a run (ACP
+        // does this in the background).
         let sent = http.post(&send).json(&json!({"text": "more"})).send().await;
         assert_eq!(sent.unwrap().status(), 204);
-        let s: Value = get("/api/sessions/s1").await.json().await.unwrap();
+        assert_eq!(
+            *notices.0.lock().unwrap(),
+            ["Message from the web view: more"]
+        );
+        let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
         assert_eq!(s["queued"], json!(["more"]));
         assert!(session.ctx.has_triggered());
         agent.run_triggered(&mut session).await.unwrap().unwrap();
-        let s: Value = get("/api/sessions/s1").await.json().await.unwrap();
+        let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
         assert_eq!(s["queued"], json!([]));
         let kinds = kinds(&s["events"]);
         assert_eq!(kinds[4..], ["user more", "assistant Got it."]);
 
         drop(session);
-        let list: Value = get("/api/sessions").await.json().await.unwrap();
+        let list = get_json(&http, format!("{base}/api/sessions")).await;
         assert_eq!(list, json!([]));
     }
 
     #[tokio::test]
-    async fn resumed_sessions_show_their_history() {
+    async fn stored_sessions_are_listed_and_shown() {
         let provider = Arc::new(Scripted(Mutex::new(vec![
             vec![
                 Event::Block(Content::ToolUse {
@@ -568,23 +744,76 @@ mod tests {
             .await
             .unwrap();
         drop(session);
+        let open = agent
+            .start_session("s2", dir.path(), vec![], Arc::new(NoFrontend))
+            .await
+            .unwrap();
 
+        // Closed, but stored: listed after the newer open one, read-only.
+        let (base, http) = client(&web);
+        let list = get_json(&http, format!("{base}/api/sessions")).await;
+        let ids: Vec<_> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["id"].clone(), s["open"].clone()))
+            .collect();
+        assert_eq!(
+            ids,
+            [(json!("s2"), json!(true)), (json!("s1"), json!(false))]
+        );
+        let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
+        assert_eq!(s["profile"], "Write");
+        assert_eq!(
+            kinds(&s["events"]),
+            ["user try", "tool Bash", "assistant It failed."]
+        );
+        assert_eq!(s["events"][2]["is_error"], true);
+        let sent = http
+            .post(format!("{base}/api/sessions/s1/send"))
+            .json(&json!({"text": "hello?"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sent.status(), 409);
+        drop(open);
+
+        // Loaded again: the same history, now live.
         let _session = agent
             .resume_session("s1", dir.path(), vec![], Arc::new(NoFrontend))
             .await
             .unwrap();
-        let hub = web.hub.sessions.lock().unwrap();
-        let events = Value::from(hub["s1"].events.clone());
+        let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
+        assert_eq!(s["open"], true);
         assert_eq!(
-            kinds(&events),
+            kinds(&s["events"]),
             ["user try", "tool Bash", "assistant It failed."]
         );
-        assert_eq!(events[2]["is_error"], true);
+    }
+
+    #[test]
+    fn hosts_must_be_local_names_or_addresses() {
+        for ok in [
+            "localhost:8787",
+            "127.0.0.1:8787",
+            "192.168.1.20:8787",
+            "[::1]:8787",
+            "10.0.0.2",
+        ] {
+            assert!(local_host(ok), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:8787",
+            "localhost.evil.example:8787",
+        ] {
+            assert!(!local_host(bad), "{bad}");
+        }
     }
 
     #[test]
     fn can_be_turned_off() {
         let web = WebUi::listen("off");
-        assert!(web.serve().as_ref().unwrap_err().contains("disabled"));
+        assert!(web.link("s").contains("disabled"));
     }
 }

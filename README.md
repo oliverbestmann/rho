@@ -251,23 +251,28 @@ approval.
 ## Web view
 
 `WebUi` (in the `rho` binary, `agent/src/web_ui.rs`) serves a page to follow
-the process's open sessions and queue messages for them, at
-`http://127.0.0.1:8787` (`RHO_WEB_UI` sets `ip:port`, `off` disables it; a
-taken port moves on to the next of ten, e.g. for a second rho). `/web` in a
-session shows its link.
+sessions and queue messages for them, also from a phone. It listens on
+`0.0.0.0:8787` (`RHO_WEB_UI` sets `ip:port`, `off` disables it; a taken port
+moves on to the next of ten, e.g. for a second rho). `/web` in a session
+shows the link, with a random access token the page keeps; from another
+device, replace `127.0.0.1` with the machine's address. Anyone with the
+link can send prompts, so share it like a password. Only `localhost` and IP
+addresses are accepted as `Host` (no DNS rebinding).
+
+The list has this process's open sessions first, then the other sessions
+in the same databases (closed, or open in another rho), newest first. Those
+show their stored history and are read-only.
 
 It is an extension like any other, so it sees what hooks see: messages as
 they go to the model (prompts, queued messages, profile notes), tool calls
 as they start and finish, and the model's text and thinking when its turn
-ends; it does not stream text. A loaded session shows its stored history.
-"Working" means a model request started and the model has not settled since;
-a cancelled run stays "working" until the next one.
+ends; it does not stream text. "Working" means a model request started and
+the model has not settled since; a cancelled run stays "working" until the
+next one.
 
-A message from the page goes to `ctx.send(text, trigger_turn)`: during a run
-it rides along with the next tool results, when idle it starts a run (the
-ACP client sees that run's updates, but not the message itself). Only
-requests with a localhost `Host` header (no DNS rebinding) are served, and
-sending requires a JSON body, which other sites cannot post cross-origin.
+A message from the page shows up in the editor as a notice ("Message from
+the web view") and goes to `ctx.send(text, trigger_turn)`: during a run it
+rides along with the next tool results, when idle it starts a run.
 
 ## Images
 
