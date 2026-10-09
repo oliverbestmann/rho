@@ -95,6 +95,24 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         )
                         .await;
                     let ctx = session.ctx.clone();
+                    let mut commands = vec![
+                        AvailableCommand::new(
+                            "compact",
+                            "Summarize the conversation to free up context",
+                        )
+                        .input(AvailableCommandInput::Unstructured(
+                            UnstructuredCommandInput::new("optional focus for the summary"),
+                        )),
+                    ];
+                    for c in &session.commands {
+                        let mut command = AvailableCommand::new(&c.name, &c.description);
+                        if let Some(hint) = &c.hint {
+                            command = command.input(AvailableCommandInput::Unstructured(
+                                UnstructuredCommandInput::new(hint),
+                            ));
+                        }
+                        commands.push(command);
+                    }
                     let session = Arc::new(tokio::sync::Mutex::new(session));
                     state.sessions.lock().unwrap().insert(
                         sid.clone(),
@@ -105,18 +123,11 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                     );
                     cx.spawn(watch_inbox(agent, state, sid.clone(), ctx))?;
                     responder.respond(NewSessionResponse::new(sid.clone()))?;
-                    let compact = AvailableCommand::new(
-                        "compact",
-                        "Summarize the conversation to free up context",
-                    )
-                    .input(AvailableCommandInput::Unstructured(
-                        UnstructuredCommandInput::new("optional focus for the summary"),
-                    ));
                     cx.send_notification(SessionNotification::new(
                         sid,
-                        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-                            compact,
-                        ])),
+                        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(
+                            commands,
+                        )),
                     ))
                 })
             },
@@ -135,12 +146,22 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                 cx.spawn(async move {
                     let mut session = session.lock().await;
                     let turn = async {
-                        match compact_command(&req.prompt) {
-                            Some(focus) => agent
+                        match slash_command(&req.prompt) {
+                            Some(("compact", focus)) => agent
                                 .compact(&mut session, &focus)
                                 .await
                                 .map(|()| provider::StopReason::EndTurn),
-                            None => agent.run(&mut session, to_content(req.prompt)).await,
+                            Some((name, args))
+                                if session.commands.iter().any(|c| c.name == name) =>
+                            {
+                                agent.command(&session, name, &args).await;
+                                Ok(provider::StopReason::EndTurn)
+                            }
+                            _ => {
+                                agent
+                                    .run(&mut session, to_content(req.prompt.clone()))
+                                    .await
+                            }
                         }
                     };
                     match Abortable::new(turn, registration).await {
@@ -232,13 +253,14 @@ impl Frontend for AcpFrontend {
     }
 }
 
-/// `/compact [focus]` -> `Some(focus)`.
-fn compact_command(prompt: &[ContentBlock]) -> Option<String> {
+/// `/name [args]` -> `Some((name, args))`.
+fn slash_command(prompt: &[ContentBlock]) -> Option<(&str, String)> {
     let [ContentBlock::Text(t)] = prompt else {
         return None;
     };
-    let rest = t.text.trim().strip_prefix("/compact")?;
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_string())
+    let rest = t.text.trim().strip_prefix('/')?;
+    let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    (!name.is_empty()).then(|| (name, args.trim().to_string()))
 }
 
 fn to_content(blocks: Vec<ContentBlock>) -> Vec<Content> {
@@ -345,14 +367,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_compact_command() {
-        let p = |s: &str| compact_command(&[ContentBlock::Text(TextContent::new(s))]);
-        assert_eq!(p("/compact"), Some(String::new()));
+    fn parses_slash_command() {
+        let blocks = |s: &str| [ContentBlock::Text(TextContent::new(s))];
+        let b = blocks("/compact");
+        assert_eq!(slash_command(&b), Some(("compact", String::new())));
+        let b = blocks(" /compact  keep the API notes ");
         assert_eq!(
-            p(" /compact  keep the API notes "),
-            Some("keep the API notes".into())
+            slash_command(&b),
+            Some(("compact", "keep the API notes".into()))
         );
-        assert_eq!(p("/compactly"), None);
-        assert_eq!(p("please /compact"), None);
+        let b = blocks("/compactly");
+        assert_eq!(slash_command(&b), Some(("compactly", String::new())));
+        assert_eq!(slash_command(&blocks("please /compact")), None);
+        assert_eq!(slash_command(&blocks("/")), None);
     }
 }

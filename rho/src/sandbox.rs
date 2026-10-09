@@ -13,6 +13,8 @@ use anyhow::{Context as _, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::extension::{Context, Extension, SessionSetup, SlashCommand};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Access {
@@ -181,6 +183,57 @@ impl Policy {
             "the Bash sandbox is only supported on Linux; set \"disabled\": true in sandbox.json"
         )
     }
+}
+
+/// `/grant-read <path>` and `/grant-write <path>`: the user widens the
+/// session's sandbox. The model is told with the next prompt.
+pub struct GrantCommands;
+
+impl Extension for GrantCommands {
+    async fn session_start(&self, session: &mut SessionSetup) {
+        for (name, what) in [("grant-read", "read"), ("grant-write", "read-write")] {
+            session.commands.push(SlashCommand {
+                name: name.into(),
+                description: format!("Allow Bash {what} access to a file or directory"),
+                hint: Some("path".into()),
+            });
+        }
+    }
+
+    async fn command(&self, ctx: &Context, name: &str, args: &str) -> Option<String> {
+        let (access, what) = match name {
+            "grant-read" => (Access::Read, "read"),
+            "grant-write" => (Access::ReadWrite, "read-write"),
+            _ => return None,
+        };
+        Some(grant(ctx, args, access, what))
+    }
+}
+
+fn grant(ctx: &Context, path: &str, access: Access, what: &str) -> String {
+    if ctx.sandbox().is_none() {
+        return "Bash is not sandboxed in this session.".into();
+    }
+    if path.is_empty() {
+        return format!(
+            "Usage: /grant-{} <path>",
+            if access == Access::Read {
+                "read"
+            } else {
+                "write"
+            }
+        );
+    }
+    let path = match ctx.cwd().join(path).canonicalize() {
+        Ok(p) => p,
+        Err(e) => return format!("Cannot grant {path}: {e}"),
+    };
+    ctx.grant(&path, access);
+    ctx.send(
+        format!("The user granted Bash {what} access to {}.", path.display()),
+        false,
+    );
+    format!("Granted {what} access to {}.", path.display())
 }
 
 #[cfg(test)]

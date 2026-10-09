@@ -11,8 +11,8 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::extension::{
-    Context, Decision, DynExtension, Frontend, PromptSetup, SessionSetup, Settle, ToolCall,
-    ToolOutput, TurnEnd,
+    Context, Decision, DynExtension, Frontend, PromptSetup, SessionSetup, Settle, SlashCommand,
+    ToolCall, ToolOutput, TurnEnd,
 };
 use crate::provider::{
     Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, Usage,
@@ -73,6 +73,8 @@ pub struct Session {
     pub ctx: Context,
     pub tools: Vec<Arc<dyn DynTool>>,
     pub system: String,
+    /// Slash commands registered by extensions.
+    pub commands: Vec<SlashCommand>,
     pub history: Vec<Message>,
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
@@ -130,6 +132,7 @@ impl Agent {
             ctx: ctx.clone(),
             tools: self.tools.clone(),
             system,
+            commands: vec![],
         };
         for ext in &self.extensions {
             ext.session_start(&mut setup).await;
@@ -138,10 +141,23 @@ impl Agent {
             ctx,
             tools: setup.tools,
             system: setup.system,
+            commands: setup.commands,
             history: vec![],
             last_request: None,
             extensions: self.extensions.clone(),
         }
+    }
+
+    /// Runs an extension's slash command and shows its reply. Returns `false`
+    /// if no extension handled it.
+    pub async fn command(&self, session: &Session, name: &str, args: &str) -> bool {
+        for ext in &self.extensions {
+            if let Some(reply) = ext.command(&session.ctx, name, args).await {
+                session.ctx.emit(AgentEvent::Text(&reply));
+                return true;
+            }
+        }
+        false
     }
 
     /// Runs a turn for messages sent with `trigger_turn` while idle.

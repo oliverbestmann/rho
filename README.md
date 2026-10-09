@@ -94,7 +94,9 @@ stops rho at startup:
 `"disabled": true` runs Bash unsandboxed. During a session the model can
 ask for more with the `RequestAccess` tool; the user approves via ACP
 `request_permission` (the CLI always denies) and the grant lasts for the
-session. Extensions can use `ctx.grant` / `ctx.set_sandbox`. `Read` and
+session. The `GrantCommands` extension (enabled in the `rho` binary) adds
+`/grant-read <path>` and `/grant-write <path>` for the user; the model is
+told about the grant with the next prompt. Extensions can use `ctx.grant` / `ctx.set_sandbox`. `Read` and
 `Write` run in-process and are not restricted.
 
 ## Extensions
@@ -137,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
 | `tool_result(&ToolCall, &mut ToolOutput)` | `tool_result` | rewrite output |
 | `turn_end(&TurnEnd)` | `turn_end` | observe content, results, usage |
 | `before_settle(&Settle) -> Option<String>` | `agent_before_settle` / `agent_settled` | continue the run with a message |
+| `command(name, args) -> Option<String>` | `registerCommand` | handle a `/name` the extension pushed to `SessionSetup::commands` (advertised over ACP); the reply goes to the user only |
 
 `Context` is passed to hooks and tools and can be cloned into background tasks:
 

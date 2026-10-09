@@ -83,6 +83,18 @@ pub trait Extension: Send + Sync {
     ) -> impl Future<Output = Option<String>> + Send {
         async { None }
     }
+
+    /// The user ran `/name args` for a command this extension added to
+    /// `SessionSetup::commands`. Return the reply shown to the user, or
+    /// `None` if the command is not this extension's. Not sent to the model.
+    fn command(
+        &self,
+        _ctx: &Context,
+        _name: &str,
+        _args: &str,
+    ) -> impl Future<Output = Option<String>> + Send {
+        async { None }
+    }
 }
 
 /// Object-safe form of [`Extension`], implemented for every extension.
@@ -114,6 +126,12 @@ pub trait DynExtension: Send + Sync {
         &'a self,
         ctx: &'a Context,
         settle: &'a Settle<'_>,
+    ) -> BoxFuture<'a, Option<String>>;
+    fn command<'a>(
+        &'a self,
+        ctx: &'a Context,
+        name: &'a str,
+        args: &'a str,
     ) -> BoxFuture<'a, Option<String>>;
 }
 
@@ -163,12 +181,31 @@ impl<T: Extension> DynExtension for T {
     ) -> BoxFuture<'a, Option<String>> {
         Box::pin(Extension::before_settle(self, ctx, settle))
     }
+    fn command<'a>(
+        &'a self,
+        ctx: &'a Context,
+        name: &'a str,
+        args: &'a str,
+    ) -> BoxFuture<'a, Option<String>> {
+        Box::pin(Extension::command(self, ctx, name, args))
+    }
 }
 
 pub struct SessionSetup {
     pub ctx: Context,
     pub tools: Vec<Arc<dyn DynTool>>,
     pub system: String,
+    /// Slash commands to offer the user; handled by `Extension::command`.
+    pub commands: Vec<SlashCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlashCommand {
+    /// Without the slash, e.g. `grant-read`.
+    pub name: String,
+    pub description: String,
+    /// Shown as a placeholder for the arguments; `None` takes no arguments.
+    pub hint: Option<String>,
 }
 
 pub struct PromptSetup {

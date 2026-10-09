@@ -543,3 +543,37 @@ async fn stop_while_idle_does_not_affect_the_next_run() {
         .unwrap();
     assert_eq!(stop, StopReason::EndTurn);
 }
+
+#[tokio::test]
+async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
+    let cwd = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let provider = Scripted::new(vec![vec![text("ok")]]);
+    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    agent.extensions = vec![Arc::new(rho::sandbox::GrantCommands)];
+    let (mut session, log) = common::session(&agent, cwd.path()).await;
+    let names: Vec<_> = session.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["grant-read", "grant-write"]);
+
+    let path = other.path().canonicalize().unwrap();
+    assert!(
+        agent
+            .command(&session, "grant-write", path.to_str().unwrap())
+            .await
+    );
+    assert!(!agent.command(&session, "nope", "").await);
+    let rule = rho::sandbox::Rule {
+        path: path.clone(),
+        access: rho::sandbox::Access::ReadWrite,
+    };
+    assert!(session.ctx.sandbox().unwrap().rules.contains(&rule));
+    assert!(log.lines().iter().any(|l| l.contains("Granted read-write")));
+
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    let request = &provider.requests.lock().unwrap()[0];
+    let sent = format!("{:?}", last_user(request).content);
+    assert!(sent.contains("granted Bash read-write access"), "{sent}");
+}
