@@ -70,7 +70,7 @@ impl Tool for AskUserQuestion {
         ToolSpec {
             name: NAME.into(),
             description: "Ask the user 1-4 structured multiple-choice questions when requirements are ambiguous or a decision is needed. \
-                Each question has 2-4 options; the user can always type their own answer instead. \
+                Each question has 2-4 options; the user can always type their own answer or add a note to their pick. \
                 Use multiSelect when several answers are valid. \
                 Group all questions into one call instead of calling it back-to-back. \
                 If you recommend an option, put it first and append \"(Recommended)\" to its label.".into(),
@@ -99,13 +99,7 @@ impl Tool for AskUserQuestion {
             .questions
             .iter()
             .enumerate()
-            .map(|(i, q)| {
-                let (answer, preview) = answer(q, i, &answers);
-                match preview {
-                    Some(p) => format!("\"{}\"=\"{answer}\". selected preview: {p}.", q.question),
-                    None => format!("\"{}\"=\"{answer}\".", q.question),
-                }
-            })
+            .map(|(i, q)| answer(q, i, &answers))
             .collect();
         Ok(format!(
             "User has answered your questions: {} You can now continue with the user's answers in mind.",
@@ -184,13 +178,15 @@ fn form(questions: &[Question]) -> Form {
                     .collect(),
                 multiple: q.multi_select,
             },
-            // The text field is the alternative.
+            // The text field can stand alone.
             required: false,
         });
         fields.push(Field {
             key: text_key(i),
-            title: format!("{}: your own answer", q.header),
-            description: Some("Optional. Replaces the selection above.".into()),
+            title: format!("{}: your own answer or a note", q.header),
+            description: Some(
+                "Optional. Your own answer, or a note sent along with the selection above.".into(),
+            ),
             kind: FieldKind::Text,
             required: false,
         });
@@ -206,20 +202,18 @@ fn form(questions: &[Question]) -> Form {
     }
 }
 
-/// The user's answer to question `i`, plus the preview of the picked option.
-/// Text beats the selection.
-fn answer(q: &Question, i: usize, answers: &rho::extension::Answers) -> (String, Option<String>) {
+/// The user's answer to question `i` as a line for the model: the picked
+/// options (with the preview of a single pick) and any typed text. Text alone
+/// is the answer; text next to a pick is a note on it.
+fn answer(q: &Question, i: usize, answers: &rho::extension::Answers) -> String {
     let text = answers
         .get(&text_key(i))
         .and_then(|v| v.first())
         .map(|t| t.trim())
         .filter(|t| !t.is_empty());
-    if let Some(text) = text {
-        return (text.to_string(), None);
-    }
     let picked = answers.get(&pick_key(i)).cloned().unwrap_or_default();
     if picked.is_empty() {
-        return ("(no answer)".into(), None);
+        return format!("\"{}\"=\"{}\".", q.question, text.unwrap_or("(no answer)"));
     }
     // Only a single pick has a preview worth repeating.
     let preview = match picked.as_slice() {
@@ -230,7 +224,14 @@ fn answer(q: &Question, i: usize, answers: &rho::extension::Answers) -> (String,
             .and_then(|o| o.preview.clone()),
         _ => None,
     };
-    (picked.join(", "), preview)
+    let mut line = format!("\"{}\"=\"{}\".", q.question, picked.join(", "));
+    if let Some(p) = preview {
+        line.push_str(&format!(" selected preview: {p}."));
+    }
+    if let Some(t) = text {
+        line.push_str(&format!(" user notes: \"{t}\"."));
+    }
+    line
 }
 
 /// The questions as markdown for the tool call, instead of the raw JSON.
@@ -356,20 +357,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_text_beats_the_selection() {
+    async fn typed_text_goes_along_with_the_selection() {
         let (_, ctx) = ctx(answers(&[
             ("q0", &["Postgres"]),
-            ("q0_text", &["  DuckDB, why not  "]),
+            ("q0_text", &["  but maybe DuckDB  "]),
+            ("q1_text", &["none"]),
         ]));
+        let out = AskUserQuestion.run(input(), &ctx).await.unwrap();
+        assert_eq!(
+            out.output,
+            "User has answered your questions: \"Which database?\"=\"Postgres\". selected preview: CREATE TABLE t ();. \
+             user notes: \"but maybe DuckDB\". \"Which features?\"=\"none\". \
+             You can now continue with the user's answers in mind."
+        );
+    }
+
+    #[tokio::test]
+    async fn unanswered_questions_are_marked() {
+        let (_, ctx) = ctx(answers(&[("q0", &["SQLite"])]));
         let out = AskUserQuestion.run(input(), &ctx).await.unwrap();
         assert!(
             out.output
-                .contains("\"Which database?\"=\"DuckDB, why not\"."),
+                .contains("\"Which database?\"=\"SQLite\". \"Which features?\"=\"(no answer)\"."),
             "{}",
             out.output
         );
-        assert!(!out.output.contains("preview"));
-        assert!(out.output.contains("\"Which features?\"=\"(no answer)\"."));
     }
 
     #[tokio::test]

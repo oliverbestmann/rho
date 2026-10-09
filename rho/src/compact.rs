@@ -166,6 +166,7 @@ fn serialize(history: &[Message]) -> String {
         for block in &msg.content {
             match (msg.role, block) {
                 (Role::User, Content::Text { text }) => parts.push(format!("[User]: {text}")),
+                (Role::User, Content::Image { .. }) => parts.push("[User]: [image]".into()),
                 (Role::Assistant, Content::Text { text }) => {
                     parts.push(format!("[Assistant]: {text}"))
                 }
@@ -216,6 +217,7 @@ mod tests {
                     tool_use_id: "1".into(),
                     content: "SECRET OUTPUT".into(),
                     is_error: false,
+                    images: vec![],
                 }],
             },
         ];

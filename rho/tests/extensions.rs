@@ -146,12 +146,14 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
             Content::ToolResult {
                 tool_use_id: "b".into(),
                 content: "no bash".into(),
-                is_error: true
+                is_error: true,
+                images: vec![],
             },
             Content::ToolResult {
                 tool_use_id: "e".into(),
                 content: "changed (checked)".into(),
-                is_error: false
+                is_error: false,
+                images: vec![],
             },
         ]
     );
@@ -512,12 +514,14 @@ async fn stop_in_tool_call_skips_the_rest_and_keeps_history_valid() {
             Content::ToolResult {
                 tool_use_id: "a".into(),
                 content: "blocked".into(),
-                is_error: true
+                is_error: true,
+                images: vec![],
             },
             Content::ToolResult {
                 tool_use_id: "b".into(),
                 content: "skipped: run stopped".into(),
-                is_error: true
+                is_error: true,
+                images: vec![],
             },
         ]
     );

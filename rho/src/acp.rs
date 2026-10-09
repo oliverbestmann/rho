@@ -11,10 +11,11 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
     Cost, CreateElicitationRequest, Diff, ElicitationAction, ElicitationContentValue,
     ElicitationFormMode, ElicitationSchema, ElicitationSessionScope, EmbeddedResourceResource,
-    EnumOption, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, Meta, MultiSelectPropertySchema,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
+    EnumOption, ImageContent, Implementation, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, Meta,
+    MultiSelectPropertySchema, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
     ResumeSessionResponse, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
     SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionId, SessionInfo as AcpSessionInfo, SessionInfoUpdate,
@@ -28,7 +29,7 @@ use futures::future::{AbortHandle, Abortable};
 
 use crate::agent::{Agent, AgentEvent, Session};
 use crate::extension::{Answers, BoxFuture, Context, Field, FieldKind, Form, FormReply, Frontend};
-use crate::provider::{self, Content, Role, Thinking, Usage};
+use crate::provider::{self, Content, ImageSource, Role, Thinking, Usage};
 use crate::store::Store;
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
@@ -117,6 +118,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         .agent_capabilities(
                             AgentCapabilities::new()
                                 .load_session(saved)
+                                .prompt_capabilities(PromptCapabilities::new().image(true))
                                 .session_capabilities(sessions),
                         )
                         .agent_info(Implementation::new("rho", env!("CARGO_PKG_VERSION"))),
@@ -148,9 +150,14 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                     };
                     let (options, commands) =
                         (config_options(&agent, &session), commands(&session));
+                    let (ctx, dirs) = (session.ctx.clone(), session.dirs_notice());
                     register(&agent, &state, &cx, &sid, session)?;
                     responder
                         .respond(NewSessionResponse::new(sid.clone()).config_options(options))?;
+                    // After the response: before it the client does not know the session.
+                    if let Some(dirs) = dirs {
+                        ctx.notify("Additional directories", &dirs, false);
+                    }
                     send_commands(&cx, &sid, commands)
                 })
             },
@@ -268,11 +275,10 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                                 agent.command(&session, name, &args).await;
                                 Ok(provider::StopReason::EndTurn)
                             }
-                            _ => {
-                                agent
-                                    .run(&mut session, to_content(req.prompt.clone()))
-                                    .await
-                            }
+                            _ => match to_content(req.prompt.clone()) {
+                                Ok(content) => agent.run(&mut session, content).await,
+                                Err(e) => Err(e),
+                            },
                         }
                     };
                     let result = Abortable::new(turn, registration).await;
@@ -413,20 +419,37 @@ async fn open_stored(
     additional_dirs: Vec<PathBuf>,
     replay: bool,
 ) -> anyhow::Result<(Vec<SessionConfigOption>, Vec<AvailableCommand>)> {
-    let session = match state.session(sid) {
-        Some(session) => session,
+    // An open session takes the new directories after the replay, so the
+    // notice follows the history.
+    let (session, dirs) = match state.session(sid) {
+        Some(session) => (session, Some(additional_dirs)),
         None => {
             let frontend = frontend(cx, sid, state, &cwd);
             let session = agent
-                .resume_session(&sid.0, cwd, additional_dirs, frontend)
+                .resume_session(&sid.0, &cwd, additional_dirs, frontend)
                 .await?;
-            register(agent, state, cx, sid, session)?
+            (register(agent, state, cx, sid, session)?, None)
         }
     };
-    let session = session.lock().await;
+    let mut session = session.lock().await;
+    if session.ctx.cwd() != cwd {
+        anyhow::bail!(
+            "session {} belongs to {}",
+            sid.0,
+            session.ctx.cwd().display()
+        );
+    }
     if replay {
         replay_history(cx, sid, &session)?;
     }
+    if let Some(dirs) = dirs
+        && agent.set_additional_dirs(&mut session, dirs)
+    {
+        session.save().await;
+    }
+    // A new connection has not seen it; the frontend also needs it to
+    // republish on a model switch.
+    session.emit_usage();
     Ok((config_options(agent, &session), commands(&session)))
 }
 
@@ -439,10 +462,17 @@ fn replay_history(
 ) -> Result<(), Error> {
     let ctx = &session.ctx;
     for msg in &session.history {
-        let mut user = vec![];
+        let mut user: Vec<ContentBlock> = vec![];
         for block in &msg.content {
             match block {
-                Content::Text { text } if msg.role == Role::User => user.push(text.as_str()),
+                Content::Text { text } if msg.role == Role::User => match user.last_mut() {
+                    Some(ContentBlock::Text(last)) => {
+                        last.text.push_str("\n\n");
+                        last.text.push_str(text);
+                    }
+                    _ => user.push(text.as_str().into()),
+                },
+                Content::Image { source } => user.push(image_block(source)),
                 Content::Text { text } => ctx.emit(AgentEvent::Text(text)),
                 Content::Thinking { thinking, .. } => ctx.emit(AgentEvent::Thinking(thinking)),
                 Content::ToolUse { id, name, input } => {
@@ -462,21 +492,21 @@ fn replay_history(
                     tool_use_id,
                     content,
                     is_error,
+                    images,
                 } => ctx.emit(AgentEvent::ToolEnd {
                     id: tool_use_id,
                     output: content,
                     is_error: *is_error,
                     diff: None,
+                    images,
                 }),
                 Content::RedactedThinking { .. } => {}
             }
         }
-        if !user.is_empty() {
+        for block in user {
             cx.send_notification(SessionNotification::new(
                 sid.clone(),
-                SessionUpdate::UserMessageChunk(ContentChunk::new(
-                    user.join("\n\n").as_str().into(),
-                )),
+                SessionUpdate::UserMessageChunk(ContentChunk::new(block)),
             ))?;
         }
     }
@@ -883,23 +913,43 @@ fn slash_command(prompt: &[ContentBlock]) -> Option<(&str, String)> {
     (!name.is_empty()).then(|| (name, args.trim().to_string()))
 }
 
-fn to_content(blocks: Vec<ContentBlock>) -> Vec<Content> {
-    blocks
-        .into_iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text(t) => Some(Content::text(t.text)),
-            ContentBlock::ResourceLink(l) => Some(Content::text(format!("@{}", l.uri))),
+/// The prompt for the model. Fails on an image the model would reject, so
+/// it never gets into the history.
+fn to_content(blocks: Vec<ContentBlock>) -> anyhow::Result<Vec<Content>> {
+    let image = |media_type: String, data: String| -> anyhow::Result<Content> {
+        let source = ImageSource::Base64 { media_type, data };
+        source.check()?;
+        Ok(Content::Image { source })
+    };
+    let mut content = vec![];
+    for b in blocks {
+        content.push(match b {
+            ContentBlock::Text(t) => Content::text(t.text),
+            ContentBlock::Image(i) => image(i.mime_type, i.data)?,
+            ContentBlock::ResourceLink(l) => Content::text(format!("@{}", l.uri)),
             ContentBlock::Resource(r) => match r.resource {
-                EmbeddedResourceResource::TextResourceContents(t) => Some(Content::text(format!(
-                    "<file uri=\"{}\">\n{}\n</file>",
-                    t.uri, t.text
-                ))),
-                _ => None,
+                EmbeddedResourceResource::TextResourceContents(t) => {
+                    Content::text(format!("<file uri=\"{}\">\n{}\n</file>", t.uri, t.text))
+                }
+                EmbeddedResourceResource::BlobResourceContents(b)
+                    if b.mime_type
+                        .as_deref()
+                        .is_some_and(|m| m.starts_with("image/")) =>
+                {
+                    image(b.mime_type.unwrap_or_default(), b.blob)?
+                }
+                _ => continue,
             },
-            // We advertise no image/audio capability.
-            _ => None,
-        })
-        .collect()
+            // We advertise no audio capability.
+            _ => continue,
+        });
+    }
+    Ok(content)
+}
+
+fn image_block(source: &ImageSource) -> ContentBlock {
+    let ImageSource::Base64 { media_type, data } = source;
+    ContentBlock::Image(ImageContent::new(data.clone(), media_type.clone()))
 }
 
 /// How a tool call is shown besides its title.
@@ -1041,6 +1091,7 @@ fn to_update(
             output,
             is_error,
             diff,
+            images,
         } => {
             let fields = ToolCallUpdateFields::new().status(status(is_error));
             if let Some(Shown::Terminal { .. }) = shown {
@@ -1063,6 +1114,7 @@ fn to_update(
                 content.push(Diff::new(&d.path, &d.new).old_text(d.old.clone()).into());
             }
             content.push(output.into());
+            content.extend(images.iter().map(|i| image_block(i).into()));
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 id.to_string(),
                 fields.content(content),
@@ -1122,6 +1174,7 @@ mod tests {
                 output: "ok",
                 is_error: false,
                 diff: Some(&diff),
+                images: &[],
             },
             None,
         );
@@ -1130,6 +1183,28 @@ mod tests {
             json!({"type": "diff", "path": "/w/f.txt", "oldText": "a\n", "newText": "b\n"})
         );
         assert_eq!(wire["content"][1]["content"]["text"], "ok");
+    }
+
+    #[test]
+    fn tool_end_shows_images_after_the_output() {
+        let images = [crate::provider::ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        }];
+        let wire = update(
+            AgentEvent::ToolEnd {
+                id: "t1",
+                output: "pic.png (image/png, 1 KB)",
+                is_error: false,
+                diff: None,
+                images: &images,
+            },
+            None,
+        );
+        assert_eq!(
+            wire["content"][1],
+            json!({"type": "content", "content": {"type": "image", "mimeType": "image/png", "data": "AAAA"}})
+        );
     }
 
     #[test]
@@ -1154,6 +1229,7 @@ mod tests {
             output: "out",
             is_error: false,
             diff: None,
+            images: &[],
         };
         let wire = update(end, Some(&shown));
         assert_eq!(wire["content"][0]["content"]["text"], "```sh\nls\n```");
@@ -1203,6 +1279,7 @@ mod tests {
             output: "boom\n[exit status: 3]",
             is_error: true,
             diff: None,
+            images: &[],
         };
         let wire = update(end, Some(&shown));
         assert_eq!(wire["status"], "failed");

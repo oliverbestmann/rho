@@ -24,6 +24,10 @@ pub enum Content {
     Text {
         text: String,
     },
+    /// An image from the user, e.g. pasted into the ACP client.
+    Image {
+        source: ImageSource,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -34,6 +38,10 @@ pub enum Content {
         content: String,
         #[serde(default)]
         is_error: bool,
+        /// Sent after `content`. Not in the Anthropic format: providers
+        /// translate results with images (see `anthropic::build_body`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageSource>,
     },
     /// Must be sent back unchanged (with signature) in later requests.
     Thinking {
@@ -48,6 +56,54 @@ pub enum Content {
 impl Content {
     pub fn text(text: impl Into<String>) -> Self {
         Content::Text { text: text.into() }
+    }
+
+    /// A base64 image; see `ImageSource::check` for what models accept.
+    pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Content::Image {
+            source: ImageSource::Base64 {
+                media_type: media_type.into(),
+                data: data.into(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 { media_type: String, data: String },
+}
+
+impl ImageSource {
+    /// Media types the Anthropic API accepts.
+    pub const MEDIA_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+    /// Largest image the Anthropic API accepts, in decoded bytes.
+    pub const MAX_BYTES: usize = 5 * 1024 * 1024;
+
+    /// Fails if a provider would reject the image. A rejected image in the
+    /// history fails every later request of the session, so prompts are
+    /// checked before they are added.
+    pub fn check(&self) -> Result<()> {
+        use base64::Engine;
+        let ImageSource::Base64 { media_type, data } = self;
+        if !Self::MEDIA_TYPES.contains(&media_type.as_str()) {
+            anyhow::bail!(
+                "unsupported image type {media_type:?}, expected one of {}",
+                Self::MEDIA_TYPES.join(", ")
+            );
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .context("image is not valid base64")?;
+        if bytes.len() > Self::MAX_BYTES {
+            anyhow::bail!(
+                "image is {:.1} MB, the limit is {} MB",
+                bytes.len() as f64 / (1024.0 * 1024.0),
+                Self::MAX_BYTES / (1024 * 1024)
+            );
+        }
+        Ok(())
     }
 }
 
@@ -346,6 +402,33 @@ mod tests {
                 cache_write: 2
             }
         );
+    }
+
+    #[test]
+    fn images_use_the_anthropic_wire_format() {
+        assert_eq!(
+            serde_json::to_value(Content::image("image/png", "AAAA")).unwrap(),
+            serde_json::json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+            })
+        );
+    }
+
+    #[test]
+    fn image_checks() {
+        let source = |media_type: &str, data: &str| ImageSource::Base64 {
+            media_type: media_type.into(),
+            data: data.into(),
+        };
+        assert!(source("image/png", "iVBORw0K").check().is_ok());
+        let err = |s: ImageSource| s.check().unwrap_err().to_string();
+        assert!(err(source("image/tiff", "AAAA")).contains("unsupported image type"));
+        assert!(err(source("image/png", "not base64!")).contains("base64"));
+        use base64::Engine;
+        let big =
+            base64::engine::general_purpose::STANDARD.encode(vec![0u8; ImageSource::MAX_BYTES + 1]);
+        assert!(err(source("image/png", &big)).contains("limit is 5 MB"));
     }
 
     #[test]

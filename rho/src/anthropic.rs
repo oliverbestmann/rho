@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::AuthStore;
 use crate::provider::{
-    Content, Event, Message, ModelInfo, Price, Provider, Request, Role, StopReason, Thinking,
-    ToolSpec, Usage,
+    Content, Event, ImageSource, Message, ModelInfo, Price, Provider, Request, Role, StopReason,
+    Thinking, ToolSpec, Usage,
 };
 
 /// Claude Code version we claim to be; keep in sync with pi-ai.
@@ -253,7 +253,56 @@ enum SystemBlock<'a> {
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: Role,
-    content: Vec<Cached<&'a Content>>,
+    content: Vec<Cached<WireBlock<'a>>>,
+}
+
+/// A block as the API wants it: `Content` serializes directly, except tool
+/// results with images, whose content becomes a list of blocks.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireBlock<'a> {
+    Direct(&'a Content),
+    ToolResult(ToolResultBlocks<'a>),
+}
+
+impl<'a> From<&'a Content> for WireBlock<'a> {
+    fn from(c: &'a Content) -> Self {
+        match c {
+            Content::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                images,
+            } if !images.is_empty() => {
+                // Text blocks must not be empty.
+                let text = (!content.is_empty()).then(|| ResultPart::Text { text: content });
+                WireBlock::ToolResult(ToolResultBlocks {
+                    tool_use_id,
+                    content: text
+                        .into_iter()
+                        .chain(images.iter().map(|source| ResultPart::Image { source }))
+                        .collect(),
+                    is_error: *is_error,
+                })
+            }
+            c => WireBlock::Direct(c),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename = "tool_result")]
+struct ToolResultBlocks<'a> {
+    tool_use_id: &'a str,
+    content: Vec<ResultPart<'a>>,
+    is_error: bool,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResultPart<'a> {
+    Text { text: &'a str },
+    Image { source: &'a ImageSource },
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -305,7 +354,7 @@ pub fn build_body<'a>(request: &'a Request, billing: Option<&'a str>) -> Body<'a
         .iter()
         .map(|m: &Message| WireMessage {
             role: m.role,
-            content: m.content.iter().map(Cached::new).collect(),
+            content: m.content.iter().map(|c| Cached::new(c.into())).collect(),
         })
         .collect();
     if let Some(last) = messages.last_mut().filter(|m| m.role == Role::User) {
@@ -682,6 +731,7 @@ mod tests {
                         tool_use_id: "t1".into(),
                         content: "ok".into(),
                         is_error: false,
+                        images: vec![],
                     }],
                 },
             ],
@@ -739,6 +789,38 @@ mod tests {
         assert!(marked(&messages[2]["content"][0]));
         // Anthropic allows at most 4 breakpoints.
         assert_eq!(body.to_string().matches("cache_control").count(), 3);
+    }
+
+    #[test]
+    fn tool_results_with_images_become_block_lists() {
+        let mut req = request("claude-sonnet-4-6", Thinking::Off);
+        let plain = wire(&req)["messages"][2]["content"][0].clone();
+        assert_eq!(
+            plain,
+            json!({"type": "tool_result", "tool_use_id": "t1", "content": "ok", "is_error": false,
+                   "cache_control": {"type": "ephemeral"}})
+        );
+
+        let Content::ToolResult { images, .. } = &mut req.messages[2].content[0] else {
+            unreachable!()
+        };
+        images.push(ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        });
+        assert_eq!(
+            wire(&req)["messages"][2]["content"][0],
+            json!({
+                "type": "tool_result",
+                "tool_use_id": "t1",
+                "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+                ],
+                "is_error": false,
+                "cache_control": {"type": "ephemeral"},
+            })
+        );
     }
 
     #[test]

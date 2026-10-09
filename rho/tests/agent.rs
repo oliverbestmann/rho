@@ -79,7 +79,7 @@ async fn agent_runs_tools_and_feeds_results_back() {
     // Second request carries the assistant tool call and its result.
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].tools.len(), 5);
+    assert_eq!(requests[0].tools.len(), 6);
     let msgs = &requests[1].messages;
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[1].role, Role::Assistant);
@@ -97,7 +97,8 @@ async fn agent_runs_tools_and_feeds_results_back() {
         vec![Content::ToolResult {
             tool_use_id: "t1".into(),
             content: "from-tool\n".into(),
-            is_error: false
+            is_error: false,
+            images: vec![],
         }]
     );
 
@@ -111,7 +112,11 @@ async fn agent_runs_tools_and_feeds_results_back() {
 
 #[tokio::test]
 async fn usage_report_shows_cache_details() {
-    let agent = Agent::new(Scripted::new(tool_then_answer()), "m", rho::tools::builtin());
+    let agent = Agent::new(
+        Scripted::new(tool_then_answer()),
+        "m",
+        rho::tools::builtin(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let (mut session, _log) = common::session(&agent, dir.path()).await;
     assert!(session.usage_report().contains("No requests yet."));

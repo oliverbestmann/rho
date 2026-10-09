@@ -20,7 +20,8 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use crate::provider::{Content, Message, Role, Thinking, Usage};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE sessions (
     id TEXT NOT NULL PRIMARY KEY CHECK (id <> ''),
     cwd TEXT NOT NULL CHECK (cwd <> ''),
@@ -57,10 +58,23 @@ CREATE TABLE messages (
 ) STRICT;
 
 CREATE INDEX messages_by_epoch ON messages (session_id, epoch, seq);
-"#];
+"#,
+    r#"
+-- The latest request, for the context in use.
+ALTER TABLE sessions ADD COLUMN last_input_tokens INTEGER NOT NULL DEFAULT 0
+    CHECK (last_input_tokens >= 0);
+ALTER TABLE sessions ADD COLUMN last_output_tokens INTEGER NOT NULL DEFAULT 0
+    CHECK (last_output_tokens >= 0);
+ALTER TABLE sessions ADD COLUMN last_cache_read_tokens INTEGER NOT NULL DEFAULT 0
+    CHECK (last_cache_read_tokens >= 0);
+ALTER TABLE sessions ADD COLUMN last_cache_write_tokens INTEGER NOT NULL DEFAULT 0
+    CHECK (last_cache_write_tokens >= 0);
+"#,
+];
 
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
-    output_tokens, cache_read_tokens, cache_write_tokens, cost, epoch, created_at, updated_at";
+    output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
+    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, created_at, updated_at";
 
 /// A session database. Cheap to clone; clones share the connection.
 #[derive(Clone)]
@@ -80,6 +94,8 @@ pub struct SessionInfo {
     pub model: String,
     pub thinking: Thinking,
     pub usage: Usage,
+    /// Usage of the latest request.
+    pub last_usage: Usage,
     pub cost: f64,
     /// Number of compactions.
     pub epoch: i64,
@@ -105,6 +121,7 @@ pub(crate) struct State {
     pub model: String,
     pub thinking: Thinking,
     pub usage: Usage,
+    pub last_usage: Usage,
     pub cost: f64,
 }
 
@@ -326,8 +343,10 @@ impl Store {
             c.execute(
                 "INSERT INTO sessions (id, cwd, additional_dirs, title, model, thinking,
                      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                     cost, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+                     last_input_tokens, last_output_tokens, last_cache_read_tokens,
+                     last_cache_write_tokens, cost, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     ?15, ?16, ?16)
                  ON CONFLICT (id) DO UPDATE SET
                      additional_dirs = excluded.additional_dirs,
                      title = COALESCE(excluded.title, title),
@@ -337,6 +356,10 @@ impl Store {
                      output_tokens = excluded.output_tokens,
                      cache_read_tokens = excluded.cache_read_tokens,
                      cache_write_tokens = excluded.cache_write_tokens,
+                     last_input_tokens = excluded.last_input_tokens,
+                     last_output_tokens = excluded.last_output_tokens,
+                     last_cache_read_tokens = excluded.last_cache_read_tokens,
+                     last_cache_write_tokens = excluded.last_cache_write_tokens,
                      cost = excluded.cost,
                      updated_at = excluded.updated_at",
                 params![
@@ -350,6 +373,10 @@ impl Store {
                     int(s.usage.output)?,
                     int(s.usage.cache_read)?,
                     int(s.usage.cache_write)?,
+                    int(s.last_usage.input)?,
+                    int(s.last_usage.output)?,
+                    int(s.last_usage.cache_read)?,
+                    int(s.last_usage.cache_write)?,
                     s.cost,
                     now,
                 ],
@@ -458,6 +485,12 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
             cache_read: usage("cache_read_tokens")?,
             cache_write: usage("cache_write_tokens")?,
         },
+        last_usage: Usage {
+            input: usage("last_input_tokens")?,
+            output: usage("last_output_tokens")?,
+            cache_read: usage("last_cache_read_tokens")?,
+            cache_write: usage("last_cache_write_tokens")?,
+        },
         cost: r.get("cost")?,
         epoch: r.get("epoch")?,
         created_at: r.get("created_at")?,
@@ -479,6 +512,7 @@ fn plain_text(content: &[Content]) -> String {
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(text.clone()),
+            Content::Image { .. } => Some("[image]".into()),
             Content::ToolUse { name, input, .. } => Some(format!("{name} {input}")),
             _ => None,
         })
@@ -511,6 +545,12 @@ mod tests {
                 cache_read: 3,
                 cache_write: 4,
             },
+            last_usage: Usage {
+                input: 5,
+                output: 6,
+                cache_read: 7,
+                cache_write: 8,
+            },
             cost: 0.5,
         }
     }
@@ -534,6 +574,7 @@ mod tests {
         assert_eq!(loaded.info.thinking, Thinking::Low);
         assert_eq!(loaded.info.additional_dirs, [PathBuf::from("/extra")]);
         assert_eq!(loaded.info.usage.cache_write, 4);
+        assert_eq!(loaded.info.last_usage.cache_write, 8);
 
         assert_eq!(store.next_epoch("s").await.unwrap(), (1, 3));
         store

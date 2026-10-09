@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate, TextContent,
+    ContentBlock, ContentChunk, ImageContent, InitializeRequest, ListSessionsRequest,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate,
+    TextContent,
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use rho::agent::Agent;
@@ -127,6 +128,87 @@ async fn sessions_are_saved_and_resumed() {
 }
 
 #[tokio::test]
+async fn changed_additional_directories_are_announced() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());
+    let provider = Scripted::new(vec![vec![text("Ok."), Event::Done(StopReason::EndTurn)]]);
+    let agent = agent(provider, &db);
+    let (a, b) = (PathBuf::from("/extra/a"), PathBuf::from("/extra/b"));
+
+    let mut session = agent
+        .start_session("s1", &cwd, vec![a.clone()], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    assert_eq!(session.dirs_notice().as_deref(), Some("- /extra/a"));
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    session.save().await;
+    drop(session);
+
+    let notices = async |dirs: Vec<PathBuf>| {
+        let log = Arc::new(common::Log::default());
+        agent
+            .resume_session("s1", &cwd, dirs, log.clone())
+            .await
+            .unwrap()
+            .save()
+            .await;
+        log.lines()
+            .into_iter()
+            .filter(|l| l.contains("Additional directories"))
+            .collect::<Vec<_>>()
+    };
+    // Same directories: nothing to say.
+    assert_eq!(notices(vec![a.clone()]).await, Vec::<String>::new());
+    let changed = notices(vec![a.clone(), b.clone()]).await;
+    assert_eq!(changed.len(), 1);
+    assert!(
+        changed[0].contains("- /extra/a\\n- /extra/b"),
+        "{changed:?}"
+    );
+    let removed = notices(vec![]).await;
+    assert!(removed[0].contains("(none)"), "{removed:?}");
+
+    // An open session: sandbox, prompt and store follow; grants stay.
+    let log = Arc::new(common::Log::default());
+    let mut open = agent
+        .resume_session("s1", &cwd, vec![a.clone()], log.clone())
+        .await
+        .unwrap();
+    let granted = PathBuf::from("/granted");
+    let mut policy = open.ctx.sandbox().unwrap();
+    policy.allow(&granted, rho::sandbox::Access::Read);
+    open.ctx.set_sandbox(Some(policy));
+    open.system += "\n\nfrom an extension";
+
+    assert!(!agent.set_additional_dirs(&mut open, vec![a.clone()]));
+    assert!(agent.set_additional_dirs(&mut open, vec![b.clone()]));
+    let paths: Vec<PathBuf> = open
+        .ctx
+        .sandbox()
+        .unwrap()
+        .rules
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    assert!(paths.contains(&b) && paths.contains(&granted) && paths.contains(&cwd));
+    assert!(!paths.contains(&a), "{paths:?}");
+    assert!(
+        open.system
+            .contains("- /extra/b\n</additional_directories>")
+    );
+    assert!(!open.system.contains("/extra/a"));
+    assert!(open.system.ends_with("from an extension"));
+    assert!(log.lines().iter().any(|l| l.contains("- /extra/b")));
+    open.save().await;
+    let store = open.ctx.store().unwrap().clone();
+    let info = store.session("s1").await.unwrap().unwrap();
+    assert_eq!(info.additional_dirs, [b]);
+}
+
+#[tokio::test]
 async fn compaction_starts_a_new_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("sessions.db");
@@ -200,7 +282,12 @@ async fn acp_lists_and_loads_saved_sessions() {
                     .block_task()
                     .await?
                     .session_id;
-                cx.send_request(prompt(&sid, "hi")).block_task().await?;
+                let mut hi = prompt(&sid, "hi");
+                hi.prompt.push(ContentBlock::Image(ImageContent::new(
+                    "R0lGODlh",
+                    "image/gif",
+                )));
+                cx.send_request(hi).block_task().await?;
                 Ok(sid)
             },
         ),
@@ -252,7 +339,7 @@ async fn acp_lists_and_loads_saved_sessions() {
     .unwrap()
     .unwrap();
 
-    // The replay: the user prompt, the answer around the tool call.
+    // The replay: the user prompt with its image, the answer around the tool call.
     let updates = updates.lock().unwrap();
     let chunks: Vec<String> = updates
         .iter()
@@ -261,21 +348,33 @@ async fn acp_lists_and_loads_saved_sessions() {
                 content: ContentBlock::Text(t),
                 ..
             }) => Some(format!("user: {}", t.text)),
+            SessionUpdate::UserMessageChunk(ContentChunk {
+                content: ContentBlock::Image(i),
+                ..
+            }) => Some(format!("user image: {} {}", i.mime_type, i.data)),
             SessionUpdate::AgentMessageChunk(ContentChunk {
                 content: ContentBlock::Text(t),
                 ..
             }) => Some(format!("agent: {}", t.text)),
             SessionUpdate::ToolCall(t) => Some(format!("tool: {}", t.tool_call_id.0)),
+            SessionUpdate::UsageUpdate(u) => Some(format!(
+                "usage: {} of {}",
+                u.used,
+                u.meta.as_ref().unwrap()["rho"]["session"]["input"]
+            )),
             _ => None,
         })
         .collect();
+    // The stored usage follows the replay: the last request's context, the session total.
     assert_eq!(
         chunks,
         [
             "user: hi",
+            "user image: image/gif R0lGODlh",
             "agent: Let me look.",
             "tool: t1",
             "agent: Done.",
+            "usage: 15 of 10",
             "agent: Again."
         ]
     );

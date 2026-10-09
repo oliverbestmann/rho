@@ -52,6 +52,8 @@ pub enum AgentEvent<'a> {
         output: &'a str,
         is_error: bool,
         diff: Option<&'a Diff>,
+        /// Images the tool returned, see `ToolOutput::images`.
+        images: &'a [crate::provider::ImageSource],
     },
     /// Shown to the user, not sent to the model (from `Context::notify`).
     Notice {
@@ -116,14 +118,24 @@ pub struct Session {
     pub history: Vec<Message>,
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
+    /// The cwd, then the additional directories.
+    roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
     persist: Option<Persist>,
+}
+
+fn notify_dirs_changed(session: &Session) {
+    let text = session.dirs_notice();
+    session.ctx.notify(
+        "Additional directories changed",
+        text.as_deref().unwrap_or("(none)"),
+        false,
+    );
 }
 
 /// How much of a session is in its store.
 struct Persist {
     store: Store,
-    roots: Vec<PathBuf>,
     epoch: i64,
     /// `seq` of `history[0]`.
     base: i64,
@@ -138,6 +150,31 @@ struct Persist {
 }
 
 impl Session {
+    /// Publishes the usage so far (e.g. for a resumed session), if any.
+    pub fn emit_usage(&self) {
+        if self.usage.prompt() + self.usage.output == 0 {
+            return;
+        }
+        self.ctx.emit(AgentEvent::Usage {
+            model: &self.model_spec,
+            usage: self.last_usage,
+            context_window: self.provider.context_window(&self.model),
+            total: self.usage,
+            cost: self.cost,
+        });
+    }
+
+    /// The additional directories as a list for a notice, `None` without any.
+    pub fn dirs_notice(&self) -> Option<String> {
+        let dirs = &self.roots[1..];
+        (!dirs.is_empty()).then(|| {
+            dirs.iter()
+                .map(|d| format!("- {}", d.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
     /// Writes new history and the session state (model, usage, ...) to the
     /// store, if the session has one. A failure is shown to the user once
     /// and does not stop the session.
@@ -160,12 +197,13 @@ impl Session {
         .min(self.history.len());
         let state = State {
             id: id.clone(),
-            cwd: p.roots[0].clone(),
-            additional_dirs: p.roots[1..].to_vec(),
+            cwd: self.roots[0].clone(),
+            additional_dirs: self.roots[1..].to_vec(),
             title: self.ctx.title(),
             model: self.model_spec.clone(),
             thinking: self.thinking,
             usage: self.usage,
+            last_usage: self.last_usage,
             cost: self.cost,
         };
         let messages = self.history[from..].to_vec();
@@ -379,9 +417,13 @@ impl Agent {
         if info.cwd != roots[0] {
             bail!("session {id} belongs to {}", info.cwd.display());
         }
+        let dirs_changed = info.additional_dirs != roots[1..];
         let mut session = self
             .setup(id.into(), roots, frontend, Some(store), true)
             .await;
+        if dirs_changed {
+            notify_dirs_changed(&session);
+        }
         session.ctx.restore_title(info.title);
         if info.model != session.model_spec
             && let Err(e) = self.set_model(&mut session, &info.model)
@@ -394,6 +436,7 @@ impl Agent {
         }
         session.thinking = info.thinking;
         session.usage = info.usage;
+        session.last_usage = info.last_usage;
         session.cost = info.cost;
         let p = session.persist.as_mut().expect("store");
         (p.epoch, p.base, p.created) = (info.epoch, loaded.base, true);
@@ -449,10 +492,10 @@ impl Agent {
             commands: setup.commands,
             history: vec![],
             last_request: None,
+            roots,
             extensions: self.extensions.clone(),
             persist: store.map(|store| Persist {
                 store,
-                roots,
                 epoch: 0,
                 base: 0,
                 saved: 0,
@@ -461,6 +504,45 @@ impl Agent {
                 failed: false,
             }),
         }
+    }
+
+    /// Replaces the additional directories of an open session: its sandbox,
+    /// system prompt (a cold prompt cache) and store. Sandbox access granted
+    /// during the session is kept. Tells the user and returns `true` if they
+    /// changed.
+    pub fn set_additional_dirs(&self, session: &mut Session, dirs: Vec<PathBuf>) -> bool {
+        if session.roots[1..] == dirs[..] {
+            return false;
+        }
+        let mut roots = vec![session.roots[0].clone()];
+        roots.extend(dirs);
+        if let Some(current) = session.ctx.sandbox() {
+            // Rules beyond the old starting policy were granted later.
+            let mut start = self
+                .sandbox
+                .policy(&session.roots)
+                .map(|p| p.rules)
+                .unwrap_or_default();
+            let granted = current.rules.into_iter().filter(|rule| {
+                match start.iter().position(|r| r == rule) {
+                    Some(i) => {
+                        start.remove(i);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            let mut policy = self
+                .sandbox
+                .policy(&roots)
+                .unwrap_or_else(|| crate::sandbox::Policy::base(&roots));
+            policy.rules.extend(granted);
+            session.ctx.set_sandbox(Some(policy));
+        }
+        session.system = crate::prompt::replace_dirs(&session.system, &roots[0], &roots[1..]);
+        session.roots = roots;
+        notify_dirs_changed(session);
+        true
     }
 
     /// Switches the session to `spec` ("provider/model"), for the next run.
@@ -593,7 +675,7 @@ impl Agent {
                     ToolOutput {
                         output: "skipped: run stopped".into(),
                         is_error: true,
-                        diff: None,
+                        ..Default::default()
                     }
                 } else {
                     self.call_tool(session, &mut call).await
@@ -603,6 +685,7 @@ impl Agent {
                     tool_use_id: call.id,
                     content: out.output,
                     is_error: out.is_error,
+                    images: out.images,
                 });
             }
 
@@ -695,7 +778,7 @@ impl Agent {
             Err(e) => ToolOutput {
                 output: format!("{e:#}"),
                 is_error: true,
-                diff: None,
+                ..Default::default()
             },
         };
         for ext in &self.extensions {
@@ -706,6 +789,7 @@ impl Agent {
             output: &out.output,
             is_error: out.is_error,
             diff: out.diff.as_ref(),
+            images: &out.images,
         });
         out
     }

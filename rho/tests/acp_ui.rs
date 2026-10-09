@@ -8,8 +8,8 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     ClientCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAcceptAction, ElicitationCapabilities, ElicitationContentValue,
-    ElicitationFormCapabilities, InitializeRequest, Meta, NewSessionRequest, PromptRequest,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionId,
+    ElicitationFormCapabilities, ImageContent, InitializeRequest, Meta, NewSessionRequest,
+    PromptRequest, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionId,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Client, ConnectionTo, Responder};
@@ -438,6 +438,137 @@ async fn ask_with(form_support: bool, reply: Option<(&'static str, &'static str)
         panic!("no tool result");
     };
     content.clone()
+}
+
+#[tokio::test]
+async fn images_go_to_the_model_and_bad_ones_are_refused() {
+    let scripted = Scripted::new(vec![vec![text("a cat"), Event::Done(StopReason::EndTurn)]]);
+    let agent = agent_with(scripted.clone(), vec![]);
+    // A 1x1 PNG.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    let client =
+        Client
+            .builder()
+            .connect_with(rho::acp::agent(agent), async |cx: ConnectionTo<_>| {
+                let init = cx
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                assert!(init.agent_capabilities.prompt_capabilities.image);
+                let session = cx
+                    .send_request(NewSessionRequest::new(std::env::current_dir().unwrap()))
+                    .block_task()
+                    .await?;
+                let sid = session.session_id;
+
+                // Refused before it reaches the history, so the session goes on.
+                let tiff = PromptRequest::new(
+                    sid.clone(),
+                    vec![ContentBlock::Image(ImageContent::new(PNG, "image/tiff"))],
+                );
+                let err = cx.send_request(tiff).block_task().await.unwrap_err();
+                assert!(
+                    format!("{err:?}").contains("unsupported image type"),
+                    "{err:?}"
+                );
+
+                let prompt = PromptRequest::new(
+                    sid,
+                    vec![
+                        ContentBlock::Text(TextContent::new("what is this?")),
+                        ContentBlock::Image(ImageContent::new(PNG, "image/png")),
+                    ],
+                );
+                cx.send_request(prompt).block_task().await?;
+                Ok(())
+            });
+    timed(client).await;
+
+    let requests = scripted.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].messages[0].content,
+        vec![
+            Content::text("what is this?"),
+            Content::image("image/png", PNG)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn read_image_sends_the_image_to_model_and_client() {
+    use base64::Engine;
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(PNG)
+        .unwrap();
+    std::fs::write(dir.path().join("pic.png"), bytes).unwrap();
+    let scripted = Scripted::new(vec![
+        vec![
+            Event::Block(Content::ToolUse {
+                id: "i1".into(),
+                name: "ReadImage".into(),
+                input: json!({"path": "pic.png"}),
+            }),
+            Event::Done(StopReason::ToolUse),
+        ],
+        vec![text("a dot"), Event::Done(StopReason::EndTurn)],
+    ]);
+    let agent = agent_with(scripted.clone(), rho::tools::builtin());
+    let updates = Updates::default();
+    let record = recording(&updates);
+    let cwd = dir.path().to_path_buf();
+
+    let client = Client
+        .builder()
+        .on_receive_notification(
+            async move |n: SessionNotification, _cx| {
+                record(n);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(rho::acp::agent(agent), async |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await?;
+            cx.send_request(prompt(&session.session_id, "look"))
+                .block_task()
+                .await?;
+            Ok(())
+        });
+    timed(client).await;
+
+    let requests = scripted.requests.lock().unwrap();
+    let Content::ToolResult { images, .. } = &requests[1].messages.last().unwrap().content[0]
+    else {
+        panic!("no tool result");
+    };
+    assert_eq!(
+        images,
+        &[rho::provider::ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: PNG.into()
+        }]
+    );
+
+    let shown = updates
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|u| match u {
+            SessionUpdate::ToolCallUpdate(u) => Some(serde_json::to_value(u).unwrap()),
+            _ => None,
+        })
+        .expect("tool call update");
+    assert_eq!(shown["content"][1]["content"]["type"], "image");
+    assert_eq!(shown["content"][1]["content"]["data"], PNG);
 }
 
 #[tokio::test]

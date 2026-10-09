@@ -118,14 +118,45 @@ pub fn build(
     }
 
     sections.push(("cwd", cwd.display().to_string()));
-    if roots.len() > 1 {
-        let dirs: Vec<String> = roots[1..].iter().map(|r| r.display().to_string()).collect();
-        sections.push(("additional_directories", dirs.join("\n")));
-    }
     for (name, text) in sections {
         prompt += &format!("\n\n<{name}>\n{text}\n</{name}>");
     }
-    prompt
+    prompt + &dirs_section(&roots[1..])
+}
+
+const DIRS_OPEN: &str = "\n\n<additional_directories>\n";
+const DIRS_CLOSE: &str = "\n</additional_directories>";
+
+/// The `<additional_directories>` section, empty without any.
+fn dirs_section(dirs: &[PathBuf]) -> String {
+    if dirs.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = dirs.iter().map(|r| format!("- {}", r.display())).collect();
+    format!(
+        "{DIRS_OPEN}Also part of this workspace, with the same access as the cwd. Relative paths resolve against the cwd, so use absolute paths for these:\n{}{DIRS_CLOSE}",
+        list.join("\n")
+    )
+}
+
+/// Replaces the additional directories in a built prompt `system`. The
+/// section follows `<cwd>`; extensions may have appended more after it.
+pub fn replace_dirs(system: &str, cwd: &Path, dirs: &[PathBuf]) -> String {
+    let section = dirs_section(dirs);
+    if let Some(start) = system.find(DIRS_OPEN)
+        && let Some(len) = system[start..].find(DIRS_CLOSE)
+    {
+        let end = start + len + DIRS_CLOSE.len();
+        return format!("{}{section}{}", &system[..start], &system[end..]);
+    }
+    let cwd = format!("<cwd>\n{}\n</cwd>", cwd.display());
+    match system.find(&cwd) {
+        Some(at) => {
+            let end = at + cwd.len();
+            format!("{}{section}{}", &system[..end], &system[end..])
+        }
+        None => format!("{system}{section}"),
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +205,31 @@ mod tests {
         );
         assert!(p.starts_with("Custom.\n\n<addendum>"), "{p}");
         assert!(!p.contains("<tools>"), "{p}");
+        assert!(!p.contains("<additional_directories>"), "{p}");
+
+        // Additional directories follow the cwd.
+        let roots = [
+            cwd.clone(),
+            PathBuf::from("/extra/one"),
+            PathBuf::from("/extra/two"),
+        ];
+        let p = build(PREAMBLE, &[], None, &roots);
+        let section = p.split("<additional_directories>").nth(1).unwrap();
+        assert!(p.find("<cwd>").unwrap() < p.find("<additional_directories>").unwrap());
+        assert!(section.contains("absolute paths"), "{p}");
+        assert!(
+            section.ends_with("- /extra/one\n- /extra/two\n</additional_directories>"),
+            "{p}"
+        );
+
+        // Replacing them keeps whatever extensions appended.
+        let none = build(PREAMBLE, &[], None, &roots[..1]);
+        let p = p + "\n\nfrom an extension";
+        let removed = replace_dirs(&p, &cwd, &[]);
+        assert_eq!(removed, format!("{none}\n\nfrom an extension"));
+        assert_eq!(replace_dirs(&removed, &cwd, &roots[1..]), p);
+        let one = replace_dirs(&p, &cwd, &roots[2..]);
+        assert!(one.contains("- /extra/two\n</additional_directories>\n\nfrom an extension"));
+        assert!(!one.contains("/extra/one"), "{one}");
     }
 }

@@ -12,7 +12,7 @@ Cargo workspace:
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
 - `rho/src/anthropic.rs` - Anthropic Messages API with Claude Pro/Max subscription shaping
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
-- `rho/src/tools.rs` - `Tool` trait and built-ins: `Read`, `Write`, `Bash`, `RequestAccess`
+- `rho/src/tools.rs` - `Tool` trait and built-ins: `Read`, `ReadImage`, `Write`, `Bash`, `RequestAccess`
 - `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat)
 - `rho/src/extension.rs` - `Extension` hooks, `Context` session handle, `Frontend` trait
@@ -101,7 +101,7 @@ title then).
 
 ## Sandbox
 
-`Bash`, `Read`, `Write` and `Edit` run under Landlock (via the `nono` crate, Linux
+`Bash`, `Read`, `ReadImage`, `Write` and `Edit` run under Landlock (via the `nono` crate, Linux
 only), deny by default. A session starts with system directories (`/nix/store`,
 `/etc`, `/usr`, ...) read-only, a few `/dev` files read-write, and its
 workspace directories read-write: the cwd plus ACP `additionalDirectories`.
@@ -203,6 +203,22 @@ background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
 `BackgroundTaskCancel`: commands run sandboxed in their own process group, the
 result (exit status + last 10 lines) is sent with `trigger_turn`, and running
 tasks are killed when the session ends.
+
+## Images
+
+rho advertises `promptCapabilities.image`, so ACP clients can attach images
+(`image` blocks, or embedded `image/*` blob resources) to prompts. They go to
+the model as Anthropic base64 image blocks. JPEG, PNG, GIF and WebP up to 5 MB
+are accepted. Anything else fails the prompt before it reaches the history,
+because a rejected image in the history would fail every later request.
+Images are saved with the session and replayed by `session/load`; compaction
+and search see them as `[image]`.
+
+The `ReadImage` tool lets the model look at image files. It reads them
+sandboxed like `Read`, detects the type from the file's bytes, and applies the
+same type and 5 MB limits. The image goes back in the `tool_result` (as
+`[text, image]` content blocks) and is shown in the client's tool call card.
+Tools can return images too: set `ToolOutput::images`.
 
 ## Zed
 

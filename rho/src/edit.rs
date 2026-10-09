@@ -73,6 +73,7 @@ impl Tool for Edit {
             output: format!("Successfully replaced {count} block(s) in {}.", i.path),
             is_error: false,
             diff: Some(Diff { path, old, new }),
+            ..Default::default()
         })
     }
 }
