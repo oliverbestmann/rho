@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
-    CancelNotification, ContentBlock, ContentChunk, EmbeddedResourceResource, Implementation,
+    CancelNotification, ContentBlock, ContentChunk, Diff, EmbeddedResourceResource, Implementation,
     InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
@@ -314,7 +314,7 @@ fn to_update(ev: AgentEvent, n: u64) -> SessionUpdate {
         AgentEvent::ToolStart { id, name, input } => {
             let kind = match name {
                 "Read" => ToolKind::Read,
-                "Write" => ToolKind::Edit,
+                "Write" | "Edit" => ToolKind::Edit,
                 "Bash" => ToolKind::Execute,
                 _ => ToolKind::Other,
             };
@@ -329,16 +329,24 @@ fn to_update(ev: AgentEvent, n: u64) -> SessionUpdate {
             id,
             output,
             is_error,
-        } => SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-            id.to_string(),
-            ToolCallUpdateFields::new()
-                .status(if is_error {
-                    ToolCallStatus::Failed
-                } else {
-                    ToolCallStatus::Completed
-                })
-                .content(vec![output.into()]),
-        )),
+            diff,
+        } => {
+            let mut content = vec![];
+            if let Some(d) = diff {
+                content.push(Diff::new(&d.path, &d.new).old_text(d.old.clone()).into());
+            }
+            content.push(output.into());
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                id.to_string(),
+                ToolCallUpdateFields::new()
+                    .status(if is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    })
+                    .content(content),
+            ))
+        }
     }
 }
 
@@ -365,6 +373,30 @@ mod tests {
     use agent_client_protocol::schema::v1::TextContent;
 
     use super::*;
+
+    #[test]
+    fn tool_end_sends_the_diff() {
+        let diff = crate::extension::Diff {
+            path: "/w/f.txt".into(),
+            old: "a\n".into(),
+            new: "b\n".into(),
+        };
+        let update = to_update(
+            AgentEvent::ToolEnd {
+                id: "t1",
+                output: "ok",
+                is_error: false,
+                diff: Some(&diff),
+            },
+            0,
+        );
+        let wire = serde_json::to_value(update).unwrap();
+        assert_eq!(
+            wire["content"][0],
+            serde_json::json!({"type": "diff", "path": "/w/f.txt", "oldText": "a\n", "newText": "b\n"})
+        );
+        assert_eq!(wire["content"][1]["content"]["text"], "ok");
+    }
 
     #[test]
     fn parses_slash_command() {

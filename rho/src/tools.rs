@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::extension::{BoxFuture, Context};
+use crate::extension::{BoxFuture, Context, ToolOutput};
 use crate::provider::ToolSpec;
 use crate::sandbox::Access;
 
@@ -24,20 +24,21 @@ pub const MAX_OUTPUT: usize = 50 * 1024;
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     /// Runs the tool. `Err` is reported to the model as a tool error.
-    fn run(&self, input: Value, ctx: &Context) -> impl Future<Output = Result<String>> + Send;
+    /// Return a `String` with `.into()`, or a `ToolOutput` to attach a diff.
+    fn run(&self, input: Value, ctx: &Context) -> impl Future<Output = Result<ToolOutput>> + Send;
 }
 
 /// Object-safe form of [`Tool`], implemented for every tool.
 pub trait DynTool: Send + Sync {
     fn spec(&self) -> ToolSpec;
-    fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<String>>;
+    fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>>;
 }
 
 impl<T: Tool> DynTool for T {
     fn spec(&self) -> ToolSpec {
         Tool::spec(self)
     }
-    fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<String>> {
+    fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>> {
         Box::pin(Tool::run(self, input, ctx))
     }
 }
@@ -46,16 +47,17 @@ pub fn builtin() -> Vec<Arc<dyn DynTool>> {
     vec![
         Arc::new(Read),
         Arc::new(Write),
+        Arc::new(crate::edit::Edit),
         Arc::new(Bash),
         Arc::new(RequestAccess),
     ]
 }
 
-fn resolve(cwd: &Path, path: &str) -> PathBuf {
+pub(crate) fn resolve(cwd: &Path, path: &str) -> PathBuf {
     cwd.join(path)
 }
 
-fn truncate(mut s: String) -> String {
+pub(crate) fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
         let mut end = MAX_OUTPUT;
         while !s.is_char_boundary(end) {
@@ -114,7 +116,7 @@ impl Tool for Read {
         }
     }
 
-    async fn run(&self, input: Value, ctx: &Context) -> Result<String> {
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         let cwd = ctx.cwd();
         {
             let i: ReadInput = parse(input)?;
@@ -123,7 +125,7 @@ impl Tool for Read {
                 .run_sandboxed(move || std::fs::read_to_string(path))
                 .await?
                 .with_context(|| format!("reading {}", i.path))?;
-            Ok(truncate(text))
+            Ok(truncate(text).into())
         }
     }
 }
@@ -141,7 +143,7 @@ impl Tool for Write {
         }
     }
 
-    async fn run(&self, input: Value, ctx: &Context) -> Result<String> {
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         let cwd = ctx.cwd();
         {
             let i: WriteInput = parse(input)?;
@@ -155,7 +157,7 @@ impl Tool for Write {
             })
             .await?
             .with_context(|| format!("writing {}", i.path))?;
-            Ok(format!("wrote {len} bytes to {}", i.path))
+            Ok(format!("wrote {len} bytes to {}", i.path).into())
         }
     }
 }
@@ -174,7 +176,7 @@ impl Tool for Bash {
         }
     }
 
-    async fn run(&self, input: Value, ctx: &Context) -> Result<String> {
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         let cwd = ctx.cwd();
         {
             let i: BashInput = parse(input)?;
@@ -199,7 +201,7 @@ impl Tool for Bash {
             if !out.status.success() {
                 bail!("{text}\n[{}]", out.status);
             }
-            Ok(text)
+            Ok(text.into())
         }
     }
 }
@@ -225,7 +227,7 @@ impl Tool for RequestAccess {
         }
     }
 
-    async fn run(&self, input: Value, ctx: &Context) -> Result<String> {
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         let i: RequestAccessInput = parse(input)?;
         if ctx.sandbox().is_none() {
             return Ok("This session is not sandboxed; no access needed.".into());
@@ -243,7 +245,7 @@ impl Tool for RequestAccess {
             bail!("the user denied {mode} access to {}", path.display());
         }
         ctx.grant(&path, i.access);
-        Ok(format!("granted {mode} access to {}", path.display()))
+        Ok(format!("granted {mode} access to {}", path.display()).into())
     }
 }
 
@@ -292,7 +294,7 @@ mod tests {
             .run(json!({"path": "a/b.txt"}), &ctx(dir.path()))
             .await
             .unwrap();
-        assert_eq!(out, "hello");
+        assert_eq!(out.output, "hello");
     }
 
     #[tokio::test]
@@ -314,7 +316,7 @@ mod tests {
             .run(json!({"command": "ls"}), &ctx(dir.path()))
             .await
             .unwrap();
-        assert_eq!(out.trim(), "marker");
+        assert_eq!(out.output.trim(), "marker");
 
         let err = Bash
             .run(
@@ -362,8 +364,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&secret).unwrap(), "hidden");
 
         ctx.grant(other.path(), Access::Read);
-        assert_eq!(Bash.run(cat, &ctx).await.unwrap(), "hidden");
-        assert_eq!(Read.run(read, &ctx).await.unwrap(), "hidden");
+        assert_eq!(Bash.run(cat, &ctx).await.unwrap().output, "hidden");
+        assert_eq!(Read.run(read, &ctx).await.unwrap().output, "hidden");
         assert!(Write.run(write.clone(), &ctx).await.is_err());
         let err = Bash.run(touch.clone(), &ctx).await.unwrap_err().to_string();
         assert!(err.contains("Permission denied"), "{err}");

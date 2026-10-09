@@ -48,8 +48,8 @@ impl Tool for Echo {
         }
     }
 
-    async fn run(&self, input: Value, _ctx: &Context) -> Result<String> {
-        Ok(input["text"].as_str().unwrap_or_default().to_string())
+    async fn run(&self, input: Value, _ctx: &Context) -> Result<ToolOutput> {
+        Ok(input["text"].as_str().unwrap_or_default().into())
     }
 }
 
@@ -182,7 +182,7 @@ impl Tool for Later {
         }
     }
 
-    async fn run(&self, _input: Value, ctx: &Context) -> Result<String> {
+    async fn run(&self, _input: Value, ctx: &Context) -> Result<ToolOutput> {
         ctx.send("steer msg", false);
         let ctx = ctx.clone();
         tokio::spawn(async move {

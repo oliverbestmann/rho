@@ -227,10 +227,37 @@ pub enum Decision {
     Block(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// What a tool returns (and what `tool_result` hooks can rewrite).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ToolOutput {
+    /// Sent to the model.
     pub output: String,
     pub is_error: bool,
+    /// A file change to show the user (ACP diff); not sent to the model.
+    pub diff: Option<Diff>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(output: String) -> Self {
+        Self {
+            output,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&str> for ToolOutput {
+    fn from(output: &str) -> Self {
+        output.to_string().into()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Diff {
+    /// Absolute.
+    pub path: PathBuf,
+    pub old: String,
+    pub new: String,
 }
 
 pub struct TurnEnd<'a> {

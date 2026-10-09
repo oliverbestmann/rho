@@ -11,8 +11,8 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::extension::{
-    Context, Decision, DynExtension, Frontend, PromptSetup, SessionSetup, Settle, SlashCommand,
-    ToolCall, ToolOutput, TurnEnd,
+    Context, Decision, Diff, DynExtension, Frontend, PromptSetup, SessionSetup, Settle,
+    SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
 use crate::provider::{
     Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, Usage,
@@ -38,6 +38,7 @@ pub enum AgentEvent<'a> {
         id: &'a str,
         output: &'a str,
         is_error: bool,
+        diff: Option<&'a Diff>,
     },
     /// Shown to the user, not sent to the model (from `Context::notify`).
     Notice {
@@ -254,6 +255,7 @@ impl Agent {
                     ToolOutput {
                         output: "skipped: run stopped".into(),
                         is_error: true,
+                        diff: None,
                     }
                 } else {
                     self.call_tool(session, &mut call).await
@@ -341,13 +343,11 @@ impl Agent {
             },
         };
         let mut out = match result {
-            Ok(output) => ToolOutput {
-                output,
-                is_error: false,
-            },
+            Ok(output) => output,
             Err(e) => ToolOutput {
                 output: format!("{e:#}"),
                 is_error: true,
+                diff: None,
             },
         };
         for ext in &self.extensions {
@@ -357,6 +357,7 @@ impl Agent {
             id: &call.id,
             output: &out.output,
             is_error: out.is_error,
+            diff: out.diff.as_ref(),
         });
         out
     }
