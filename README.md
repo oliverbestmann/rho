@@ -5,7 +5,8 @@ A small ACP-native coding agent in Rust. Prototype.
 Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
-- `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GoCheck`) and a
+- `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GoCheck`,
+  `SessionTitle`, `BackgroundTasks`) and a
   `main` that calls `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -172,6 +173,12 @@ async fn main() -> anyhow::Result<()> {
 
 `GoCheck` continues the run at most 3 times in a row per prompt; pi's
 go-check has no limit (pi itself has no turn limit, rho stops at 50).
+
+`SessionTitle` names the session from the first prompt with haiku, in the
+background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
+`BackgroundTaskCancel`: commands run sandboxed in their own process group, the
+result (exit status + last 10 lines) is sent with `trigger_turn`, and running
+tasks are killed when the session ends.
 
 ## Zed
 

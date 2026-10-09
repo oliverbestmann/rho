@@ -1,7 +1,9 @@
 //! The `rho` binary: picks the extensions, everything else lives in the rho crate.
 
+mod background_task;
 mod go_check;
 mod ripgrep_gate;
+mod session_title;
 
 use std::sync::Arc;
 
@@ -12,6 +14,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(rho::sandbox::GrantCommands),
             Arc::new(ripgrep_gate::RipgrepGate),
             Arc::new(go_check::GoCheck::default()),
+            Arc::new(session_title::SessionTitle::default()),
+            Arc::new(background_task::BackgroundTasks::default()),
         ],
         ..Default::default()
     })

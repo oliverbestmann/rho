@@ -1946,7 +1946,11 @@ name = "rho-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rho",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
