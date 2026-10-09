@@ -1,0 +1,545 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    ContentBlock, ContentChunk, InitializeRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate,
+};
+use agent_client_protocol::util::MatchDispatch;
+use agent_client_protocol::{Client, Responder, SessionMessage};
+use anyhow::Result;
+use rho::agent::Agent;
+use rho::extension::{
+    Context, Decision, Extension, PromptSetup, SessionSetup, Settle, ToolCall, ToolOutput, TurnEnd,
+};
+use rho::provider::{Content, Event, Message, Registry, Request, Role, StopReason, ToolSpec};
+use rho::tools::Tool;
+use serde_json::{Value, json};
+
+mod common;
+use common::{Scripted, text};
+
+fn tool_use(id: &str, name: &str, input: Value) -> Event {
+    Event::Block(Content::ToolUse {
+        id: id.into(),
+        name: name.into(),
+        input,
+    })
+}
+
+fn last_user(request: &Request) -> &Message {
+    let m = request.messages.last().unwrap();
+    assert_eq!(m.role, Role::User);
+    m
+}
+
+/// Echoes its `text` input.
+struct Echo;
+
+impl Tool for Echo {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "Echo".into(),
+            description: "echo".into(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    async fn run(&self, input: Value, _ctx: &Context) -> Result<String> {
+        Ok(input["text"].as_str().unwrap_or_default().to_string())
+    }
+}
+
+/// Exercises every hook.
+#[derive(Default)]
+struct Recorder {
+    turns: AtomicUsize,
+    settles: AtomicUsize,
+    ended: Arc<AtomicBool>,
+    tools_called: Mutex<Vec<String>>,
+}
+
+impl Extension for Recorder {
+    async fn session_start(&self, s: &mut SessionSetup) {
+        s.tools.push(Arc::new(Echo));
+        s.system.push_str(" +ext");
+    }
+
+    fn session_end(&self, _ctx: &Context) {
+        self.ended.store(true, Ordering::SeqCst);
+    }
+
+    async fn before_prompt(&self, _ctx: &Context, p: &mut PromptSetup) {
+        p.content.push(Content::text("[context]"));
+    }
+
+    async fn before_request(&self, _ctx: &Context, r: &mut Request) {
+        r.max_tokens = 123;
+    }
+
+    async fn tool_call(&self, _ctx: &Context, call: &mut ToolCall) -> Decision {
+        match call.name.as_str() {
+            "Bash" => Decision::Block("no bash".into()),
+            _ => {
+                call.input = json!({"text": "changed"});
+                Decision::Allow
+            }
+        }
+    }
+
+    async fn tool_result(&self, _ctx: &Context, call: &ToolCall, out: &mut ToolOutput) {
+        if call.name == "Echo" {
+            out.output.push_str(" (checked)");
+        }
+    }
+
+    async fn turn_end(&self, _ctx: &Context, _turn: &TurnEnd<'_>) {
+        self.turns.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn before_settle(&self, _ctx: &Context, s: &Settle<'_>) -> Option<String> {
+        *self.tools_called.lock().unwrap() = s.tools_called.to_vec();
+        (self.settles.fetch_add(1, Ordering::SeqCst) == 0).then(|| "please continue".into())
+    }
+}
+
+#[tokio::test]
+async fn hooks_register_tools_block_rewrite_and_continue() {
+    let provider = Scripted::new(vec![
+        vec![
+            tool_use("b", "Bash", json!({"command": "rm -rf /"})),
+            tool_use("e", "Echo", json!({"text": "original"})),
+        ],
+        vec![text("done")],
+        vec![text("continued")],
+    ]);
+    let recorder = Arc::new(Recorder::default());
+    let ended = recorder.ended.clone();
+    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    agent.extensions = vec![recorder.clone()];
+
+    let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
+    let stop = agent
+        .run(&mut session, vec![Content::text("go")])
+        .await
+        .unwrap();
+    assert_eq!(stop, StopReason::EndTurn);
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    // session_start: extra tool and system prompt; before_request: max_tokens.
+    assert!(requests[0].tools.iter().any(|t| t.name == "Echo"));
+    assert!(requests[0].system.ends_with(" +ext"));
+    assert_eq!(requests[0].max_tokens, 123);
+    // before_prompt added content after the prompt.
+    assert_eq!(
+        last_user(&requests[0]).content,
+        vec![Content::text("go"), Content::text("[context]")]
+    );
+    // tool_call blocked Bash and rewrote Echo's input; tool_result appended.
+    assert_eq!(
+        last_user(&requests[1]).content,
+        vec![
+            Content::ToolResult {
+                tool_use_id: "b".into(),
+                content: "no bash".into(),
+                is_error: true
+            },
+            Content::ToolResult {
+                tool_use_id: "e".into(),
+                content: "changed (checked)".into(),
+                is_error: false
+            },
+        ]
+    );
+    // before_settle continued the run once.
+    assert_eq!(
+        last_user(&requests[2]).content,
+        vec![Content::text("please continue")]
+    );
+    assert_eq!(recorder.turns.load(Ordering::SeqCst), 3);
+    assert_eq!(recorder.settles.load(Ordering::SeqCst), 2);
+    assert_eq!(*recorder.tools_called.lock().unwrap(), vec!["Bash", "Echo"]);
+
+    assert!(!ended.load(Ordering::SeqCst));
+    drop(session);
+    assert!(ended.load(Ordering::SeqCst), "session_end runs on drop");
+}
+
+/// Sends one steering message right away and a triggering one later, like
+/// background-task.ts does when its command finishes.
+struct Later;
+
+impl Tool for Later {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "Later".into(),
+            description: "finishes in the background".into(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    async fn run(&self, _input: Value, ctx: &Context) -> Result<String> {
+        ctx.send("steer msg", false);
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            ctx.notify("background", "finished", false);
+            ctx.send("bg done", true);
+        });
+        Ok("started".into())
+    }
+}
+
+#[tokio::test]
+async fn async_messages_steer_queue_and_trigger_turns() {
+    let provider = Scripted::new(vec![
+        vec![tool_use("l", "Later", json!({}))],
+        vec![text("waiting")],
+        vec![text("got it")],
+        vec![text("second prompt")],
+    ]);
+    let agent = Agent::new(provider.clone(), "m", vec![Arc::new(Later)]);
+    let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
+
+    agent
+        .run(&mut session, vec![Content::text("start")])
+        .await
+        .unwrap();
+    // Sent during the run: delivered with the tool results.
+    assert_eq!(
+        last_user(&provider.requests.lock().unwrap()[1]).content[1],
+        Content::text("steer msg")
+    );
+
+    // While idle, the triggered message starts a run (what the ACP watcher does).
+    let ctx = session.ctx.clone();
+    let stop = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            ctx.wait_inbox().await;
+            if let Some(result) = agent.run_triggered(&mut session).await {
+                return result;
+            }
+        }
+    })
+    .await
+    .expect("no triggered run")
+    .unwrap();
+    assert_eq!(stop, StopReason::EndTurn);
+    assert_eq!(
+        last_user(&provider.requests.lock().unwrap()[2]).content,
+        vec![Content::text("bg done")]
+    );
+    assert!(
+        log.lines()
+            .iter()
+            .any(|l| l.contains("Notice") && l.contains("finished")),
+        "{:?}",
+        log.lines()
+    );
+
+    // Without trigger it waits for the next prompt and goes first.
+    session.ctx.send("note", false);
+    assert!(agent.run_triggered(&mut session).await.is_none());
+    agent
+        .run(&mut session, vec![Content::text("next")])
+        .await
+        .unwrap();
+    assert_eq!(
+        last_user(&provider.requests.lock().unwrap()[3]).content,
+        vec![Content::text("note"), Content::text("next")]
+    );
+}
+
+#[tokio::test]
+async fn ctx_complete_calls_any_registered_model() {
+    let provider = Scripted::new(vec![vec![text("Fix "), text("the build")]]);
+    let mut registry = Registry::default();
+    registry.register("fake", provider.clone());
+    let ctx = Context::new("s", ".", Arc::new(rho::extension::NoFrontend), registry);
+
+    let title = ctx
+        .complete("fake/small", "Write a title.", "the build is broken")
+        .await
+        .unwrap();
+    assert_eq!(title, "Fix the build");
+    let req = &provider.requests.lock().unwrap()[0];
+    assert_eq!(req.model, "small");
+    assert_eq!(req.system, "Write a title.");
+    assert!(req.tools.is_empty());
+}
+
+/// Asks before every tool call, like git-gate.ts.
+struct Confirmer;
+
+impl Extension for Confirmer {
+    async fn tool_call(&self, ctx: &Context, call: &mut ToolCall) -> Decision {
+        if ctx.confirm(Some(&call.id), "Run it?").await {
+            Decision::Allow
+        } else {
+            Decision::Block("denied by user".into())
+        }
+    }
+}
+
+fn confirm_agent() -> (Arc<Scripted>, Agent) {
+    let provider = Scripted::new(vec![
+        vec![tool_use("t1", "Bash", json!({"command": "echo hi"}))],
+        vec![text("ok")],
+    ]);
+    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    agent.extensions = vec![Arc::new(Confirmer)];
+    (provider, agent)
+}
+
+fn first_result(provider: &Scripted) -> Content {
+    last_user(&provider.requests.lock().unwrap()[1]).content[0].clone()
+}
+
+#[tokio::test]
+async fn confirm_without_ui_denies() {
+    let (provider, agent) = confirm_agent();
+    let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    assert!(
+        matches!(first_result(&provider), Content::ToolResult { is_error: true, content, .. } if content == "denied by user")
+    );
+}
+
+/// Collects agent text until it contains `until`.
+async fn read_text<'a>(
+    session: &mut agent_client_protocol::ActiveSession<'a, agent_client_protocol::Agent>,
+    until: &str,
+) -> Result<String, agent_client_protocol::Error> {
+    let mut text = String::new();
+    while !text.contains(until) {
+        if let SessionMessage::SessionMessage(dispatch) = session.read_update().await? {
+            MatchDispatch::new(dispatch)
+                .if_notification(async |n: SessionNotification| {
+                    if let SessionUpdate::AgentMessageChunk(ContentChunk {
+                        content: ContentBlock::Text(t),
+                        ..
+                    }) = n.update
+                    {
+                        text.push_str(&t.text);
+                    }
+                    Ok(())
+                })
+                .await
+                .otherwise_ignore()?;
+        }
+    }
+    Ok(text)
+}
+
+#[tokio::test]
+async fn acp_confirm_uses_request_permission() {
+    let (provider, agent) = confirm_agent();
+    let asked = Arc::new(AtomicBool::new(false));
+    let asked_in_client = asked.clone();
+
+    let client = Client
+        .builder()
+        .on_receive_request(
+            async move |req: RequestPermissionRequest,
+                        responder: Responder<RequestPermissionResponse>,
+                        _cx| {
+                assert_eq!(&*req.tool_call.tool_call_id.0, "t1");
+                asked_in_client.store(true, Ordering::SeqCst);
+                responder.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
+                ))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(rho::acp::agent(Arc::new(agent)), async |cx| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            cx.build_session_cwd()?
+                .block_task()
+                .run_until(async |mut session| {
+                    session.send_prompt("hi")?;
+                    read_text(&mut session, "ok").await?;
+                    Ok(())
+                })
+                .await
+        });
+    tokio::time::timeout(Duration::from_secs(10), client)
+        .await
+        .expect("timed out")
+        .expect("acp failed");
+
+    assert!(asked.load(Ordering::SeqCst));
+    assert!(
+        matches!(first_result(&provider), Content::ToolResult { is_error: false, content, .. } if content == "hi\n")
+    );
+}
+
+#[tokio::test]
+async fn acp_background_message_starts_a_turn_without_prompt() {
+    let provider = Scripted::new(vec![
+        vec![tool_use("l", "Later", json!({}))],
+        vec![text("waiting")],
+        vec![text("got it")],
+    ]);
+    let agent = Agent::new(provider, "m", vec![Arc::new(Later)]);
+
+    let client = Client
+        .builder()
+        .connect_with(rho::acp::agent(Arc::new(agent)), async |cx| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            cx.build_session_cwd()?
+                .block_task()
+                .run_until(async |mut session| {
+                    session.send_prompt("start")?;
+                    assert_eq!(session.read_to_string().await?, "waiting");
+                    // No prompt is open now; the background message still runs a turn.
+                    read_text(&mut session, "got it").await?;
+                    Ok(())
+                })
+                .await
+        });
+    tokio::time::timeout(Duration::from_secs(10), client)
+        .await
+        .expect("timed out")
+        .expect("acp failed");
+}
+
+/// Calls `ctx.stop` from one hook.
+struct Stopper(&'static str);
+
+impl Extension for Stopper {
+    async fn before_prompt(&self, ctx: &Context, _p: &mut PromptSetup) {
+        if self.0 == "prompt" {
+            ctx.stop("swallowed");
+        }
+    }
+
+    async fn before_request(&self, ctx: &Context, _r: &mut Request) {
+        if self.0 == "request" {
+            ctx.stop("not sending");
+        }
+    }
+
+    async fn tool_call(&self, ctx: &Context, _call: &mut ToolCall) -> Decision {
+        if self.0 != "tool" {
+            return Decision::Allow;
+        }
+        // pi's `{ block: true, terminate: true }`.
+        ctx.stop("terminated");
+        Decision::Block("blocked".into())
+    }
+
+    async fn before_settle(&self, ctx: &Context, _s: &Settle<'_>) -> Option<String> {
+        if self.0 != "settle" {
+            return None;
+        }
+        ctx.stop("enough");
+        Some("this continuation is dropped".into())
+    }
+}
+
+async fn run_with_stopper(
+    at: &'static str,
+    responses: Vec<Vec<Event>>,
+) -> (
+    StopReason,
+    Arc<Scripted>,
+    rho::agent::Session,
+    Arc<common::Log>,
+) {
+    let provider = Scripted::new(responses);
+    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    agent.extensions = vec![Arc::new(Stopper(at))];
+    let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
+    let stop = agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    (stop, provider, session, log)
+}
+
+#[tokio::test]
+async fn stop_in_before_prompt_drops_the_prompt() {
+    let (stop, provider, session, log) = run_with_stopper("prompt", vec![]).await;
+    assert_eq!(stop, StopReason::Stopped);
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(session.history.is_empty());
+    assert!(
+        log.lines()
+            .iter()
+            .any(|l| l.contains("Run stopped") && l.contains("swallowed"))
+    );
+}
+
+#[tokio::test]
+async fn stop_in_before_request_cancels_the_request() {
+    // No scripted responses: a request would panic.
+    let (stop, provider, session, _log) = run_with_stopper("request", vec![]).await;
+    assert_eq!(stop, StopReason::Stopped);
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert_eq!(session.history.len(), 1, "prompt kept for the next run");
+}
+
+#[tokio::test]
+async fn stop_in_tool_call_skips_the_rest_and_keeps_history_valid() {
+    let (stop, provider, session, _log) = run_with_stopper(
+        "tool",
+        vec![vec![
+            tool_use("a", "Bash", json!({"command": "touch should-not-exist"})),
+            tool_use("b", "Bash", json!({"command": "touch should-not-exist"})),
+        ]],
+    )
+    .await;
+    assert_eq!(stop, StopReason::Stopped);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert!(!std::path::Path::new("should-not-exist").exists());
+    // Every tool_use has a result, so the next request would be valid.
+    let last = session.history.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(
+        last.content,
+        vec![
+            Content::ToolResult {
+                tool_use_id: "a".into(),
+                content: "blocked".into(),
+                is_error: true
+            },
+            Content::ToolResult {
+                tool_use_id: "b".into(),
+                content: "skipped: run stopped".into(),
+                is_error: true
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn stop_in_before_settle_prevents_continuation() {
+    let (stop, provider, _session, _log) =
+        run_with_stopper("settle", vec![vec![text("done")]]).await;
+    assert_eq!(stop, StopReason::Stopped);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn stop_while_idle_does_not_affect_the_next_run() {
+    let provider = Scripted::new(vec![vec![text("ok")]]);
+    let agent = Agent::new(provider, "m", vec![]);
+    let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
+    session.ctx.stop("stale");
+    let stop = agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    assert_eq!(stop, StopReason::EndTurn);
+}

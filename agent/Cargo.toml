@@ -1,0 +1,17 @@
+[package]
+name = "rho-agent"
+version = "0.1.0"
+edition = "2024"
+
+# The `rho` binary: the rho library plus the extensions below.
+[[bin]]
+name = "rho"
+path = "src/main.rs"
+
+[dependencies]
+rho = { path = "../rho" }
+anyhow = "1.0.104"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "process"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

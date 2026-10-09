@@ -1,0 +1,348 @@
+//! Agent Client Protocol frontend: exposes the agent loop to editors (Zed).
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification, ContentBlock, ContentChunk, EmbeddedResourceResource, Implementation,
+    InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, SessionId, SessionInfoUpdate, SessionNotification, SessionUpdate,
+    StopReason, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    UnstructuredCommandInput, UsageUpdate,
+};
+use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, Responder};
+use futures::future::{AbortHandle, Abortable};
+
+use crate::agent::{Agent, AgentEvent, Session};
+use crate::extension::{BoxFuture, Context, Frontend};
+use crate::provider::{self, Content};
+
+type SharedSession = Arc<tokio::sync::Mutex<Session>>;
+
+struct Entry {
+    session: SharedSession,
+    running: Option<AbortHandle>,
+}
+
+#[derive(Default)]
+struct State {
+    sessions: Mutex<HashMap<SessionId, Entry>>,
+    next_id: AtomicU64,
+}
+
+impl State {
+    /// Registers the run that a cancel notification should abort.
+    fn start_run(
+        &self,
+        sid: &SessionId,
+    ) -> Option<(SharedSession, futures::future::AbortRegistration)> {
+        let (abort, registration) = AbortHandle::new_pair();
+        let mut sessions = self.sessions.lock().unwrap();
+        let entry = sessions.get_mut(sid)?;
+        entry.running = Some(abort);
+        Some((entry.session.clone(), registration))
+    }
+}
+
+/// Builds the ACP agent; connect it to a transport, e.g. `Stdio::new()`.
+pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
+    let state = Arc::new(State::default());
+    let (new_state, prompt_state, cancel_state) = (state.clone(), state.clone(), state);
+    let prompt_agent = agent.clone();
+
+    agent_client_protocol::Agent
+        .builder()
+        .name("rho")
+        .on_receive_request(
+            async move |_req: InitializeRequest, responder: Responder<InitializeResponse>, _cx| {
+                responder.respond(
+                    InitializeResponse::new(ProtocolVersion::V1)
+                        .agent_capabilities(AgentCapabilities::new())
+                        .agent_info(Implementation::new("rho", env!("CARGO_PKG_VERSION"))),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: NewSessionRequest,
+                        responder: Responder<NewSessionResponse>,
+                        cx: ConnectionTo<Client>| {
+                let n = new_state.next_id.fetch_add(1, Ordering::Relaxed);
+                let sid = SessionId::new(format!("rho-{}-{n}", std::process::id()));
+                let (agent, state) = (agent.clone(), new_state.clone());
+                // Extension session_start hooks are async; keep them off the dispatch loop.
+                cx.clone().spawn(async move {
+                    let frontend = Arc::new(AcpFrontend {
+                        cx: cx.clone(),
+                        sid: sid.clone(),
+                        notices: AtomicU64::new(0),
+                    });
+                    let session = agent
+                        .start_session(sid.0.to_string(), req.cwd, frontend)
+                        .await;
+                    let ctx = session.ctx.clone();
+                    let session = Arc::new(tokio::sync::Mutex::new(session));
+                    state.sessions.lock().unwrap().insert(
+                        sid.clone(),
+                        Entry {
+                            session,
+                            running: None,
+                        },
+                    );
+                    cx.spawn(watch_inbox(agent, state, sid.clone(), ctx))?;
+                    responder.respond(NewSessionResponse::new(sid.clone()))?;
+                    let compact = AvailableCommand::new(
+                        "compact",
+                        "Summarize the conversation to free up context",
+                    )
+                    .input(AvailableCommandInput::Unstructured(
+                        UnstructuredCommandInput::new("optional focus for the summary"),
+                    ));
+                    cx.send_notification(SessionNotification::new(
+                        sid,
+                        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                            compact,
+                        ])),
+                    ))
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: PromptRequest,
+                        responder: Responder<PromptResponse>,
+                        cx: ConnectionTo<Client>| {
+                let Some((session, registration)) = prompt_state.start_run(&req.session_id) else {
+                    return responder
+                        .respond_with_error(Error::invalid_params().data("unknown session"));
+                };
+                let agent = prompt_agent.clone();
+                // The turn runs outside the dispatch loop so cancel notifications get through.
+                cx.spawn(async move {
+                    let mut session = session.lock().await;
+                    let turn = async {
+                        match compact_command(&req.prompt) {
+                            Some(focus) => agent
+                                .compact(&mut session, &focus)
+                                .await
+                                .map(|()| provider::StopReason::EndTurn),
+                            None => agent.run(&mut session, to_content(req.prompt)).await,
+                        }
+                    };
+                    match Abortable::new(turn, registration).await {
+                        Ok(Ok(stop)) => responder.respond(PromptResponse::new(to_stop(stop))),
+                        Ok(Err(e)) => responder.respond_with_internal_error(format!("{e:#}")),
+                        Err(_aborted) => {
+                            responder.respond(PromptResponse::new(StopReason::Cancelled))
+                        }
+                    }
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |n: CancelNotification, _cx| {
+                if let Some(s) = cancel_state.sessions.lock().unwrap().get_mut(&n.session_id)
+                    && let Some(abort) = s.running.take()
+                {
+                    abort.abort();
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+}
+
+/// Runs turns for extension messages sent with `trigger_turn` while no
+/// prompt is active. ACP has no agent-initiated prompts, so these runs only
+/// stream `session/update`s (like pi-acp does).
+async fn watch_inbox(
+    agent: Arc<Agent>,
+    state: Arc<State>,
+    sid: SessionId,
+    ctx: Context,
+) -> Result<(), Error> {
+    loop {
+        ctx.wait_inbox().await;
+        if !ctx.has_triggered() {
+            continue;
+        }
+        let Some((session, registration)) = state.start_run(&sid) else {
+            return Ok(());
+        };
+        let mut session = session.lock().await;
+        // A prompt may have consumed the message while we waited for the lock.
+        let run = agent.run_triggered(&mut session);
+        if let Ok(Some(Err(e))) = Abortable::new(run, registration).await {
+            ctx.notify("rho", &format!("{e:#}"), true);
+        }
+    }
+}
+
+struct AcpFrontend {
+    cx: ConnectionTo<Client>,
+    sid: SessionId,
+    notices: AtomicU64,
+}
+
+impl Frontend for AcpFrontend {
+    fn event(&self, ev: AgentEvent<'_>) {
+        let n = self.notices.fetch_add(1, Ordering::Relaxed);
+        // Dropped updates only affect display; the turn continues.
+        let _ = self
+            .cx
+            .send_notification(SessionNotification::new(self.sid.clone(), to_update(ev, n)));
+    }
+
+    fn confirm<'a>(&'a self, tool_call_id: Option<&'a str>, title: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let call = ToolCallUpdate::new(
+                tool_call_id.unwrap_or("confirm").to_string(),
+                ToolCallUpdateFields::new().title(title.to_string()),
+            );
+            let request = RequestPermissionRequest::new(
+                self.sid.clone(),
+                call,
+                vec![
+                    PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                    PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+                ],
+            );
+            match self.cx.send_request(request).block_task().await {
+                Ok(r) => {
+                    matches!(r.outcome, RequestPermissionOutcome::Selected(s) if &*s.option_id.0 == "allow")
+                }
+                Err(_) => false,
+            }
+        })
+    }
+}
+
+/// `/compact [focus]` -> `Some(focus)`.
+fn compact_command(prompt: &[ContentBlock]) -> Option<String> {
+    let [ContentBlock::Text(t)] = prompt else {
+        return None;
+    };
+    let rest = t.text.trim().strip_prefix("/compact")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_string())
+}
+
+fn to_content(blocks: Vec<ContentBlock>) -> Vec<Content> {
+    blocks
+        .into_iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(Content::text(t.text)),
+            ContentBlock::ResourceLink(l) => Some(Content::text(format!("@{}", l.uri))),
+            ContentBlock::Resource(r) => match r.resource {
+                EmbeddedResourceResource::TextResourceContents(t) => Some(Content::text(format!(
+                    "<file uri=\"{}\">\n{}\n</file>",
+                    t.uri, t.text
+                ))),
+                _ => None,
+            },
+            // We advertise no image/audio capability.
+            _ => None,
+        })
+        .collect()
+}
+
+fn to_update(ev: AgentEvent, n: u64) -> SessionUpdate {
+    match ev {
+        // Rendered as a finished tool call, like pi-acp does for extension messages.
+        AgentEvent::Notice {
+            title,
+            text,
+            is_error,
+        } => SessionUpdate::ToolCall(
+            ToolCall::new(format!("notice-{n}"), title)
+                .kind(ToolKind::Other)
+                .status(if is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                })
+                .content(vec![text.into()]),
+        ),
+        AgentEvent::Title(t) => {
+            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(t.to_string()))
+        }
+        AgentEvent::Text(t) => SessionUpdate::AgentMessageChunk(ContentChunk::new(t.into())),
+        AgentEvent::Thinking(t) => SessionUpdate::AgentThoughtChunk(ContentChunk::new(t.into())),
+        AgentEvent::Usage {
+            usage,
+            context_window,
+        } => SessionUpdate::UsageUpdate(UsageUpdate::new(
+            usage.prompt() + usage.output,
+            context_window,
+        )),
+        AgentEvent::ToolStart { id, name, input } => {
+            let kind = match name {
+                "Read" => ToolKind::Read,
+                "Write" => ToolKind::Edit,
+                "Bash" => ToolKind::Execute,
+                _ => ToolKind::Other,
+            };
+            SessionUpdate::ToolCall(
+                ToolCall::new(id.to_string(), title(name, input))
+                    .kind(kind)
+                    .status(ToolCallStatus::InProgress)
+                    .raw_input(input.clone()),
+            )
+        }
+        AgentEvent::ToolEnd {
+            id,
+            output,
+            is_error,
+        } => SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            id.to_string(),
+            ToolCallUpdateFields::new()
+                .status(if is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                })
+                .content(vec![output.into()]),
+        )),
+    }
+}
+
+fn title(name: &str, input: &serde_json::Value) -> String {
+    let arg = ["command", "path"].iter().find_map(|k| input[k].as_str());
+    match arg {
+        Some(a) => format!("{name} {}", a.lines().next().unwrap_or_default()),
+        None => name.to_string(),
+    }
+}
+
+fn to_stop(stop: provider::StopReason) -> StopReason {
+    match stop {
+        provider::StopReason::MaxTokens => StopReason::MaxTokens,
+        provider::StopReason::Refusal => StopReason::Refusal,
+        provider::StopReason::MaxTurns => StopReason::MaxTurnRequests,
+        provider::StopReason::Stopped => StopReason::Cancelled,
+        provider::StopReason::EndTurn | provider::StopReason::ToolUse => StopReason::EndTurn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::schema::v1::TextContent;
+
+    use super::*;
+
+    #[test]
+    fn parses_compact_command() {
+        let p = |s: &str| compact_command(&[ContentBlock::Text(TextContent::new(s))]);
+        assert_eq!(p("/compact"), Some(String::new()));
+        assert_eq!(
+            p(" /compact  keep the API notes "),
+            Some("keep the API notes".into())
+        );
+        assert_eq!(p("/compactly"), None);
+        assert_eq!(p("please /compact"), None);
+    }
+}
