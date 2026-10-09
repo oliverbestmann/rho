@@ -26,13 +26,22 @@ pub enum AgentEvent<'a> {
     Thinking(&'a str),
     /// Token usage of one model request.
     Usage {
+        /// "provider/model" the request went to.
+        model: &'a str,
         usage: Usage,
         context_window: u64,
+        /// Everything the session has used so far, including this request.
+        total: Usage,
+        /// USD for the session so far; requests to models without a known
+        /// price are not included.
+        cost: f64,
     },
     ToolStart {
         id: &'a str,
         name: &'a str,
         input: &'a Value,
+        /// The call as markdown, from `Tool::describe`.
+        description: Option<&'a str>,
     },
     ToolEnd {
         id: &'a str,
@@ -47,11 +56,20 @@ pub enum AgentEvent<'a> {
         is_error: bool,
     },
     Title(&'a str),
+    /// The session switched model; the context window may differ.
+    Model {
+        spec: &'a str,
+        context_window: u64,
+    },
 }
 
 pub struct Agent {
+    /// The provider and model new sessions start with; a session can switch
+    /// with `Agent::set_model`.
     pub provider: Arc<dyn Provider>,
     pub model: String,
+    /// `model` as "provider/model", if it came from the registry.
+    pub model_spec: Option<String>,
     /// Preamble of the system prompt, see `prompt::build`.
     pub system: String,
     /// Where `SYSTEM.md`, `APPEND_SYSTEM.md` and a global `AGENTS.md` are read from.
@@ -64,6 +82,7 @@ pub struct Agent {
     pub registry: Registry,
     pub max_tokens: u32,
     pub max_turns: usize,
+    /// Reasoning effort new sessions start with.
     pub thinking: Thinking,
     /// Starting sandbox for each session, from `sandbox.json`.
     pub sandbox: crate::sandbox::Config,
@@ -72,6 +91,17 @@ pub struct Agent {
 /// One conversation. Tools and system prompt are fixed at session start.
 pub struct Session {
     pub ctx: Context,
+    pub provider: Arc<dyn Provider>,
+    /// As in `Request::model`.
+    pub model: String,
+    /// "provider/model" if known, else the same as `model`.
+    pub model_spec: String,
+    pub thinking: Thinking,
+    /// Usage of all requests so far, see `AgentEvent::Usage`.
+    pub usage: Usage,
+    /// Usage of the latest request, see `Session::usage_report`.
+    pub last_usage: Usage,
+    pub cost: f64,
     pub tools: Vec<Arc<dyn DynTool>>,
     pub system: String,
     /// Slash commands registered by extensions.
@@ -80,6 +110,81 @@ pub struct Session {
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
     extensions: Vec<Arc<dyn DynExtension>>,
+}
+
+impl Session {
+    /// Markdown summary of token, cache and cost usage, for `/usage`.
+    pub fn usage_report(&self) -> String {
+        let (last, total) = (&self.last_usage, &self.usage);
+        let mut out = format!("**Usage** · `{}`\n\n", self.model_spec);
+        if total.prompt() + total.output == 0 {
+            out += "No requests yet.";
+            return out;
+        }
+        out += "| | Last request | Session |\n|---|---:|---:|\n";
+        for (label, f) in [
+            ("Input (uncached)", (|u: &Usage| u.input) as fn(&Usage) -> u64),
+            ("Cache read", |u| u.cache_read),
+            ("Cache write", |u| u.cache_write),
+            ("Output", |u| u.output),
+        ] {
+            out += &format!("| {label} | {} | {} |\n", count(f(last)), count(f(total)));
+        }
+        out += &format!(
+            "| Cache hit rate | {} | {} |\n\n",
+            hit_rate(last),
+            hit_rate(total)
+        );
+        let window = self.provider.context_window(&self.model);
+        let used = last.prompt() + last.output;
+        out += &format!(
+            "- Context: {} / {} ({:.1}%)\n",
+            count(used),
+            count(window),
+            used as f64 * 100.0 / window.max(1) as f64
+        );
+        if self.cost > 0.0 {
+            out += &format!("- Cost: ${:.4}\n", self.cost);
+        }
+        let ttl = crate::compact::CACHE_TTL;
+        out += &match self.last_request.map(|t| t.elapsed()) {
+            Some(age) if age < ttl => {
+                let left = (ttl - age).as_secs();
+                format!("- Cache: warm, expires in ~{}m {:02}s", left / 60, left % 60)
+            }
+            _ => format!("- Cache: cold (no request in the last {}m)", ttl.as_secs() / 60),
+        };
+        out
+    }
+
+    /// USD for one request to the session's model, 0 if the price is unknown.
+    fn price(&self, usage: &Usage) -> f64 {
+        self.provider
+            .model_info(&self.model)
+            .and_then(|m| m.cost(usage))
+            .unwrap_or(0.0)
+    }
+}
+
+/// 1234567 -> "1,234,567".
+fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Share of the prompt read from cache.
+fn hit_rate(u: &Usage) -> String {
+    match u.prompt() {
+        0 => "–".into(),
+        p => format!("{:.0}%", u.cache_read as f64 * 100.0 / p as f64),
+    }
 }
 
 impl Drop for Session {
@@ -99,6 +204,7 @@ impl Agent {
         Self {
             provider,
             model: model.into(),
+            model_spec: None,
             system: crate::prompt::PREAMBLE.into(),
             config_dir: None,
             compact_model: None,
@@ -140,6 +246,16 @@ impl Agent {
         }
         Session {
             ctx,
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            model_spec: self
+                .model_spec
+                .clone()
+                .unwrap_or_else(|| self.model.clone()),
+            thinking: self.thinking,
+            usage: Usage::default(),
+            last_usage: Usage::default(),
+            cost: 0.0,
             tools: setup.tools,
             system: setup.system,
             commands: setup.commands,
@@ -147,6 +263,21 @@ impl Agent {
             last_request: None,
             extensions: self.extensions.clone(),
         }
+    }
+
+    /// Switches the session to `spec` ("provider/model"), for the next run.
+    /// The new model starts with a cold prompt cache.
+    pub fn set_model(&self, session: &mut Session, spec: &str) -> Result<()> {
+        let (provider, model) = self.registry.resolve(spec)?;
+        session.provider = provider;
+        session.model = model;
+        session.model_spec = spec.to_string();
+        session.last_request = None;
+        session.ctx.emit(AgentEvent::Model {
+            spec,
+            context_window: session.provider.context_window(&session.model),
+        });
+        Ok(())
     }
 
     /// Runs an extension's slash command and shows its reply. Returns `false`
@@ -199,12 +330,12 @@ impl Agent {
         let mut tools_called = Vec::new();
         for _ in 0..self.max_turns {
             let mut request = Request {
-                model: self.model.clone(),
+                model: session.model.clone(),
                 system: setup.system.clone(),
                 messages: session.history.clone(),
                 tools: session.tools.iter().map(|t| t.spec()).collect(),
                 max_tokens: self.max_tokens,
-                thinking: self.thinking,
+                thinking: session.thinking,
             };
             for ext in exts {
                 ext.before_request(&ctx, &mut request).await;
@@ -214,7 +345,7 @@ impl Agent {
             }
 
             session.last_request = Some(Instant::now());
-            let mut stream = self.provider.stream(request);
+            let mut stream = session.provider.stream(request);
             let mut content: Vec<Content> = Vec::new();
             let mut stop = StopReason::EndTurn;
             let mut usage = Usage::default();
@@ -230,10 +361,18 @@ impl Agent {
                     Event::ThinkingDelta(delta) => ctx.emit(AgentEvent::Thinking(&delta)),
                     Event::Block(block) => content.push(block),
                     Event::Usage(u) => {
+                        // A request can report usage more than once; each
+                        // report replaces the last, so only add the change.
+                        session.usage += u - usage;
+                        session.cost += session.price(&u) - session.price(&usage);
                         usage = u;
+                        session.last_usage = u;
                         ctx.emit(AgentEvent::Usage {
+                            model: &session.model_spec,
                             usage,
-                            context_window: self.provider.context_window(&self.model),
+                            context_window: session.provider.context_window(&session.model),
+                            total: session.usage,
+                            cost: session.cost,
                         });
                     }
                     Event::Done(reason) => stop = reason,
@@ -323,10 +462,16 @@ impl Agent {
     async fn call_tool(&self, session: &Session, call: &mut ToolCall) -> ToolOutput {
         let ctx = &session.ctx;
         // Announce first, so a confirm prompt can refer to the visible call.
+        let description = session
+            .tools
+            .iter()
+            .find(|t| t.spec().name == call.name)
+            .and_then(|t| t.describe(&call.input));
         ctx.emit(AgentEvent::ToolStart {
             id: &call.id,
             name: &call.name,
             input: &call.input,
+            description: description.as_deref(),
         });
         let mut decision = Decision::Allow;
         for ext in &self.extensions {

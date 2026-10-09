@@ -4,6 +4,7 @@
 //!
 //! Modeled on pi's extension events; see `docs` in the README for the mapping.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -273,6 +274,56 @@ pub struct Settle<'a> {
     pub tools_called: &'a [String],
 }
 
+/// Questions to show the user in one dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Form {
+    /// Shown above the fields.
+    pub message: String,
+    pub fields: Vec<Field>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    /// Names the field in `Answers`.
+    pub key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub kind: FieldKind,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldKind {
+    /// Free text.
+    Text,
+    Choice {
+        options: Vec<Choice>,
+        /// More than one option can be picked.
+        multiple: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    /// What is returned in `Answers`.
+    pub value: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+/// Field key -> answer. One value for text and single choices; fields the
+/// user left empty are missing.
+pub type Answers = BTreeMap<String, Vec<String>>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FormReply {
+    Answers(Answers),
+    /// The user dismissed the form.
+    Declined,
+    /// The frontend cannot show forms.
+    Unsupported,
+}
+
 /// The user-facing side of a session (CLI printer, ACP connection).
 pub trait Frontend: Send + Sync {
     fn event(&self, event: AgentEvent<'_>);
@@ -284,6 +335,11 @@ pub trait Frontend: Send + Sync {
         _title: &'a str,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async { false })
+    }
+
+    /// Ask the user to fill in a form. Without a UI this is `Unsupported`.
+    fn ask<'a>(&'a self, _form: &'a Form) -> BoxFuture<'a, FormReply> {
+        Box::pin(async { FormReply::Unsupported })
     }
 }
 
@@ -431,6 +487,11 @@ impl Context {
 
     pub async fn confirm(&self, tool_call_id: Option<&str>, title: &str) -> bool {
         self.0.frontend.confirm(tool_call_id, title).await
+    }
+
+    /// Shows a form and waits for the user to fill it in.
+    pub async fn ask(&self, form: &Form) -> FormReply {
+        self.0.frontend.ask(form).await
     }
 
     /// One-off completion outside the conversation, e.g. to name the session.

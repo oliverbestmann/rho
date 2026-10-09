@@ -101,18 +101,18 @@ impl Agent {
                 let mut messages = session.history.clone();
                 push_user(&mut messages, vec![Content::text(instructions)]);
                 let request = Request {
-                    model: self.model.clone(),
+                    model: session.model.clone(),
                     system: session.system.clone(),
                     messages,
                     tools: session.tools.iter().map(|t| t.spec()).collect(),
                     max_tokens: self.max_tokens,
-                    thinking: self.thinking,
+                    thinking: session.thinking,
                 };
                 let state = if warm { "cache warm" } else { "cache expired" };
                 (
-                    self.provider.clone(),
+                    session.provider.clone(),
                     request,
-                    format!("{}, {state}", self.model),
+                    format!("{}, {state}", session.model),
                 )
             }
         };

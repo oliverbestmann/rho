@@ -110,6 +110,33 @@ async fn agent_runs_tools_and_feeds_results_back() {
 }
 
 #[tokio::test]
+async fn usage_report_shows_cache_details() {
+    let agent = Agent::new(Scripted::new(tool_then_answer()), "m", rho::tools::builtin());
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _log) = common::session(&agent, dir.path()).await;
+    assert!(session.usage_report().contains("No requests yet."));
+
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    let report = session.usage_report();
+    for line in [
+        "| Input (uncached) | 20 | 30 |",
+        "| Cache read | 1,010 | 1,010 |",
+        "| Cache write | 0 | 1,000 |",
+        "| Output | 7 | 12 |",
+        "| Cache hit rate | 98% | 50% |",
+        "- Context: 1,037 / 200,000 (0.5%)",
+        "- Cache: warm, expires in ~4m",
+    ] {
+        assert!(report.contains(line), "missing {line:?} in:\n{report}");
+    }
+    // The scripted model has no price.
+    assert!(!report.contains("Cost"), "{report}");
+}
+
+#[tokio::test]
 async fn unknown_tool_is_reported_as_error() {
     let provider = Scripted::new(vec![
         vec![Event::Block(Content::ToolUse {

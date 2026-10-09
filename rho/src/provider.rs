@@ -86,6 +86,29 @@ pub enum Thinking {
     Max,
 }
 
+impl Thinking {
+    pub const ALL: [Thinking; 6] = [
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    /// The name `FromStr` accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 impl std::str::FromStr for Thinking {
     type Err = anyhow::Error;
 
@@ -119,12 +142,69 @@ impl Usage {
     }
 }
 
+/// USD per million tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+impl Price {
+    pub fn cost(&self, usage: &Usage) -> f64 {
+        (usage.input as f64 * self.input
+            + usage.output as f64 * self.output
+            + usage.cache_read as f64 * self.cache_read
+            + usage.cache_write as f64 * self.cache_write)
+            / 1e6
+    }
+}
+
+/// A model a provider offers, for model pickers and usage reporting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelInfo {
+    /// Without the provider name, as in `Request::model`.
+    pub id: String,
+    pub name: String,
+    pub context_window: u64,
+    pub price: Option<Price>,
+    /// Price for requests whose prompt is larger than the given token count
+    /// (long-context pricing applies to the whole request).
+    pub price_above: Option<(u64, Price)>,
+}
+
+impl ModelInfo {
+    /// USD for one request, `None` if the price is unknown.
+    pub fn cost(&self, usage: &Usage) -> Option<f64> {
+        let price = match self.price_above {
+            Some((tokens, above)) if usage.prompt() > tokens => above,
+            _ => self.price?,
+        };
+        Some(price.cost(usage))
+    }
+}
+
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, o: Self) {
         self.input += o.input;
         self.output += o.output;
         self.cache_read += o.cache_read;
         self.cache_write += o.cache_write;
+    }
+}
+
+impl std::ops::Sub for Usage {
+    type Output = Usage;
+
+    /// Saturating, e.g. the usage of one prompt: totals after minus before.
+    fn sub(self, o: Self) -> Usage {
+        Usage {
+            input: self.input.saturating_sub(o.input),
+            output: self.output.saturating_sub(o.output),
+            cache_read: self.cache_read.saturating_sub(o.cache_read),
+            cache_write: self.cache_write.saturating_sub(o.cache_write),
+        }
     }
 }
 
@@ -156,9 +236,19 @@ pub enum Event {
 pub trait Provider: Send + Sync {
     fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>>;
 
+    /// The models offered to the user to pick from. Other models can still
+    /// be requested by id.
+    fn models(&self) -> Vec<ModelInfo> {
+        vec![]
+    }
+
+    fn model_info(&self, model: &str) -> Option<ModelInfo> {
+        self.models().into_iter().find(|m| m.id == model)
+    }
+
     /// Context window of `model` in tokens, for usage reporting.
-    fn context_window(&self, _model: &str) -> u64 {
-        200_000
+    fn context_window(&self, model: &str) -> u64 {
+        self.model_info(model).map_or(200_000, |m| m.context_window)
     }
 }
 
@@ -171,6 +261,21 @@ impl Registry {
         self.0.insert(name.into(), provider);
     }
 
+    /// Every provider's models as `("provider/model", info)`, providers in name order.
+    pub fn models(&self) -> Vec<(String, ModelInfo)> {
+        let mut providers: Vec<_> = self.0.iter().collect();
+        providers.sort_by_key(|(name, _)| name.as_str());
+        providers
+            .into_iter()
+            .flat_map(|(name, provider)| {
+                provider
+                    .models()
+                    .into_iter()
+                    .map(move |m| (format!("{name}/{}", m.id), m))
+            })
+            .collect()
+    }
+
     pub fn resolve(&self, spec: &str) -> Result<(Arc<dyn Provider>, String)> {
         let (name, model) = spec
             .split_once('/')
@@ -180,5 +285,73 @@ impl Registry {
             .get(name)
             .with_context(|| format!("unknown provider {name:?}"))?;
         Ok((provider.clone(), model.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn price(input: f64) -> Price {
+        Price {
+            input,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        }
+    }
+
+    #[test]
+    fn long_prompts_use_the_higher_price_for_the_whole_request() {
+        let model = ModelInfo {
+            id: "m".into(),
+            name: "M".into(),
+            context_window: 1_000_000,
+            price: Some(price(1.0)),
+            price_above: Some((100_000, price(5.0))),
+        };
+        let usage = |input| Usage {
+            input,
+            ..Default::default()
+        };
+        assert_eq!(model.cost(&usage(100_000)), Some(0.1));
+        assert_eq!(model.cost(&usage(200_000)), Some(1.0));
+        let unpriced = ModelInfo {
+            price: None,
+            price_above: None,
+            ..model
+        };
+        assert_eq!(unpriced.cost(&usage(1)), None);
+    }
+
+    #[test]
+    fn usage_difference_saturates() {
+        let a = Usage {
+            input: 5,
+            output: 1,
+            cache_read: 0,
+            cache_write: 2,
+        };
+        let b = Usage {
+            input: 3,
+            output: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            a - b,
+            Usage {
+                input: 2,
+                output: 0,
+                cache_read: 0,
+                cache_write: 2
+            }
+        );
+    }
+
+    #[test]
+    fn thinking_names_roundtrip() {
+        for t in Thinking::ALL {
+            assert_eq!(t.as_str().parse::<Thinking>().unwrap(), t);
+        }
     }
 }

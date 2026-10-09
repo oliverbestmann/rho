@@ -26,12 +26,18 @@ pub trait Tool: Send + Sync {
     /// Runs the tool. `Err` is reported to the model as a tool error.
     /// Return a `String` with `.into()`, or a `ToolOutput` to attach a diff.
     fn run(&self, input: Value, ctx: &Context) -> impl Future<Output = Result<ToolOutput>> + Send;
+    /// The call as markdown for the user, shown instead of the raw input
+    /// (e.g. a list of questions). `None` shows the default.
+    fn describe(&self, _input: &Value) -> Option<String> {
+        None
+    }
 }
 
 /// Object-safe form of [`Tool`], implemented for every tool.
 pub trait DynTool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>>;
+    fn describe(&self, input: &Value) -> Option<String>;
 }
 
 impl<T: Tool> DynTool for T {
@@ -40,6 +46,9 @@ impl<T: Tool> DynTool for T {
     }
     fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>> {
         Box::pin(Tool::run(self, input, ctx))
+    }
+    fn describe(&self, input: &Value) -> Option<String> {
+        Tool::describe(self, input)
     }
 }
 

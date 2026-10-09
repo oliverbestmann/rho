@@ -111,9 +111,10 @@ fn take_flag(args: &mut Vec<String>, short: &str, long: &str) -> Result<Option<S
     Ok(Some(args.remove(i)))
 }
 
-fn make_agent(options: Options, model: &str, thinking: Thinking) -> Result<Agent> {
-    let (provider, model) = options.providers.resolve(model)?;
+fn make_agent(options: Options, spec: &str, thinking: Thinking) -> Result<Agent> {
+    let (provider, model) = options.providers.resolve(spec)?;
     let mut agent = Agent::new(provider, model, options.tools);
+    agent.model_spec = Some(spec.to_string());
     agent.thinking = thinking;
     agent.registry = options.providers;
     let config_dir = crate::prompt::config_dir();
@@ -173,7 +174,7 @@ impl Frontend for Cli {
                 "\n[{}{title}]\n{text}",
                 if is_error { "failed: " } else { "" }
             ),
-            AgentEvent::ToolEnd { .. } | AgentEvent::Title(_) => {}
+            AgentEvent::ToolEnd { .. } | AgentEvent::Title(_) | AgentEvent::Model { .. } => {}
         }
     }
 }

@@ -1,5 +1,6 @@
 //! The `rho` binary: picks the extensions, everything else lives in the rho crate.
 
+mod ask_user;
 mod background_task;
 mod go_check;
 mod ripgrep_gate;
@@ -16,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(go_check::GoCheck::default()),
             Arc::new(session_title::SessionTitle::default()),
             Arc::new(background_task::BackgroundTasks::default()),
+            Arc::new(ask_user::AskUser),
         ],
         ..Default::default()
     })
