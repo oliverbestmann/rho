@@ -120,8 +120,9 @@ pub struct Session {
     pub history: Vec<Message>,
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
-    /// The profile the model was last told about (or started with).
-    profile_seen: String,
+    /// The profile the model was last told about; `None` before the first
+    /// request.
+    profile_seen: Option<String>,
     /// The cwd, then the additional directories.
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
@@ -168,26 +169,27 @@ impl Session {
         });
     }
 
-    /// Specs of the tools the model gets in the current profile.
+    /// Specs of all tools. Every request carries all of them, whatever the
+    /// profile, so a profile switch keeps the prompt cache; the model learns
+    /// what it may call from `profile_note`.
     pub fn tool_specs(&self) -> Vec<crate::provider::ToolSpec> {
-        let profile = self.ctx.profile();
-        self.tools
-            .iter()
-            .map(|t| t.spec())
-            .filter(|s| profile.shows(&s.name))
-            .collect()
+        self.tools.iter().map(|t| t.spec()).collect()
     }
 
-    /// What the model needs to know after a profile switch, once: the new
-    /// profile, tools that appeared or disappeared, its instructions.
+    /// What the model needs to know about the profile, once per change: on
+    /// the first request if the profile restricts anything, then after each
+    /// switch. The tools it must not call, the ones it may call again, the
+    /// sandbox, and the profile's instructions.
     fn profile_note(&mut self) -> Option<String> {
         let profile = self.ctx.profile();
-        if profile.id == self.profile_seen {
+        let seen = self.profile_seen.replace(profile.id.clone());
+        if seen.as_ref() == Some(&profile.id) {
             return None;
         }
         let profiles = self.ctx.profiles();
-        let before = profiles.iter().find(|p| p.id == self.profile_seen);
-        self.profile_seen = profile.id.clone();
+        let before = seen
+            .as_ref()
+            .and_then(|id| profiles.iter().find(|p| &p.id == id));
         let names: Vec<String> = self.tools.iter().map(|t| t.spec().name).collect();
         let changed = |gone: bool| -> Vec<&str> {
             names
@@ -204,17 +206,35 @@ impl Session {
                 .collect()
         };
         let (removed, added) = (changed(true), changed(false));
-        let mut note = format!(
-            "<system-reminder>\nThe session switched to the {} profile ({}).",
-            profile.name, profile.description
-        );
+        let sandboxed = self.ctx.sandbox().is_some();
+        let mut note = if seen.is_none() {
+            // Nothing to say about an unrestricted profile.
+            if removed.is_empty()
+                && !(profile.read_only && sandboxed)
+                && profile.instructions.is_none()
+            {
+                return None;
+            }
+            format!(
+                "<system-reminder>\nThe session is in the {} profile ({}).",
+                profile.name, profile.description
+            )
+        } else {
+            format!(
+                "<system-reminder>\nThe session switched to the {} profile ({}).",
+                profile.name, profile.description
+            )
+        };
         if !removed.is_empty() {
-            note += &format!(" Tools no longer available: {}.", removed.join(", "));
+            note += &format!(
+                " Do not call these tools now, calls fail: {}.",
+                removed.join(", ")
+            );
         }
         if !added.is_empty() {
-            note += &format!(" Tools available again: {}.", added.join(", "));
+            note += &format!(" You can call these tools again: {}.", added.join(", "));
         }
-        if self.ctx.sandbox().is_some() {
+        if sandboxed && (profile.read_only || before.is_some_and(|b| b.read_only)) {
             note += if profile.read_only {
                 " The sandbox is read-only now: commands cannot change any files."
             } else {
@@ -333,6 +353,8 @@ impl Session {
             ),
             ("Cache read", |u| u.cache_read),
             ("Cache write", |u| u.cache_write),
+            // Every input token is one of the three above.
+            ("**Input total**", |u| u.prompt()),
             ("Output", |u| u.output),
         ] {
             out += &format!("| {label} | {} | {} |\n", count(f(last)), count(f(total)));
@@ -508,7 +530,7 @@ impl Agent {
                 .ctx
                 .notify("Profile unavailable", &format!("{e:#}"), true);
         }
-        session.profile_seen = info.profile;
+        session.profile_seen = Some(info.profile);
         session.thinking = info.thinking;
         session.usage = info.usage;
         session.last_usage = info.last_usage;
@@ -552,7 +574,6 @@ impl Agent {
             ext.session_start(&mut setup).await;
         }
         ctx.set_profiles(setup.profiles);
-        let profile_seen = ctx.profile().id;
         Session {
             ctx,
             provider: self.provider.clone(),
@@ -570,7 +591,7 @@ impl Agent {
             commands: setup.commands,
             history: vec![],
             last_request: None,
-            profile_seen,
+            profile_seen: None,
             roots,
             extensions: self.extensions.clone(),
             persist: store.map(|store| Persist {

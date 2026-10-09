@@ -130,6 +130,7 @@ async fn usage_report_shows_cache_details() {
         "| Input (uncached) | 20 | 30 |",
         "| Cache read | 1,010 | 1,010 |",
         "| Cache write | 0 | 1,000 |",
+        "| **Input total** | 1,030 | 2,040 |",
         "| Output | 7 | 12 |",
         "| Cache hit rate | 98% | 50% |",
         "- Context: 1,037 / 200,000 (0.5%)",

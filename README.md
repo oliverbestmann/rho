@@ -225,16 +225,19 @@ With more than one profile, ACP clients get a `mode` config option (category
 `mode`) to switch. Extensions and tools switch with `ctx.set_profile(id)`;
 the client then gets a `config_option_update`. A switch applies from the
 next model request, also in the middle of a run, and does not wait for a
-running turn. That request carries a note for the model: the new profile,
-which tools disappeared or came back, whether the sandbox is read-only, and
-the profile's instructions. Hidden tools are left out of the request and
-calls to them fail. `read_only` turns every read-write sandbox rule into a
+running turn. Every request carries all tools, whatever the profile, so
+a switch keeps the prompt cache (tools are its first part). Instead, the
+history gets a note, appended to the next user message (prompt or tool
+results): the new profile, which tools not to call now and which can be
+called again, whether the sandbox is read-only, and the profile's
+instructions. A new session gets one on its first request if its profile
+restricts anything (with `PlanMode`, `write` hides `ExitPlanMode`). Calls to
+hidden tools fail. `read_only` turns every read-write sandbox rule into a
 read-only one (except `/dev/null` and friends), for `Bash`, `Write`,
 background tasks and anything else using `ctx.run_sandboxed` /
 `ctx.sandbox_command`; grants made meanwhile are kept for later. Without a
-sandbox (`"disabled": true`) only the hidden tools apply. The tool list is
-part of the prompt cache prefix, so a switch costs a cache miss. The profile
-is saved with the session.
+sandbox (`"disabled": true`) only the hidden tools apply. The profile is
+saved with the session.
 
 `PlanMode` (in the `rho` binary) adds `plan`, like Claude Code's plan mode:
 `Write` and `Edit` are hidden and the sandbox is read-only. The model can

@@ -136,13 +136,15 @@ async fn switching_changes_tools_and_sandbox_and_tells_the_model() {
 
     {
         let requests = scripted.requests.lock().unwrap();
+        // Write hides nothing: no note on the first request.
+        assert_eq!(last_texts(&requests[0]), ["look around"]);
+        // The tools stay the same, so the prompt cache does too.
         assert!(tool_names(&requests[0]).contains(&"Write".to_string()));
+        assert_eq!(tool_names(&requests[0]), tool_names(&requests[1]));
         // The switch applies to the next request of the same run.
-        assert!(!tool_names(&requests[1]).contains(&"Write".to_string()));
-        assert!(tool_names(&requests[1]).contains(&"Bash".to_string()));
         let note = last_texts(&requests[1]).join("\n");
         assert!(note.contains("switched to the Look profile"), "{note}");
-        assert!(note.contains("Tools no longer available: Write."), "{note}");
+        assert!(note.contains("calls fail: Write."), "{note}");
         assert!(note.contains("read-only"), "{note}");
         assert!(note.contains("Only look."), "{note}");
 
@@ -179,9 +181,44 @@ async fn switching_changes_tools_and_sandbox_and_tells_the_model() {
     let texts = last_texts(last);
     assert_eq!(texts[0], "now write");
     assert!(
-        texts[1].contains("Tools available again: Write."),
+        texts[1].contains("call these tools again: Write.") && texts[1].contains("allows writing"),
         "{texts:?}"
     );
+}
+
+#[tokio::test]
+async fn a_restricting_first_profile_is_announced_on_the_first_request() {
+    struct Narrow;
+    impl Extension for Narrow {
+        async fn session_start(&self, session: &mut SessionSetup) {
+            session.profiles[0].hidden_tools.push("Bash".into());
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let scripted = Scripted::new(vec![
+        vec![text("a"), Event::Done(StopReason::EndTurn)],
+        vec![text("b"), Event::Done(StopReason::EndTurn)],
+    ]);
+    let mut agent = Agent::new(scripted.clone(), "m", rho::tools::builtin());
+    agent.extensions.push(Arc::new(Narrow));
+    let mut session = agent
+        .start_session("s", dir.path(), vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    for prompt in ["one", "two"] {
+        agent
+            .run(&mut session, vec![Content::text(prompt)])
+            .await
+            .unwrap();
+    }
+    let requests = scripted.requests.lock().unwrap();
+    let first = last_texts(&requests[0]);
+    assert!(
+        first[1].contains("in the Write profile") && first[1].contains("calls fail: Bash."),
+        "{first:?}"
+    );
+    assert!(tool_names(&requests[0]).contains(&"Bash".to_string()));
+    assert_eq!(last_texts(&requests[1]), ["two"]);
 }
 
 fn profile_option(options: &[SessionConfigOption]) -> (String, Vec<String>) {
