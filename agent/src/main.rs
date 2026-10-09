@@ -3,6 +3,7 @@
 mod ask_user;
 mod background_task;
 mod go_check;
+mod plan_mode;
 mod ripgrep_gate;
 mod session_title;
 
@@ -18,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(session_title::SessionTitle::default()),
             Arc::new(background_task::BackgroundTasks::default()),
             Arc::new(ask_user::AskUser),
+            Arc::new(plan_mode::PlanMode),
         ],
         ..Default::default()
     })
