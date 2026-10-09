@@ -575,5 +575,5 @@ async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
         .unwrap();
     let request = &provider.requests.lock().unwrap()[0];
     let sent = format!("{:?}", last_user(request).content);
-    assert!(sent.contains("granted Bash read-write access"), "{sent}");
+    assert!(sent.contains("granted read-write access"), "{sent}");
 }

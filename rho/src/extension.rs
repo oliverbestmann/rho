@@ -324,6 +324,27 @@ impl Context {
         *self.0.sandbox.lock().unwrap() = policy;
     }
 
+    /// Runs `f` (blocking file access) under the session's sandbox, on its
+    /// own thread. Use it in tools and extensions to touch files with the
+    /// same rules as Bash.
+    pub async fn run_sandboxed<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T> {
+        match self.sandbox() {
+            Some(policy) => policy.run(f).await,
+            None => Ok(tokio::task::spawn_blocking(f).await?),
+        }
+    }
+
+    /// Restricts a command to the session's sandbox before it is spawned.
+    pub fn sandbox_command(&self, cmd: &mut tokio::process::Command) -> Result<()> {
+        match self.sandbox() {
+            Some(policy) => policy.apply(cmd),
+            None => Ok(()),
+        }
+    }
+
     /// Allow `path` (relative to the cwd) for the rest of the session.
     pub fn grant(&self, path: impl AsRef<Path>, access: Access) {
         if let Some(policy) = self.0.sandbox.lock().unwrap().as_mut() {

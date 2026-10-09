@@ -75,8 +75,8 @@ ran and its token usage.
 
 ## Sandbox
 
-Every `Bash` command runs under Landlock (via the `nono` crate, Linux only),
-deny by default. A session starts with system directories (`/nix/store`,
+`Bash`, `Read` and `Write` run under Landlock (via the `nono` crate, Linux
+only), deny by default. A session starts with system directories (`/nix/store`,
 `/etc`, `/usr`, ...) read-only, a few `/dev` files read-write, and its
 workspace directories read-write: the cwd plus ACP `additionalDirectories`.
 
@@ -91,13 +91,23 @@ stops rho at startup:
 }
 ```
 
-`"disabled": true` runs Bash unsandboxed. During a session the model can
+`"disabled": true` turns the sandbox off. During a session the model can
 ask for more with the `RequestAccess` tool; the user approves via ACP
 `request_permission` (the CLI always denies) and the grant lasts for the
 session. The `GrantCommands` extension (enabled in the `rho` binary) adds
 `/grant-read <path>` and `/grant-write <path>` for the user; the model is
-told about the grant with the next prompt. Extensions can use `ctx.grant` / `ctx.set_sandbox`. `Read` and
-`Write` run in-process and are not restricted.
+told about the grant with the next prompt. Extensions can use `ctx.grant` / `ctx.set_sandbox`, and run their own code
+under the session's rules:
+
+```rust
+// file access on a throwaway thread restricted by Landlock
+let text = ctx.run_sandboxed(move || std::fs::read_to_string(path)).await??;
+// a child process, restricted before exec
+let mut cmd = tokio::process::Command::new("go");
+ctx.sandbox_command(&mut cmd)?;
+```
+
+Both are no-ops without a sandbox.
 
 ## Extensions
 

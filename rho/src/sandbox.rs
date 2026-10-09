@@ -1,5 +1,6 @@
-//! Per-session filesystem sandbox for `Bash`, enforced with Landlock (via
-//! nono) on each spawned command.
+//! Per-session filesystem sandbox for `Bash`, `Read` and `Write` (and any
+//! extension using `Context::run_sandboxed` / `Context::sandbox_command`),
+//! enforced with Landlock via nono.
 //!
 //! Deny by default: a session starts with read access to system directories
 //! (enough to run programs) and read-write access to its workspace
@@ -67,7 +68,7 @@ const DEVICES_RW: &[&str] = &[
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Run Bash unsandboxed.
+    /// Turn the sandbox off.
     #[serde(default)]
     pub disabled: bool,
     #[serde(default)]
@@ -144,6 +145,34 @@ impl Policy {
     /// resolved now; the child only runs allocation-free syscalls before exec.
     #[cfg(target_os = "linux")]
     pub fn apply(&self, cmd: &mut tokio::process::Command) -> Result<()> {
+        let prepared = self.prepare()?;
+        // SAFETY: `apply_raw` only issues raw syscalls and does not allocate,
+        // so it is safe between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || prepared.apply_raw().map_err(raw_error));
+        }
+        Ok(())
+    }
+
+    /// Runs `f` on a new thread restricted to this policy, for in-process
+    /// file access. Landlock restricts only the calling thread, so the rest of
+    /// rho is unaffected; the thread ends with `f`. Never use a pooled thread
+    /// (e.g. `spawn_blocking`) for this, it would stay restricted.
+    #[cfg(target_os = "linux")]
+    pub async fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T> {
+        let prepared = self.prepare()?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(prepared.apply_raw().map_err(raw_error).map(|()| f()));
+        });
+        Ok(rx.await.context("sandboxed thread panicked")??)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare(&self) -> Result<nono::sandbox::PreparedLandlockSandbox> {
         use nono::{AccessMode, CapabilitySet, FsCapability};
 
         let mut caps = CapabilitySet::new();
@@ -163,27 +192,32 @@ impl Policy {
             });
         }
         let abi = nono::Sandbox::detect_abi()?;
-        let prepared = nono::sandbox::prepare_landlock_with_abi(&caps, &abi)?;
-        // SAFETY: `apply_raw` only issues raw syscalls and does not allocate,
-        // so it is safe between fork and exec.
-        unsafe {
-            cmd.pre_exec(move || {
-                prepared
-                    .apply_raw()
-                    .map_err(|e| std::io::Error::from_raw_os_error(e.errno()))
-            });
-        }
-        Ok(())
+        Ok(nono::sandbox::prepare_landlock_with_abi(&caps, &abi)?)
     }
 
     // ponytail: Linux (Landlock) only; macOS would need nono's Seatbelt backend.
     #[cfg(not(target_os = "linux"))]
     pub fn apply(&self, _cmd: &mut tokio::process::Command) -> Result<()> {
-        anyhow::bail!(
-            "the Bash sandbox is only supported on Linux; set \"disabled\": true in sandbox.json"
-        )
+        bail!(UNSUPPORTED)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub async fn run<T: Send + 'static>(
+        &self,
+        _f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T> {
+        bail!(UNSUPPORTED)
     }
 }
+
+#[cfg(target_os = "linux")]
+fn raw_error(e: nono::sandbox::RawSandboxError) -> std::io::Error {
+    std::io::Error::from_raw_os_error(e.errno())
+}
+
+#[cfg(not(target_os = "linux"))]
+const UNSUPPORTED: &str =
+    "the sandbox is only supported on Linux; set \"disabled\": true in sandbox.json";
 
 /// `/grant-read <path>` and `/grant-write <path>`: the user widens the
 /// session's sandbox. The model is told with the next prompt.
@@ -194,7 +228,7 @@ impl Extension for GrantCommands {
         for (name, what) in [("grant-read", "read"), ("grant-write", "read-write")] {
             session.commands.push(SlashCommand {
                 name: name.into(),
-                description: format!("Allow Bash {what} access to a file or directory"),
+                description: format!("Allow {what} access to a file or directory"),
                 hint: Some("path".into()),
             });
         }
@@ -212,7 +246,7 @@ impl Extension for GrantCommands {
 
 fn grant(ctx: &Context, path: &str, access: Access, what: &str) -> String {
     if ctx.sandbox().is_none() {
-        return "Bash is not sandboxed in this session.".into();
+        return "This session is not sandboxed.".into();
     }
     if path.is_empty() {
         return format!(
@@ -230,7 +264,7 @@ fn grant(ctx: &Context, path: &str, access: Access, what: &str) -> String {
     };
     ctx.grant(&path, access);
     ctx.send(
-        format!("The user granted Bash {what} access to {}.", path.display()),
+        format!("The user granted {what} access to {}.", path.display()),
         false,
     );
     format!("Granted {what} access to {}.", path.display())

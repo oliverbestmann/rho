@@ -108,7 +108,7 @@ impl Tool for Read {
         ToolSpec {
             name: "Read".into(),
             description:
-                "Read a text file. Relative paths are resolved against the working directory."
+                "Read a text file. Relative paths are resolved against the working directory. Sandboxed like Bash."
                     .into(),
             input_schema: input_schema::<ReadInput>(),
         }
@@ -118,8 +118,10 @@ impl Tool for Read {
         let cwd = ctx.cwd();
         {
             let i: ReadInput = parse(input)?;
-            let text = tokio::fs::read_to_string(resolve(cwd, &i.path))
-                .await
+            let path = resolve(cwd, &i.path);
+            let text = ctx
+                .run_sandboxed(move || std::fs::read_to_string(path))
+                .await?
                 .with_context(|| format!("reading {}", i.path))?;
             Ok(truncate(text))
         }
@@ -133,7 +135,7 @@ impl Tool for Write {
         ToolSpec {
             name: "Write".into(),
             description:
-                "Create or overwrite a file with the given content. Creates parent directories."
+                "Create or overwrite a file with the given content. Creates parent directories. Sandboxed like Bash."
                     .into(),
             input_schema: input_schema::<WriteInput>(),
         }
@@ -144,13 +146,16 @@ impl Tool for Write {
         {
             let i: WriteInput = parse(input)?;
             let path = resolve(cwd, &i.path);
-            if let Some(dir) = path.parent() {
-                tokio::fs::create_dir_all(dir).await?;
-            }
-            tokio::fs::write(&path, &i.content)
-                .await
-                .with_context(|| format!("writing {}", i.path))?;
-            Ok(format!("wrote {} bytes to {}", i.content.len(), i.path))
+            let len = i.content.len();
+            ctx.run_sandboxed(move || {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(&path, i.content)
+            })
+            .await?
+            .with_context(|| format!("writing {}", i.path))?;
+            Ok(format!("wrote {len} bytes to {}", i.path))
         }
     }
 }
@@ -163,7 +168,7 @@ impl Tool for Bash {
             name: "Bash".into(),
             description: "Run a shell command in the working directory. Returns stdout, stderr and the exit code. \
                 Commands run in a sandbox: they can read system directories and read/write the workspace directories, \
-                nothing else unless granted. If a command fails with 'Permission denied' on a path outside these, \
+                nothing else unless granted. If something fails with 'Permission denied' on a path outside these, \
                 ask for it with RequestAccess.".into(),
             input_schema: input_schema::<BashInput>(),
         }
@@ -180,9 +185,8 @@ impl Tool for Bash {
                 .stdin(std::process::Stdio::null())
                 // Cancelling the prompt drops this future; take the process with it.
                 .kill_on_drop(true);
-            if let Some(policy) = ctx.sandbox() {
-                policy.apply(&mut cmd).context("setting up the sandbox")?;
-            }
+            ctx.sandbox_command(&mut cmd)
+                .context("setting up the sandbox")?;
             let child = cmd.output();
             let timeout = Duration::from_secs_f64(i.timeout.unwrap_or(120.0));
             let Ok(out) = tokio::time::timeout(timeout, child).await else {
@@ -216,7 +220,7 @@ impl Tool for RequestAccess {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "RequestAccess".into(),
-            description: "Ask the user to allow Bash commands to access a file or directory (and everything below it) for the rest of the session.".into(),
+            description: "Ask the user to allow Bash, Read and Write to access a file or directory (and everything below it) for the rest of the session.".into(),
             input_schema: input_schema::<RequestAccessInput>(),
         }
     }
@@ -224,7 +228,7 @@ impl Tool for RequestAccess {
     async fn run(&self, input: Value, ctx: &Context) -> Result<String> {
         let i: RequestAccessInput = parse(input)?;
         if ctx.sandbox().is_none() {
-            return Ok("Bash is not sandboxed in this session; no access needed.".into());
+            return Ok("This session is not sandboxed; no access needed.".into());
         }
         // Canonical, so the user approves the real target and not a symlink.
         let path = resolve(ctx.cwd(), &i.path)
@@ -334,7 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_is_sandboxed_to_cwd_and_grants() {
+    async fn tools_are_sandboxed_to_cwd_and_grants() {
         let cwd = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         let secret = other.path().join("secret");
@@ -349,13 +353,24 @@ mod tests {
         let ask = json!({"path": other.path(), "access": "read", "reason": "test"});
         assert!(RequestAccess.run(ask, &ctx).await.is_err());
 
+        let read = json!({"path": secret});
+        let write = json!({"path": other.path().join("new"), "content": "x"});
+        let err = format!("{:#}", Read.run(read.clone(), &ctx).await.unwrap_err());
+        assert!(err.contains("Permission denied"), "{err}");
+        assert!(Write.run(write.clone(), &ctx).await.is_err());
+        // Only the throwaway thread was restricted.
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "hidden");
+
         ctx.grant(other.path(), Access::Read);
         assert_eq!(Bash.run(cat, &ctx).await.unwrap(), "hidden");
+        assert_eq!(Read.run(read, &ctx).await.unwrap(), "hidden");
+        assert!(Write.run(write.clone(), &ctx).await.is_err());
         let err = Bash.run(touch.clone(), &ctx).await.unwrap_err().to_string();
         assert!(err.contains("Permission denied"), "{err}");
 
         ctx.grant(other.path(), Access::ReadWrite);
         Bash.run(touch, &ctx).await.unwrap();
+        Write.run(write, &ctx).await.unwrap();
     }
 
     #[test]
