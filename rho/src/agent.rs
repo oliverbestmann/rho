@@ -143,7 +143,7 @@ struct Persist {
     /// merge into it.
     saved: usize,
     last_len: usize,
-    /// The session row exists. Sessions without a prompt are not stored.
+    /// The session row exists.
     created: bool,
     /// A save failed and the user was told; not repeated.
     failed: bool,
@@ -179,12 +179,24 @@ impl Session {
     /// store, if the session has one. A failure is shown to the user once
     /// and does not stop the session.
     pub async fn save(&mut self) {
-        let Some(p) = &mut self.persist else {
-            return;
-        };
-        if !p.created && self.history.is_empty() {
-            return;
+        if let Err(e) = self.try_save().await
+            && let Some(p) = &mut self.persist
+            && !p.failed
+        {
+            p.failed = true;
+            self.ctx.notify(
+                "Session not saved",
+                &format!("{}: {e:#}", p.store.path().display()),
+                true,
+            );
         }
+    }
+
+    /// `save`, but the error is returned instead of shown.
+    async fn try_save(&mut self) -> Result<()> {
+        let Some(p) = &mut self.persist else {
+            return Ok(());
+        };
         let id = self.ctx.session_id().to_string();
         // Rewrite the last saved message if it grew, and drop rows past the
         // end if the history shrank.
@@ -214,22 +226,11 @@ impl Session {
                 .await
         }
         .await;
-        match result {
-            Ok(()) => {
-                p.created = true;
-                p.saved = self.history.len();
-                p.last_len = self.history.last().map_or(0, |m| m.content.len());
-            }
-            Err(e) if !p.failed => {
-                p.failed = true;
-                self.ctx.notify(
-                    "Session not saved",
-                    &format!("{}: {e:#}", p.store.path().display()),
-                    true,
-                );
-            }
-            Err(_) => {}
-        }
+        result?;
+        p.created = true;
+        p.saved = self.history.len();
+        p.last_len = self.history.last().map_or(0, |m| m.content.len());
+        Ok(())
     }
 
     /// The history was replaced (compaction): keep the old messages under
@@ -379,8 +380,8 @@ impl Agent {
         ))
     }
 
-    /// A new session. It is saved from its first prompt on if
-    /// `sessions_db` is set.
+    /// A new session. It is saved right away if `sessions_db` is set, so a
+    /// client can load it even before the first prompt.
     pub async fn start_session(
         &self,
         id: impl Into<String>,
@@ -391,7 +392,12 @@ impl Agent {
         let mut roots = vec![cwd.into()];
         roots.extend(additional_dirs);
         let store = self.open_store(&roots[0]).await?;
-        Ok(self.setup(id.into(), roots, frontend, store, false).await)
+        let mut session = self.setup(id.into(), roots, frontend, store, false).await;
+        session
+            .try_save()
+            .await
+            .context("saving the new session")?;
+        Ok(session)
     }
 
     /// Continues stored session `id`. `cwd` must be the one it started in;

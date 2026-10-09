@@ -56,14 +56,20 @@ async fn sessions_are_saved_and_resumed() {
     let provider = Scripted::new(responses);
     let agent = agent(provider.clone(), &db);
 
-    // Not stored until the first prompt.
+    // Stored right away, so it can be resumed before the first prompt.
     let empty = agent
         .start_session("empty", &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     let store = empty.ctx.store().unwrap().clone();
-    assert!(store.session("empty").await.unwrap().is_none());
+    assert!(store.session("empty").await.unwrap().is_some());
     drop(empty);
+    let resumed = agent
+        .resume_session("empty", &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    assert!(resumed.history.is_empty());
+    drop(resumed);
 
     let mut session = agent
         .start_session("s1", &cwd, vec![], Arc::new(NoFrontend))
@@ -108,7 +114,7 @@ async fn sessions_are_saved_and_resumed() {
     assert_eq!(stored, resumed.history);
     assert_eq!(stored.len(), 6);
     let page = store.list(Some(&cwd), None, 10).await.unwrap();
-    assert_eq!(page.sessions.len(), 1);
+    assert_eq!(page.sessions.len(), 2);
     assert_eq!(page.sessions[0].title.as_deref(), Some("A title"));
 
     // Wrong cwd or id.
