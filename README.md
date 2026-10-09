@@ -6,7 +6,7 @@ Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
 - `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GoCheck`,
-  `SessionTitle`, `BackgroundTasks`) and a
+  `SessionTitle`, `BackgroundTasks`, `AskUser`, `PlanMode`) and a
   `main` that calls `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -79,8 +79,8 @@ ran and its token usage.
 ## Sessions
 
 ACP sessions are saved to SQLite, `~/.config/rho/sessions.db`
-(`RHO_SESSIONS_DB` overrides), from their first prompt on: history, title,
-model, thinking level, usage and cost. One-shot CLI runs are not saved.
+(`RHO_SESSIONS_DB` overrides), from `session/new` on: history, title,
+model, thinking level, profile, usage and cost. One-shot CLI runs are not saved.
 Clients can list them (`session/list`, filtered by cwd), continue them
 (`session/load` replays the conversation, `session/resume` does not) and
 `session/close` them. Sandbox grants are not saved: a continued session
@@ -203,6 +203,47 @@ background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
 `BackgroundTaskCancel`: commands run sandboxed in their own process group, the
 result (exit status + last 10 lines) is sent with `trigger_turn`, and running
 tasks are killed when the session ends.
+
+## Profiles
+
+A profile decides what the model may do. rho itself has one, `write`:
+every tool, the full sandbox. Extensions add more in `session_start`
+(`SessionSetup::profiles`):
+
+```rust
+session.profiles.push(Profile {
+    id: "plan".into(),
+    name: "Plan".into(),
+    description: "Read-only: explore and plan, no changes".into(),
+    hidden_tools: vec!["Write".into(), "Edit".into()],
+    read_only: true,                  // sandboxed tools can only read
+    instructions: Some("...".into()), // told to the model on switching here
+});
+```
+
+With more than one profile, ACP clients get a `mode` config option (category
+`mode`) to switch. Extensions and tools switch with `ctx.set_profile(id)`;
+the client then gets a `config_option_update`. A switch applies from the
+next model request, also in the middle of a run, and does not wait for a
+running turn. That request carries a note for the model: the new profile,
+which tools disappeared or came back, whether the sandbox is read-only, and
+the profile's instructions. Hidden tools are left out of the request and
+calls to them fail. `read_only` turns every read-write sandbox rule into a
+read-only one (except `/dev/null` and friends), for `Bash`, `Write`,
+background tasks and anything else using `ctx.run_sandboxed` /
+`ctx.sandbox_command`; grants made meanwhile are kept for later. Without a
+sandbox (`"disabled": true`) only the hidden tools apply. The tool list is
+part of the prompt cache prefix, so a switch costs a cache miss. The profile
+is saved with the session.
+
+`PlanMode` (in the `rho` binary) adds `plan`, like Claude Code's plan mode:
+`Write` and `Edit` are hidden and the sandbox is read-only. The model can
+enter it with `EnterPlanMode`. It leaves with `ExitPlanMode { plan }`: the
+plan is shown on the tool call and the user is asked to approve it
+(`session/request_permission`). Approved: back to `write`, the model starts
+implementing. Rejected: the session stays in plan mode and the run stops, so
+the user can say what to change. Picking `write` in the selector needs no
+approval.
 
 ## Images
 

@@ -202,6 +202,46 @@ pub struct SessionSetup {
     /// The session continues a stored one (ACP `session/load` or
     /// `session/resume`); its history is in `ctx.store()`.
     pub resumed: bool,
+    /// Profiles the user can switch between; starts with `Profile::write`.
+    /// Extensions add their own (or hide their tools in `write`).
+    pub profiles: Vec<Profile>,
+}
+
+/// A way of working the user (or an extension, `Context::set_profile`) can
+/// switch to during a session, e.g. a read-only "plan" profile. Switching
+/// tells the model which tools appeared or disappeared, and the profile's
+/// instructions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// Tools the model does not get in this profile; calls to them fail.
+    pub hidden_tools: Vec<String>,
+    /// Sandboxed tools can only read: read-write rules apply as read-only.
+    pub read_only: bool,
+    /// Told to the model when the session switches to this profile.
+    pub instructions: Option<String>,
+}
+
+impl Profile {
+    pub const WRITE: &str = "write";
+
+    /// The default: every tool, the full sandbox.
+    pub fn write() -> Self {
+        Self {
+            id: Self::WRITE.into(),
+            name: "Write".into(),
+            description: "Read and change files".into(),
+            hidden_tools: vec![],
+            read_only: false,
+            instructions: None,
+        }
+    }
+
+    pub fn shows(&self, tool: &str) -> bool {
+        !self.hidden_tools.iter().any(|t| t == tool)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,6 +416,8 @@ struct Inner {
     /// Where the session is saved; unset if it is not.
     store: OnceLock<Store>,
     title: Mutex<Option<String>>,
+    /// The available profiles and the index of the current one.
+    profiles: Mutex<(Vec<Profile>, usize)>,
 }
 
 impl Context {
@@ -397,7 +439,44 @@ impl Context {
             wake: tokio::sync::Notify::new(),
             store: OnceLock::new(),
             title: Mutex::default(),
+            profiles: Mutex::new((vec![Profile::write()], 0)),
         }))
+    }
+
+    /// The current profile.
+    pub fn profile(&self) -> Profile {
+        let (profiles, current) = &*self.0.profiles.lock().unwrap();
+        profiles[*current].clone()
+    }
+
+    pub fn profiles(&self) -> Vec<Profile> {
+        self.0.profiles.lock().unwrap().0.clone()
+    }
+
+    /// Replaces the profiles; the current one is the first. Agent sessions
+    /// get theirs from `SessionSetup::profiles`.
+    pub fn set_profiles(&self, profiles: Vec<Profile>) {
+        assert!(!profiles.is_empty(), "a session needs a profile");
+        *self.0.profiles.lock().unwrap() = (profiles, 0);
+    }
+
+    /// Switches to profile `id`, from the next model request on (also in
+    /// the middle of a run), and tells the frontend. The model is told
+    /// with that request.
+    pub fn set_profile(&self, id: &str) -> Result<()> {
+        if self.restore_profile(id)? {
+            self.emit(AgentEvent::Profile(id));
+        }
+        Ok(())
+    }
+
+    /// `set_profile` without telling the frontend. Returns whether it changed.
+    pub(crate) fn restore_profile(&self, id: &str) -> Result<bool> {
+        let (profiles, current) = &mut *self.0.profiles.lock().unwrap();
+        let Some(i) = profiles.iter().position(|p| p.id == id) else {
+            anyhow::bail!("unknown profile {id:?}");
+        };
+        Ok(std::mem::replace(current, i) != i)
     }
 
     /// The database this session is saved in, `None` if it is not saved.
@@ -427,9 +506,22 @@ impl Context {
         &self.0.cwd
     }
 
-    /// The session's current sandbox policy (`sandbox::Config::policy` for agent sessions).
+    /// The session's sandbox policy (`sandbox::Config::policy` for agent
+    /// sessions, plus grants). A read-only profile restricts it further, see
+    /// `effective_sandbox`.
     pub fn sandbox(&self) -> Option<Policy> {
         self.0.sandbox.lock().unwrap().clone()
+    }
+
+    /// What sandboxed code runs under: `sandbox` with the current profile
+    /// applied.
+    pub fn effective_sandbox(&self) -> Option<Policy> {
+        let policy = self.sandbox()?;
+        Some(if self.profile().read_only {
+            policy.read_only()
+        } else {
+            policy
+        })
     }
 
     /// Replace the policy; `None` turns the sandbox off for this session.
@@ -444,7 +536,7 @@ impl Context {
         &self,
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T> {
-        match self.sandbox() {
+        match self.effective_sandbox() {
             Some(policy) => policy.run(f).await,
             None => Ok(tokio::task::spawn_blocking(f).await?),
         }
@@ -452,7 +544,7 @@ impl Context {
 
     /// Restricts a command to the session's sandbox before it is spawned.
     pub fn sandbox_command(&self, cmd: &mut tokio::process::Command) -> Result<()> {
-        match self.sandbox() {
+        match self.effective_sandbox() {
             Some(policy) => policy.apply(cmd),
             None => Ok(()),
         }

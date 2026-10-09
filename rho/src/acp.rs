@@ -8,16 +8,16 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
-    CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
-    Cost, CreateElicitationRequest, Diff, ElicitationAction, ElicitationContentValue,
-    ElicitationFormMode, ElicitationSchema, ElicitationSessionScope, EmbeddedResourceResource,
-    EnumOption, ImageContent, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, Meta,
-    MultiSelectPropertySchema, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    CancelNotification, CloseSessionRequest, CloseSessionResponse, ConfigOptionUpdate,
+    ContentBlock, ContentChunk, Cost, CreateElicitationRequest, Diff, ElicitationAction,
+    ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
+    EmbeddedResourceResource, EnumOption, ImageContent, Implementation, InitializeRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, Meta, MultiSelectPropertySchema, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
     ResumeSessionResponse, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
-    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionCloseCapabilities, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionId, SessionInfo as AcpSessionInfo, SessionInfoUpdate,
     SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
@@ -37,6 +37,9 @@ type SharedSession = Arc<tokio::sync::Mutex<Session>>;
 struct Entry {
     session: SharedSession,
     running: Option<AbortHandle>,
+    /// Reachable while a turn holds the session, e.g. to switch profiles.
+    ctx: Context,
+    frontend: Arc<AcpFrontend>,
 }
 
 /// What the client told us in `initialize`.
@@ -56,8 +59,10 @@ struct State {
 
 impl State {
     /// Registers the run that a cancel notification should abort.
-    fn session(&self, sid: &SessionId) -> Option<SharedSession> {
-        Some(self.sessions.lock().unwrap().get(sid)?.session.clone())
+    fn session(&self, sid: &SessionId) -> Option<(SharedSession, Context, Arc<AcpFrontend>)> {
+        let sessions = self.sessions.lock().unwrap();
+        let e = sessions.get(sid)?;
+        Some((e.session.clone(), e.ctx.clone(), e.frontend.clone()))
     }
 
     fn start_run(
@@ -141,17 +146,19 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                             sid.0.to_string(),
                             req.cwd,
                             req.additional_directories,
-                            frontend,
+                            frontend.clone(),
                         )
                         .await;
                     let session = match started {
                         Ok(s) => s,
                         Err(e) => return responder.respond_with_internal_error(format!("{e:#}")),
                     };
-                    let (options, commands) =
-                        (config_options(&agent, &session), commands(&session));
+                    let (options, commands) = (
+                        frontend.remember(config_options(&agent, &session)),
+                        commands(&session),
+                    );
                     let (ctx, dirs) = (session.ctx.clone(), session.dirs_notice());
-                    register(&agent, &state, &cx, &sid, session)?;
+                    register(&agent, &state, &cx, &sid, session, frontend)?;
                     responder
                         .respond(NewSessionResponse::new(sid.clone()).config_options(options))?;
                     // After the response: before it the client does not know the session.
@@ -299,10 +306,20 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             async move |req: SetSessionConfigOptionRequest,
                         responder: Responder<SetSessionConfigOptionResponse>,
                         cx: ConnectionTo<Client>| {
-                let Some(session) = config_state.session(&req.session_id) else {
+                let Some((session, ctx, frontend)) = config_state.session(&req.session_id) else {
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));
                 };
+                // A running turn picks it up with its next request.
+                if *req.config_id.0 == *PROFILE_OPTION {
+                    let value = req.value.as_value_id().map(|v| v.0.to_string());
+                    return match ctx.set_profile(value.as_deref().unwrap_or_default()) {
+                        Ok(()) => responder
+                            .respond(SetSessionConfigOptionResponse::new(frontend.options())),
+                        Err(e) => responder
+                            .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
+                    };
+                }
                 let agent = config_agent.clone();
                 // Waits for a running turn: the change applies from the next one.
                 cx.spawn(async move {
@@ -311,7 +328,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                     session.save().await;
                     match result {
                         Ok(()) => responder.respond(SetSessionConfigOptionResponse::new(
-                            config_options(&agent, &session),
+                            frontend.remember(config_options(&agent, &session)),
                         )),
                         Err(e) => responder
                             .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
@@ -350,7 +367,7 @@ fn frontend(
             .load(Ordering::Relaxed)
             .then(|| cwd.to_path_buf()),
         shown: Mutex::default(),
-        last_usage: Mutex::default(),
+        published: Mutex::default(),
     })
 }
 
@@ -394,6 +411,7 @@ fn register(
     cx: &ConnectionTo<Client>,
     sid: &SessionId,
     session: Session,
+    frontend: Arc<AcpFrontend>,
 ) -> Result<SharedSession, Error> {
     let ctx = session.ctx.clone();
     let session = Arc::new(tokio::sync::Mutex::new(session));
@@ -402,6 +420,8 @@ fn register(
         Entry {
             session: session.clone(),
             running: None,
+            ctx: ctx.clone(),
+            frontend,
         },
     );
     cx.spawn(watch_inbox(agent.clone(), state.clone(), sid.clone(), ctx))?;
@@ -421,14 +441,15 @@ async fn open_stored(
 ) -> anyhow::Result<(Vec<SessionConfigOption>, Vec<AvailableCommand>)> {
     // An open session takes the new directories after the replay, so the
     // notice follows the history.
-    let (session, dirs) = match state.session(sid) {
-        Some(session) => (session, Some(additional_dirs)),
+    let (session, frontend, dirs) = match state.session(sid) {
+        Some((session, _, frontend)) => (session, frontend, Some(additional_dirs)),
         None => {
             let frontend = frontend(cx, sid, state, &cwd);
             let session = agent
-                .resume_session(&sid.0, &cwd, additional_dirs, frontend)
+                .resume_session(&sid.0, &cwd, additional_dirs, frontend.clone())
                 .await?;
-            (register(agent, state, cx, sid, session)?, None)
+            let session = register(agent, state, cx, sid, session, frontend.clone())?;
+            (session, frontend, None)
         }
     };
     let mut session = session.lock().await;
@@ -450,7 +471,10 @@ async fn open_stored(
     // A new connection has not seen it; the frontend also needs it to
     // republish on a model switch.
     session.emit_usage();
-    Ok((config_options(agent, &session), commands(&session)))
+    Ok((
+        frontend.remember(config_options(agent, &session)),
+        commands(&session),
+    ))
 }
 
 /// Sends the history as session updates, as if it was happening now. Edit
@@ -607,11 +631,35 @@ struct AcpFrontend {
     /// How running tool calls were shown, by id. `ToolEnd` replaces the
     /// call's content, so it has to repeat the command or the questions.
     shown: Mutex<HashMap<String, Shown>>,
-    last_usage: Mutex<LastUsage>,
+    published: Mutex<Published>,
+}
+
+impl AcpFrontend {
+    fn remember(&self, options: Vec<SessionConfigOption>) -> Vec<SessionConfigOption> {
+        options.clone_into(&mut self.published.lock().unwrap().options);
+        options
+    }
+
+    fn options(&self) -> Vec<SessionConfigOption> {
+        self.published.lock().unwrap().options.clone()
+    }
+}
+
+/// What the client was last sent, to send again with a change.
+#[derive(Default)]
+struct Published {
+    usage: LastUsage,
+    /// `config_option_update` carries the full set, so a profile switch
+    /// sends these again.
+    options: Vec<SessionConfigOption>,
 }
 
 impl Frontend for AcpFrontend {
     fn event(&self, ev: AgentEvent<'_>) {
+        // Before session/new answered there are no options to update.
+        if matches!(ev, AgentEvent::Profile(_)) && self.options().is_empty() {
+            return;
+        }
         let n = self.notices.fetch_add(1, Ordering::Relaxed);
         let shown = match &ev {
             AgentEvent::ToolStart {
@@ -632,7 +680,7 @@ impl Frontend for AcpFrontend {
             AgentEvent::ToolEnd { id, .. } => self.shown.lock().unwrap().remove(*id),
             _ => None,
         };
-        let update = to_update(ev, n, shown.as_ref(), &mut self.last_usage.lock().unwrap());
+        let update = to_update(ev, n, shown.as_ref(), &mut self.published.lock().unwrap());
         // Dropped updates only affect display; the turn continues.
         let _ = self
             .cx
@@ -759,9 +807,37 @@ fn form_answers(content: Option<BTreeMap<String, ElicitationContentValue>>) -> A
 
 const MODEL_OPTION: &str = "model";
 const THINKING_OPTION: &str = "thought_level";
+const PROFILE_OPTION: &str = "mode";
 
-/// The session's model and thinking level as ACP config options.
+/// The session's profile (if there is a choice), model and thinking level
+/// as ACP config options.
 fn config_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
+    let mut options = vec![];
+    let profiles = session.ctx.profiles();
+    if profiles.len() > 1 {
+        let choices: Vec<_> = profiles
+            .iter()
+            .map(|p| {
+                SessionConfigSelectOption::new(p.id.clone(), p.name.clone())
+                    .description(p.description.clone())
+            })
+            .collect();
+        options.push(
+            SessionConfigOption::select(
+                PROFILE_OPTION,
+                "Profile",
+                session.ctx.profile().id,
+                choices,
+            )
+            .category(SessionConfigOptionCategory::Mode)
+            .description("What the agent may do in this session"),
+        );
+    }
+    options.extend(model_options(agent, session));
+    options
+}
+
+fn model_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
     let mut models: Vec<_> = agent
         .registry
         .models()
@@ -1017,9 +1093,20 @@ fn to_update(
     ev: AgentEvent,
     n: u64,
     shown: Option<&Shown>,
-    last_usage: &mut LastUsage,
+    published: &mut Published,
 ) -> SessionUpdate {
+    let last_usage = &mut published.usage;
     match ev {
+        AgentEvent::Profile(id) => {
+            for o in &mut published.options {
+                if *o.id.0 == *PROFILE_OPTION
+                    && let SessionConfigKind::Select(s) = &mut o.kind
+                {
+                    s.current_value = id.to_string().into();
+                }
+            }
+            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(published.options.clone()))
+        }
         // Rendered as a finished tool call, like pi-acp does for extension messages.
         AgentEvent::Notice {
             title,
@@ -1157,7 +1244,7 @@ mod tests {
     use crate::extension::{Choice, Diff as FileDiff};
 
     fn update(ev: AgentEvent, shown: Option<&Shown>) -> serde_json::Value {
-        let mut last = LastUsage::default();
+        let mut last = Published::default();
         serde_json::to_value(to_update(ev, 0, shown, &mut last)).unwrap()
     }
 
@@ -1331,7 +1418,7 @@ mod tests {
             cache_read: 1000,
             cache_write: 100,
         };
-        let mut last = LastUsage::default();
+        let mut last = Published::default();
         let wire = serde_json::to_value(to_update(
             AgentEvent::Usage {
                 model: "p/m",

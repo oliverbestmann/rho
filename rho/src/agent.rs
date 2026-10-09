@@ -67,6 +67,8 @@ pub enum AgentEvent<'a> {
         spec: &'a str,
         context_window: u64,
     },
+    /// The session switched to this profile (`Context::set_profile`).
+    Profile(&'a str),
 }
 
 pub struct Agent {
@@ -118,6 +120,8 @@ pub struct Session {
     pub history: Vec<Message>,
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
+    /// The profile the model was last told about (or started with).
+    profile_seen: String,
     /// The cwd, then the additional directories.
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
@@ -162,6 +166,65 @@ impl Session {
             total: self.usage,
             cost: self.cost,
         });
+    }
+
+    /// Specs of the tools the model gets in the current profile.
+    pub fn tool_specs(&self) -> Vec<crate::provider::ToolSpec> {
+        let profile = self.ctx.profile();
+        self.tools
+            .iter()
+            .map(|t| t.spec())
+            .filter(|s| profile.shows(&s.name))
+            .collect()
+    }
+
+    /// What the model needs to know after a profile switch, once: the new
+    /// profile, tools that appeared or disappeared, its instructions.
+    fn profile_note(&mut self) -> Option<String> {
+        let profile = self.ctx.profile();
+        if profile.id == self.profile_seen {
+            return None;
+        }
+        let profiles = self.ctx.profiles();
+        let before = profiles.iter().find(|p| p.id == self.profile_seen);
+        self.profile_seen = profile.id.clone();
+        let names: Vec<String> = self.tools.iter().map(|t| t.spec().name).collect();
+        let changed = |gone: bool| -> Vec<&str> {
+            names
+                .iter()
+                .filter(|n| {
+                    let was = before.is_none_or(|b| b.shows(n));
+                    if gone {
+                        was && !profile.shows(n)
+                    } else {
+                        !was && profile.shows(n)
+                    }
+                })
+                .map(String::as_str)
+                .collect()
+        };
+        let (removed, added) = (changed(true), changed(false));
+        let mut note = format!(
+            "<system-reminder>\nThe session switched to the {} profile ({}).",
+            profile.name, profile.description
+        );
+        if !removed.is_empty() {
+            note += &format!(" Tools no longer available: {}.", removed.join(", "));
+        }
+        if !added.is_empty() {
+            note += &format!(" Tools available again: {}.", added.join(", "));
+        }
+        if self.ctx.sandbox().is_some() {
+            note += if profile.read_only {
+                " The sandbox is read-only now: commands cannot change any files."
+            } else {
+                " The sandbox allows writing to the workspace again."
+            };
+        }
+        if let Some(text) = &profile.instructions {
+            note += &format!("\n\n{text}");
+        }
+        Some(note + "\n</system-reminder>")
     }
 
     /// The additional directories as a list for a notice, `None` without any.
@@ -217,6 +280,7 @@ impl Session {
             usage: self.usage,
             last_usage: self.last_usage,
             cost: self.cost,
+            profile: self.ctx.profile().id,
         };
         let messages = self.history[from..].to_vec();
         let result = async {
@@ -393,10 +457,7 @@ impl Agent {
         roots.extend(additional_dirs);
         let store = self.open_store(&roots[0]).await?;
         let mut session = self.setup(id.into(), roots, frontend, store, false).await;
-        session
-            .try_save()
-            .await
-            .context("saving the new session")?;
+        session.try_save().await.context("saving the new session")?;
         Ok(session)
     }
 
@@ -440,6 +501,14 @@ impl Agent {
                 true,
             );
         }
+        // The model knows the stored profile; if it is gone (its extension
+        // was removed), the first request tells it about the fallback.
+        if let Err(e) = session.ctx.restore_profile(&info.profile) {
+            session
+                .ctx
+                .notify("Profile unavailable", &format!("{e:#}"), true);
+        }
+        session.profile_seen = info.profile;
         session.thinking = info.thinking;
         session.usage = info.usage;
         session.last_usage = info.last_usage;
@@ -477,10 +546,13 @@ impl Agent {
             system,
             commands: vec![],
             resumed,
+            profiles: vec![crate::extension::Profile::write()],
         };
         for ext in &self.extensions {
             ext.session_start(&mut setup).await;
         }
+        ctx.set_profiles(setup.profiles);
+        let profile_seen = ctx.profile().id;
         Session {
             ctx,
             provider: self.provider.clone(),
@@ -498,6 +570,7 @@ impl Agent {
             commands: setup.commands,
             history: vec![],
             last_request: None,
+            profile_seen,
             roots,
             extensions: self.extensions.clone(),
             persist: store.map(|store| Persist {
@@ -616,11 +689,15 @@ impl Agent {
 
         let mut tools_called = Vec::new();
         for _ in 0..self.max_turns {
+            // The history ends with a user message here (prompt or tool results).
+            if let Some(note) = session.profile_note() {
+                push_user(&mut session.history, vec![Content::text(note)]);
+            }
             let mut request = Request {
                 model: session.model.clone(),
                 system: setup.system.clone(),
                 messages: session.history.clone(),
-                tools: session.tools.iter().map(|t| t.spec()).collect(),
+                tools: session.tool_specs(),
                 max_tokens: self.max_tokens,
                 thinking: session.thinking,
             };
@@ -765,12 +842,20 @@ impl Agent {
             input: &call.input,
             description: description.as_deref(),
         });
-        let mut decision = Decision::Allow;
+        let profile = ctx.profile();
+        let mut decision = if profile.shows(&call.name) {
+            Decision::Allow
+        } else {
+            Decision::Block(format!(
+                "{} is not available in the {} profile",
+                call.name, profile.name
+            ))
+        };
         for ext in &self.extensions {
-            decision = ext.tool_call(ctx, call).await;
             if decision != Decision::Allow {
                 break;
             }
+            decision = ext.tool_call(ctx, call).await;
         }
         let result = match decision {
             Decision::Block(reason) => Err(anyhow::anyhow!(reason)),

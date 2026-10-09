@@ -134,6 +134,22 @@ impl Policy {
         policy
     }
 
+    /// The same paths, all read-only except the device files programs
+    /// expect to write to (e.g. `/dev/null`).
+    pub fn read_only(&self) -> Self {
+        let rules = self.rules.iter().map(|r| Rule {
+            path: r.path.clone(),
+            access: if DEVICES_RW.iter().any(|d| r.path == Path::new(d)) {
+                r.access
+            } else {
+                Access::Read
+            },
+        });
+        Self {
+            rules: rules.collect(),
+        }
+    }
+
     pub fn allow(&mut self, path: impl Into<PathBuf>, access: Access) {
         self.rules.push(Rule {
             path: path.into(),

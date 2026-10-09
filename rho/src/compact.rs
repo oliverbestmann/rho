@@ -104,7 +104,7 @@ impl Agent {
                     model: session.model.clone(),
                     system: session.system.clone(),
                     messages,
-                    tools: session.tools.iter().map(|t| t.spec()).collect(),
+                    tools: session.tool_specs(),
                     max_tokens: self.max_tokens,
                     thinking: session.thinking,
                 };

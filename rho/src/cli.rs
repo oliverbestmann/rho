@@ -164,6 +164,7 @@ impl Frontend for Cli {
             }
             // Dim and on stderr, so stdout carries only the answer.
             AgentEvent::Thinking(t) => eprint!("\x1b[2m{t}\x1b[0m"),
+            AgentEvent::Profile(id) => eprintln!("\n[profile: {id}]"),
             AgentEvent::Usage { usage, .. } => {
                 st.usage += usage;
                 st.requests += 1;

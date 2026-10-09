@@ -70,11 +70,15 @@ ALTER TABLE sessions ADD COLUMN last_cache_read_tokens INTEGER NOT NULL DEFAULT 
 ALTER TABLE sessions ADD COLUMN last_cache_write_tokens INTEGER NOT NULL DEFAULT 0
     CHECK (last_cache_write_tokens >= 0);
 "#,
+    r#"
+-- `Profile::id`, e.g. 'write' or 'plan'.
+ALTER TABLE sessions ADD COLUMN profile TEXT NOT NULL DEFAULT 'write' CHECK (profile <> '');
+"#,
 ];
 
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
     output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
-    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, created_at, updated_at";
+    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, created_at, updated_at";
 
 /// A session database. Cheap to clone; clones share the connection.
 #[derive(Clone)]
@@ -99,6 +103,8 @@ pub struct SessionInfo {
     pub cost: f64,
     /// Number of compactions.
     pub epoch: i64,
+    /// `Profile::id`.
+    pub profile: String,
     /// Unix milliseconds.
     pub created_at: i64,
     pub updated_at: i64,
@@ -123,6 +129,7 @@ pub(crate) struct State {
     pub usage: Usage,
     pub last_usage: Usage,
     pub cost: f64,
+    pub profile: String,
 }
 
 /// A stored session ready to continue: its info, the `seq` of the first
@@ -344,9 +351,9 @@ impl Store {
                 "INSERT INTO sessions (id, cwd, additional_dirs, title, model, thinking,
                      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                      last_input_tokens, last_output_tokens, last_cache_read_tokens,
-                     last_cache_write_tokens, cost, created_at, updated_at)
+                     last_cache_write_tokens, cost, profile, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?16, ?16)
+                     ?15, ?17, ?16, ?16)
                  ON CONFLICT (id) DO UPDATE SET
                      additional_dirs = excluded.additional_dirs,
                      title = COALESCE(excluded.title, title),
@@ -361,6 +368,7 @@ impl Store {
                      last_cache_read_tokens = excluded.last_cache_read_tokens,
                      last_cache_write_tokens = excluded.last_cache_write_tokens,
                      cost = excluded.cost,
+                     profile = excluded.profile,
                      updated_at = excluded.updated_at",
                 params![
                     s.id,
@@ -379,6 +387,7 @@ impl Store {
                     int(s.last_usage.cache_write)?,
                     s.cost,
                     now,
+                    s.profile,
                 ],
             )?;
             Ok(())
@@ -493,6 +502,7 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
         },
         cost: r.get("cost")?,
         epoch: r.get("epoch")?,
+        profile: r.get("profile")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     };
@@ -552,6 +562,7 @@ mod tests {
                 cache_write: 8,
             },
             cost: 0.5,
+            profile: "plan".into(),
         }
     }
 
@@ -575,6 +586,7 @@ mod tests {
         assert_eq!(loaded.info.additional_dirs, [PathBuf::from("/extra")]);
         assert_eq!(loaded.info.usage.cache_write, 4);
         assert_eq!(loaded.info.last_usage.cache_write, 8);
+        assert_eq!(loaded.info.profile, "plan");
 
         assert_eq!(store.next_epoch("s").await.unwrap(), (1, 3));
         store
