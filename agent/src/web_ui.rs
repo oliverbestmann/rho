@@ -12,10 +12,17 @@
 //! and goes to `Context::send` with `trigger_turn`: during a run it rides
 //! along with the next tool results, when idle it starts a run.
 //!
-//! Listens on `RHO_WEB_UI` (default `0.0.0.0:8787`, `off` to disable); if the
-//! port is taken (another rho), the next free one of the following ten. The
-//! API needs the random token from the link that `/web` shows; the page keeps
-//! it. Only `localhost` or IP addresses are accepted as `Host` (no DNS
+//! Configured in `web.json` in the config dir:
+//!
+//! ```json
+//! { "listen": "0.0.0.0:8787", "password": "something long" }
+//! ```
+//!
+//! `listen` defaults to `0.0.0.0:8787` (`RHO_WEB_UI` overrides it, `off`
+//! disables the page); if the port is taken (another rho), the next free one
+//! of the following ten. Requests from this machine need no password; others
+//! need `password` (the page asks once and keeps it), and are refused without
+//! one. Only `localhost` or IP addresses are accepted as `Host` (no DNS
 //! rebinding).
 
 use std::collections::{BTreeMap, HashSet};
@@ -23,7 +30,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
@@ -43,20 +50,33 @@ const PORT_TRIES: u16 = 10;
 const MAX_OUTPUT: usize = 4000;
 /// Sessions in the list.
 const LIST_LIMIT: usize = 100;
-const TOKEN_HEADER: &str = "x-rho-token";
+const PASSWORD_HEADER: &str = "x-rho-password";
+const CONFIG_FILE: &str = "web.json";
 const PAGE: &str = include_str!("web_ui.html");
+
+/// `web.json`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// `ip:port`, or `off`.
+    pub listen: Option<String>,
+    /// Needed by everyone but this machine.
+    pub password: Option<String>,
+}
 
 pub struct WebUi {
     /// `ip:port` to listen on, or `off`.
     listen: String,
+    /// Why there is no web view (an invalid `web.json`).
+    problem: Option<String>,
     hub: Arc<Hub>,
     /// Where the page is served, once the first session started it.
     addr: OnceLock<Result<SocketAddr, String>>,
 }
 
 struct Hub {
-    /// Required on every API request.
-    token: String,
+    /// Required on API requests from other machines; without one they are refused.
+    password: Option<String>,
     sessions: Mutex<BTreeMap<String, View>>,
     /// The databases of the sessions seen so far, for the stored ones.
     stores: Mutex<Vec<Store>>,
@@ -222,13 +242,23 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn random_token() -> String {
-    use std::io::Read;
-    let mut b = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut b))
-        .expect("reading /dev/urandom");
-    b.iter().map(|x| format!("{x:02x}")).collect()
+/// Whether an API request may go through: this machine always, others
+/// with the password. The error is for the page.
+fn admit(
+    client: Option<IpAddr>,
+    given: Option<&str>,
+    password: Option<&str>,
+) -> Result<(), &'static str> {
+    if client.is_some_and(|ip| ip.to_canonical().is_loopback()) {
+        return Ok(());
+    }
+    match password {
+        None => Err(
+            "No password is set. Put one in ~/.config/rho/web.json to use the web view from other devices.",
+        ),
+        Some(p) if given == Some(p) => Ok(()),
+        Some(_) => Err("Wrong password."),
+    }
 }
 
 /// `localhost` or an IP address, with or without port. A DNS rebinding
@@ -254,18 +284,41 @@ impl Hub {
     }
 }
 
+impl Config {
+    /// `web.json` in `dir`; missing is the default.
+    pub fn load(dir: &std::path::Path) -> Result<Self, String> {
+        let path = dir.join(CONFIG_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+}
+
 impl WebUi {
-    /// Listens on `RHO_WEB_UI`, default `0.0.0.0:8787`.
-    pub fn from_env() -> Self {
-        Self::listen(std::env::var("RHO_WEB_UI").unwrap_or_else(|_| DEFAULT_ADDR.into()))
+    /// From `web.json` in rho's config dir; `RHO_WEB_UI` overrides `listen`.
+    pub fn from_config() -> Self {
+        match Config::load(&rho::prompt::config_dir()) {
+            Ok(mut config) => {
+                if let Ok(listen) = std::env::var("RHO_WEB_UI") {
+                    config.listen = Some(listen);
+                }
+                Self::new(config)
+            }
+            Err(e) => Self {
+                problem: Some(e),
+                ..Self::new(Config::default())
+            },
+        }
     }
 
-    /// Listens on `listen` (`ip:port`, or `off`) once the first session starts.
-    pub fn listen(listen: impl Into<String>) -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
-            listen: listen.into(),
+            listen: config.listen.unwrap_or_else(|| DEFAULT_ADDR.into()),
+            problem: None,
             hub: Arc::new(Hub {
-                token: random_token(),
+                password: config.password.filter(|p| !p.is_empty()),
                 sessions: Mutex::default(),
                 stores: Mutex::default(),
             }),
@@ -273,9 +326,21 @@ impl WebUi {
         }
     }
 
+    /// Listens on `listen` (`ip:port`, or `off`), without a password.
+    #[cfg(test)]
+    fn listen(listen: impl Into<String>) -> Self {
+        Self::new(Config {
+            listen: Some(listen.into()),
+            password: None,
+        })
+    }
+
     /// Starts the server on first use; the address or why there is none.
     fn serve(&self) -> &Result<SocketAddr, String> {
         self.addr.get_or_init(|| {
+            if let Some(problem) = &self.problem {
+                return Err(problem.clone());
+            }
             let want = &self.listen;
             if want == "off" {
                 return Err("disabled (RHO_WEB_UI=off)".into());
@@ -294,6 +359,7 @@ impl WebUi {
             let listener =
                 tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?;
             let app = router(self.hub.clone());
+            let app = app.into_make_service_with_connect_info::<SocketAddr>();
             tokio::spawn(async move { axum::serve(listener, app).await });
             Ok(addr)
         })
@@ -305,15 +371,17 @@ impl WebUi {
             Ok(addr) => *addr,
             Err(e) => return format!("No web view: {e}"),
         };
-        let token = &self.hub.token;
-        let link = |host: String| format!("http://{host}/?token={token}#{session_id}");
         if !addr.ip().is_unspecified() {
-            return format!("Web view: {}", link(addr.to_string()));
+            return format!("Web view: http://{addr}/#{session_id}");
         }
+        let other = if self.hub.password.is_some() {
+            "From another device, use this machine's address instead of 127.0.0.1 and the password from web.json."
+        } else {
+            "Other devices need a password: set one in ~/.config/rho/web.json."
+        };
         format!(
-            "Web view: {}\n\nFrom another device, use this machine's address instead of 127.0.0.1. \
-             Anyone with the link can send prompts.",
-            link(format!("127.0.0.1:{}", addr.port()))
+            "Web view: http://127.0.0.1:{}/#{session_id}\n\n{other}",
+            addr.port()
         )
     }
 }
@@ -413,7 +481,7 @@ impl Extension for WebUi {
 }
 
 fn router(hub: Arc<Hub>) -> Router {
-    let token = hub.token.clone();
+    let password = hub.password.clone();
     Router::new()
         .route("/", get(|| async { Html(PAGE) }))
         .route("/api/sessions", get(list))
@@ -426,21 +494,27 @@ fn router(hub: Arc<Hub>) -> Router {
                     .get(header::HOST)
                     .and_then(|h| h.to_str().ok())
                     .is_some_and(local_host);
-                let token_ok = !req.uri().path().starts_with("/api/")
-                    || req
-                        .headers()
-                        .get(TOKEN_HEADER)
-                        .and_then(|h| h.to_str().ok())
-                        == Some(token.as_str());
-                let refused = match (host_ok, token_ok) {
-                    (false, _) => Some(StatusCode::FORBIDDEN),
-                    (_, false) => Some(StatusCode::UNAUTHORIZED),
-                    _ => None,
+                let client = req
+                    .extensions()
+                    .get::<ConnectInfo<SocketAddr>>()
+                    .map(|c| c.0.ip());
+                let given = req
+                    .headers()
+                    .get(PASSWORD_HEADER)
+                    .and_then(|h| h.to_str().ok());
+                let refused = if !host_ok {
+                    Some((StatusCode::FORBIDDEN, "Unknown host."))
+                } else if req.uri().path().starts_with("/api/") {
+                    admit(client, given, password.as_deref())
+                        .err()
+                        .map(|e| (StatusCode::UNAUTHORIZED, e))
+                } else {
+                    None
                 };
                 async move {
                     match refused {
                         None => next.run(req).await,
-                        Some(status) => status.into_response(),
+                        Some(refusal) => refusal.into_response(),
                     }
                 }
             },
@@ -586,16 +660,11 @@ mod tests {
             .collect()
     }
 
-    /// An HTTP client for the web view of `web`, with its token.
+    /// An HTTP client for the web view of `web`; from this machine, so
+    /// without a password.
     fn client(web: &WebUi) -> (String, reqwest::Client) {
         let addr = *web.addr.get().unwrap().as_ref().unwrap();
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(TOKEN_HEADER, web.hub.token.parse().unwrap());
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .unwrap();
-        (format!("http://{addr}"), http)
+        (format!("http://{addr}"), reqwest::Client::new())
     }
 
     async fn get_json(http: &reqwest::Client, url: String) -> Value {
@@ -670,9 +739,7 @@ mod tests {
         let missing = http.get(format!("{base}/api/sessions/nope")).send().await;
         assert_eq!(missing.unwrap().status(), 404);
 
-        // No token, other hosts (DNS rebinding), non-JSON posts: refused.
-        let anonymous = reqwest::get(format!("{base}/api/sessions")).await.unwrap();
-        assert_eq!(anonymous.status(), 401);
+        // Other hosts (DNS rebinding) and non-JSON posts: refused.
         let foreign = http
             .get(format!("{base}/api/sessions"))
             .header(header::HOST, "evil.example")
@@ -809,6 +876,43 @@ mod tests {
         ] {
             assert!(!local_host(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn other_machines_need_the_password() {
+        let (local, lan) = (
+            Some("127.0.0.1".parse().unwrap()),
+            Some("192.168.1.5".parse().unwrap()),
+        );
+        let mapped = Some("::ffff:127.0.0.1".parse().unwrap());
+        assert!(admit(local, None, None).is_ok());
+        assert!(admit(mapped, None, Some("pw")).is_ok());
+        assert!(
+            admit(lan, Some("pw"), None)
+                .unwrap_err()
+                .contains("web.json")
+        );
+        assert!(admit(lan, None, Some("pw")).is_err());
+        assert!(admit(lan, Some("nope"), Some("pw")).is_err());
+        assert!(admit(lan, Some("pw"), Some("pw")).is_ok());
+        assert!(admit(None, None, Some("pw")).is_err());
+    }
+
+    #[tokio::test]
+    async fn config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Config::load(dir.path()).unwrap().password.is_none());
+        let file = dir.path().join(CONFIG_FILE);
+        std::fs::write(&file, r#"{"listen": "127.0.0.1:0", "password": "pw"}"#).unwrap();
+        let web = WebUi::new(Config::load(dir.path()).unwrap());
+        assert_eq!(web.hub.password.as_deref(), Some("pw"));
+        assert!(web.link("s").starts_with("Web view: http://127.0.0.1:"));
+        std::fs::write(&file, r#"{"pasword": "typo"}"#).unwrap();
+        assert!(
+            Config::load(dir.path())
+                .unwrap_err()
+                .contains("unknown field")
+        );
     }
 
     #[test]

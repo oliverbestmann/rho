@@ -251,13 +251,20 @@ approval.
 ## Web view
 
 `WebUi` (in the `rho` binary, `agent/src/web_ui.rs`) serves a page to follow
-sessions and queue messages for them, also from a phone. It listens on
-`0.0.0.0:8787` (`RHO_WEB_UI` sets `ip:port`, `off` disables it; a taken port
-moves on to the next of ten, e.g. for a second rho). `/web` in a session
-shows the link, with a random access token the page keeps; from another
-device, replace `127.0.0.1` with the machine's address. Anyone with the
-link can send prompts, so share it like a password. Only `localhost` and IP
-addresses are accepted as `Host` (no DNS rebinding).
+sessions and queue messages for them, also from a phone. It is configured in
+`~/.config/rho/web.json`:
+
+```json
+{ "listen": "0.0.0.0:8787", "password": "something long" }
+```
+
+Both are optional. `listen` defaults to `0.0.0.0:8787` (`RHO_WEB_UI`
+overrides it, `off` disables the page); a taken port moves on to the next of
+ten, e.g. for a second rho. Requests from this machine need no password.
+Other devices need `password`: the page asks once and keeps it. Without a
+password they are refused. Anyone with it can send prompts to the agent, so
+pick a long one. Only `localhost` and IP addresses are accepted as `Host` (no
+DNS rebinding). `/web` in a session shows the link.
 
 The list has this process's open sessions first, then the other sessions
 in the same databases (closed, or open in another rho), newest first. Those

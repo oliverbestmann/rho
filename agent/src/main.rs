@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     rho::run(rho::Options {
         extensions: vec![
             // First, so it sees every tool call before others can block it.
-            Arc::new(web_ui::WebUi::from_env()),
+            Arc::new(web_ui::WebUi::from_config()),
             Arc::new(rho::sandbox::GrantCommands),
             Arc::new(ripgrep_gate::RipgrepGate),
             Arc::new(go_check::GoCheck::default()),

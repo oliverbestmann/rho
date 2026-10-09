@@ -39,7 +39,9 @@
   button { font: inherit; min-width: 64px; }
   #queued { padding: 0 12px; font-size: 13px; }
   #closed { padding: 8px 12px; border-top: 1px solid var(--line); display: none; }
-  #auth { padding: 24px; display: none; }
+  #auth { padding: 16px 12px; display: none; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--line); }
+  #auth span { flex-basis: 100%; }
+  #auth input { flex: 1; font-size: 16px; padding: 8px; min-width: 0; }
   @media (max-width: 700px) {
     #menu { display: block; }
     nav { position: fixed; inset: 0 auto 0 0; width: 85vw; max-width: 340px; z-index: 2; transform: translateX(-100%); transition: transform .2s; padding-top: env(safe-area-inset-top); }
@@ -53,7 +55,11 @@
 <nav id="nav"></nav>
 <main>
   <header><button id="menu" aria-label="Sessions">☰</button><span id="info" class="muted">No session selected</span></header>
-  <div id="auth">Open the link that <code>/web</code> shows in a rho session; it contains the access token.</div>
+  <form id="auth">
+    <span id="auth-why"></span>
+    <input id="password" type="password" autocomplete="current-password" placeholder="Password from web.json">
+    <button>Unlock</button>
+  </form>
   <div id="log"></div>
   <div id="queued" class="muted"></div>
   <div id="closed" class="muted">Not open in this rho: read-only. Open it in your editor to continue it.</div>
@@ -63,13 +69,8 @@
   </form>
 </main>
 <script>
-// The token comes once in the link from /web and is kept.
-const params = new URLSearchParams(location.search);
-if (params.get("token")) {
-  localStorage.setItem("rho-token", params.get("token"));
-  history.replaceState(null, "", location.pathname + location.hash);
-}
-const token = localStorage.getItem("rho-token") || "";
+// Other devices need the password from web.json; it is asked once and kept.
+let password = localStorage.getItem("rho-password") || "";
 
 let current = location.hash.slice(1) || null;
 let events = [];   // of the current session, by seq
@@ -82,8 +83,13 @@ const tokens = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`;
 const touch = matchMedia("(hover: none)").matches;
 
 async function api(path, options = {}) {
-  const r = await fetch(path, { ...options, headers: { ...(options.headers || {}), "x-rho-token": token } });
-  if (r.status === 401) { $("auth").style.display = "block"; throw new Error("unauthorized"); }
+  const r = await fetch(path, { ...options, headers: { ...(options.headers || {}), "x-rho-password": password } });
+  if (r.status === 401) {
+    $("auth-why").textContent = await r.text();
+    $("auth").style.display = "flex";
+    throw new Error("unauthorized");
+  }
+  $("auth").style.display = "none";
   return r;
 }
 
@@ -189,6 +195,13 @@ async function tick() {
 }
 
 window.addEventListener("hashchange", () => { select(location.hash.slice(1)); tick(); });
+$("auth").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  password = $("password").value;
+  localStorage.setItem("rho-password", password);
+  $("password").value = "";
+  tick();
+});
 $("menu").addEventListener("click", () => document.body.classList.toggle("menu"));
 $("log").addEventListener("click", () => document.body.classList.remove("menu"));
 
