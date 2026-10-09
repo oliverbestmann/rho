@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::agent::AgentEvent;
 use crate::provider::{Content, Event, Message, Registry, Request, StopReason, Thinking, Usage};
+use crate::sandbox::{Access, Policy};
 use crate::tools::DynTool;
 
 /// Hooks into the agent loop. Every method is optional; implement them with
@@ -244,6 +245,8 @@ struct Inner {
     /// Set by `Context::stop`, read by the agent loop.
     stop: Mutex<Option<String>>,
     wake: tokio::sync::Notify,
+    /// What `Bash` may touch; `None` runs commands unsandboxed.
+    sandbox: Mutex<Option<Policy>>,
 }
 
 impl Context {
@@ -253,9 +256,11 @@ impl Context {
         frontend: Arc<dyn Frontend>,
         registry: Registry,
     ) -> Self {
+        let cwd = cwd.into();
         Self(Arc::new(Inner {
             session_id: session_id.into(),
-            cwd: cwd.into(),
+            sandbox: Mutex::new(Some(Policy::base(std::slice::from_ref(&cwd)))),
+            cwd,
             frontend,
             registry,
             inbox: Mutex::default(),
@@ -270,6 +275,23 @@ impl Context {
 
     pub fn cwd(&self) -> &Path {
         &self.0.cwd
+    }
+
+    /// The session's current sandbox policy (`sandbox::Config::policy` for agent sessions).
+    pub fn sandbox(&self) -> Option<Policy> {
+        self.0.sandbox.lock().unwrap().clone()
+    }
+
+    /// Replace the policy; `None` turns the sandbox off for this session.
+    pub fn set_sandbox(&self, policy: Option<Policy>) {
+        *self.0.sandbox.lock().unwrap() = policy;
+    }
+
+    /// Allow `path` (relative to the cwd) for the rest of the session.
+    pub fn grant(&self, path: impl AsRef<Path>, access: Access) {
+        if let Some(policy) = self.0.sandbox.lock().unwrap().as_mut() {
+            policy.allow(self.0.cwd.join(path), access);
+        }
     }
 
     pub fn registry(&self) -> &Registry {

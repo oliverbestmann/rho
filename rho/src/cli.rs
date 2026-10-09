@@ -116,7 +116,9 @@ fn make_agent(options: Options, model: &str, thinking: Thinking) -> Result<Agent
     let mut agent = Agent::new(provider, model, options.tools);
     agent.thinking = thinking;
     agent.registry = options.providers;
-    agent.config_dir = Some(crate::prompt::config_dir());
+    let config_dir = crate::prompt::config_dir();
+    agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
+    agent.config_dir = Some(config_dir);
     agent.compact_model = Some(std::env::var("RHO_COMPACT_MODEL").unwrap_or(options.compact_model));
     agent.extensions = options.extensions;
     Ok(agent)
@@ -179,7 +181,7 @@ impl Frontend for Cli {
 async fn one_shot(agent: Agent, prompt: String) -> Result<()> {
     let cli = Arc::new(Cli::default());
     let mut session = agent
-        .start_session("cli", std::env::current_dir()?, cli.clone())
+        .start_session("cli", std::env::current_dir()?, vec![], cli.clone())
         .await;
     let mut stop = agent.run(&mut session, vec![Content::text(prompt)]).await?;
     // ponytail: only handles messages already triggered when the run ends; a

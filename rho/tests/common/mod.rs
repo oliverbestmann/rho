@@ -61,5 +61,8 @@ impl Frontend for Log {
 
 pub async fn session(agent: &Agent, cwd: &std::path::Path) -> (Session, Arc<Log>) {
     let log = Arc::new(Log::default());
-    (agent.start_session("test", cwd, log.clone()).await, log)
+    (
+        agent.start_session("test", cwd, vec![], log.clone()).await,
+        log,
+    )
 }

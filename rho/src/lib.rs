@@ -7,6 +7,7 @@ pub mod compact;
 pub mod extension;
 pub mod prompt;
 pub mod provider;
+pub mod sandbox;
 pub mod tools;
 
 pub use cli::{Options, run};

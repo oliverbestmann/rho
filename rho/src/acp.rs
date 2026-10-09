@@ -10,9 +10,10 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, ContentChunk, EmbeddedResourceResource, Implementation,
     InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, SessionId, SessionInfoUpdate, SessionNotification, SessionUpdate,
-    StopReason, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UnstructuredCommandInput, UsageUpdate,
+    RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
+    SessionId, SessionInfoUpdate, SessionNotification, SessionUpdate, StopReason, ToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+    UsageUpdate,
 };
 use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, Responder};
 use futures::future::{AbortHandle, Abortable};
@@ -61,7 +62,11 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             async move |_req: InitializeRequest, responder: Responder<InitializeResponse>, _cx| {
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1)
-                        .agent_capabilities(AgentCapabilities::new())
+                        .agent_capabilities(AgentCapabilities::new().session_capabilities(
+                            SessionCapabilities::new().additional_directories(
+                                SessionAdditionalDirectoriesCapabilities::new(),
+                            ),
+                        ))
                         .agent_info(Implementation::new("rho", env!("CARGO_PKG_VERSION"))),
                 )
             },
@@ -82,7 +87,12 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         notices: AtomicU64::new(0),
                     });
                     let session = agent
-                        .start_session(sid.0.to_string(), req.cwd, frontend)
+                        .start_session(
+                            sid.0.to_string(),
+                            req.cwd,
+                            req.additional_directories,
+                            frontend,
+                        )
                         .await;
                     let ctx = session.ctx.clone();
                     let session = Arc::new(tokio::sync::Mutex::new(session));

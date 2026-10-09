@@ -64,6 +64,8 @@ pub struct Agent {
     pub max_tokens: u32,
     pub max_turns: usize,
     pub thinking: Thinking,
+    /// Starting sandbox for each session, from `sandbox.json`.
+    pub sandbox: crate::sandbox::Config,
 }
 
 /// One conversation. Tools and system prompt are fixed at session start.
@@ -103,6 +105,7 @@ impl Agent {
             max_tokens: 32_000,
             max_turns: 50,
             thinking: Thinking::default(),
+            sandbox: Default::default(),
         }
     }
 
@@ -110,12 +113,19 @@ impl Agent {
         &self,
         id: impl Into<String>,
         cwd: impl Into<PathBuf>,
+        additional_dirs: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
     ) -> Session {
-        let cwd = cwd.into();
-        let system =
-            crate::prompt::build(&self.system, &self.tools, self.config_dir.as_deref(), &cwd);
-        let ctx = Context::new(id, cwd, frontend, self.registry.clone());
+        let mut roots = vec![cwd.into()];
+        roots.extend(additional_dirs);
+        let system = crate::prompt::build(
+            &self.system,
+            &self.tools,
+            self.config_dir.as_deref(),
+            &roots,
+        );
+        let ctx = Context::new(id, roots[0].clone(), frontend, self.registry.clone());
+        ctx.set_sandbox(self.sandbox.policy(&roots));
         let mut setup = SessionSetup {
             ctx: ctx.clone(),
             tools: self.tools.clone(),

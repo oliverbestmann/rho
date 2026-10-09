@@ -47,7 +47,9 @@ impl Frontend for Collect {
 async fn session(agent: &Agent) -> (Session, Arc<Collect>) {
     let collect = Arc::new(Collect::default());
     (
-        agent.start_session("live", ".", collect.clone()).await,
+        agent
+            .start_session("live", ".", vec![], collect.clone())
+            .await,
         collect,
     )
 }

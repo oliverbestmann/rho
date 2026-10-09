@@ -33,8 +33,9 @@ pub fn build(
     preamble: &str,
     tools: &[Arc<dyn DynTool>],
     config_dir: Option<&Path>,
-    cwd: &Path,
+    roots: &[PathBuf],
 ) -> String {
+    let cwd = &roots[0];
     let read = |dir: &Path, name: &str| std::fs::read_to_string(dir.join(name)).ok();
     let mut sections: Vec<(&str, String)> = vec![];
 
@@ -109,6 +110,10 @@ pub fn build(
     }
 
     sections.push(("cwd", cwd.display().to_string()));
+    if roots.len() > 1 {
+        let dirs: Vec<String> = roots[1..].iter().map(|r| r.display().to_string()).collect();
+        sections.push(("additional_directories", dirs.join("\n")));
+    }
     for (name, text) in sections {
         prompt += &format!("\n\n<{name}>\n{text}\n</{name}>");
     }
@@ -134,7 +139,7 @@ mod tests {
             PREAMBLE,
             &crate::tools::builtin(),
             Some(config.path()),
-            &cwd,
+            std::slice::from_ref(&cwd),
         );
         assert!(p.starts_with(PREAMBLE), "{p}");
         assert!(p.contains("<tools>\n- Read: Read a text file."), "{p}");
@@ -157,7 +162,7 @@ mod tests {
             PREAMBLE,
             &crate::tools::builtin(),
             Some(config.path()),
-            &cwd,
+            std::slice::from_ref(&cwd),
         );
         assert!(p.starts_with("Custom.\n\n<addendum>"), "{p}");
         assert!(!p.contains("<tools>"), "{p}");

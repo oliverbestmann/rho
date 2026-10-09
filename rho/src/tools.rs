@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::extension::{BoxFuture, Context};
 use crate::provider::ToolSpec;
+use crate::sandbox::Access;
 
 /// Output larger than this is cut off so it does not flood the context.
 pub const MAX_OUTPUT: usize = 50 * 1024;
@@ -42,7 +43,12 @@ impl<T: Tool> DynTool for T {
 }
 
 pub fn builtin() -> Vec<Arc<dyn DynTool>> {
-    vec![Arc::new(Read), Arc::new(Write), Arc::new(Bash)]
+    vec![
+        Arc::new(Read),
+        Arc::new(Write),
+        Arc::new(Bash),
+        Arc::new(RequestAccess),
+    ]
 }
 
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
@@ -155,7 +161,10 @@ impl Tool for Bash {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Bash".into(),
-            description: "Run a shell command in the working directory. Returns stdout, stderr and the exit code.".into(),
+            description: "Run a shell command in the working directory. Returns stdout, stderr and the exit code. \
+                Commands run in a sandbox: they can read system directories and read/write the workspace directories, \
+                nothing else unless granted. If a command fails with 'Permission denied' on a path outside these, \
+                ask for it with RequestAccess.".into(),
             input_schema: input_schema::<BashInput>(),
         }
     }
@@ -164,14 +173,17 @@ impl Tool for Bash {
         let cwd = ctx.cwd();
         {
             let i: BashInput = parse(input)?;
-            let child = tokio::process::Command::new("sh")
-                .arg("-c")
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c")
                 .arg(&i.command)
                 .current_dir(cwd)
                 .stdin(std::process::Stdio::null())
                 // Cancelling the prompt drops this future; take the process with it.
-                .kill_on_drop(true)
-                .output();
+                .kill_on_drop(true);
+            if let Some(policy) = ctx.sandbox() {
+                policy.apply(&mut cmd).context("setting up the sandbox")?;
+            }
+            let child = cmd.output();
             let timeout = Duration::from_secs_f64(i.timeout.unwrap_or(120.0));
             let Ok(out) = tokio::time::timeout(timeout, child).await else {
                 bail!("command timed out after {timeout:?}");
@@ -188,9 +200,52 @@ impl Tool for Bash {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct RequestAccessInput {
+    /// file or directory; relative paths are resolved against the working directory
+    path: String,
+    access: Access,
+    /// why the access is needed, shown to the user
+    reason: String,
+}
+
+/// Lets the model ask the user for more sandbox access.
+pub struct RequestAccess;
+
+impl Tool for RequestAccess {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "RequestAccess".into(),
+            description: "Ask the user to allow Bash commands to access a file or directory (and everything below it) for the rest of the session.".into(),
+            input_schema: input_schema::<RequestAccessInput>(),
+        }
+    }
+
+    async fn run(&self, input: Value, ctx: &Context) -> Result<String> {
+        let i: RequestAccessInput = parse(input)?;
+        if ctx.sandbox().is_none() {
+            return Ok("Bash is not sandboxed in this session; no access needed.".into());
+        }
+        // Canonical, so the user approves the real target and not a symlink.
+        let path = resolve(ctx.cwd(), &i.path)
+            .canonicalize()
+            .with_context(|| format!("{} does not exist", i.path))?;
+        let mode = match i.access {
+            Access::Read => "read",
+            Access::ReadWrite => "read-write",
+        };
+        let title = format!("Allow {mode} access to {}? {}", path.display(), i.reason);
+        if !ctx.confirm(None, &title).await {
+            bail!("the user denied {mode} access to {}", path.display());
+        }
+        ctx.grant(&path, i.access);
+        Ok(format!("granted {mode} access to {}", path.display()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Bash, Context, MAX_OUTPUT, Read, Tool, Write, truncate};
+    use super::{Access, Bash, Context, MAX_OUTPUT, Read, RequestAccess, Tool, Write, truncate};
     use serde_json::json;
     use std::path::Path;
     use std::sync::Arc;
@@ -276,6 +331,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bash_is_sandboxed_to_cwd_and_grants() {
+        let cwd = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let secret = other.path().join("secret");
+        std::fs::write(&secret, "hidden").unwrap();
+        let ctx = ctx(cwd.path());
+        let cat = json!({"command": format!("cat {}", secret.display())});
+        let touch = json!({"command": format!("touch {}/new", other.path().display())});
+
+        let err = Bash.run(cat.clone(), &ctx).await.unwrap_err().to_string();
+        assert!(err.contains("Permission denied"), "{err}");
+        // NoFrontend denies the request.
+        let ask = json!({"path": other.path(), "access": "read", "reason": "test"});
+        assert!(RequestAccess.run(ask, &ctx).await.is_err());
+
+        ctx.grant(other.path(), Access::Read);
+        assert_eq!(Bash.run(cat, &ctx).await.unwrap(), "hidden");
+        let err = Bash.run(touch.clone(), &ctx).await.unwrap_err().to_string();
+        assert!(err.contains("Permission denied"), "{err}");
+
+        ctx.grant(other.path(), Access::ReadWrite);
+        Bash.run(touch, &ctx).await.unwrap();
     }
 
     #[test]

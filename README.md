@@ -73,6 +73,30 @@ history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` (default
 outputs and with tool arguments cut to 2000 chars. The notice shows which path
 ran and its token usage.
 
+## Sandbox
+
+Every `Bash` command runs under Landlock (via the `nono` crate, Linux only),
+deny by default. A session starts with system directories (`/nix/store`,
+`/etc`, `/usr`, ...) read-only, a few `/dev` files read-write, and its
+workspace directories read-write: the cwd plus ACP `additionalDirectories`.
+
+More access is configured in `~/.config/rho/sandbox.json` (next to
+`APPEND_SYSTEM.md`); paths are absolute or start with `~/`, an invalid file
+stops rho at startup:
+
+```json
+{
+  "read": ["~/.config/git/config", "~/.ssh/known_hosts", "~/.ssh/id_ed25519.pub"],
+  "read_write": ["~/go", "~/.cache", "/tmp"]
+}
+```
+
+`"disabled": true` runs Bash unsandboxed. During a session the model can
+ask for more with the `RequestAccess` tool; the user approves via ACP
+`request_permission` (the CLI always denies) and the grant lasts for the
+session. Extensions can use `ctx.grant` / `ctx.set_sandbox`. `Read` and
+`Write` run in-process and are not restricted.
+
 ## Extensions
 
 Implement `rho::extension::Extension` (all hooks optional) in a binary crate
