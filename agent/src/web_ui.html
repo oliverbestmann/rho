@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rho</title>
+<style>
+  :root { color-scheme: light dark; --muted: #8889; --line: #8883; --accent: #4a7dff; --err: #e5484d; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; display: flex; height: 100vh; }
+  nav { width: 260px; border-right: 1px solid var(--line); overflow-y: auto; flex-shrink: 0; }
+  nav a { display: block; padding: 8px 12px; color: inherit; text-decoration: none; border-bottom: 1px solid var(--line); }
+  nav a.on { background: #4a7dff22; }
+  nav small, .muted { color: var(--muted); }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  header { padding: 8px 16px; border-bottom: 1px solid var(--line); }
+  #log { flex: 1; overflow-y: auto; padding: 8px 16px; }
+  .ev { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .user { border-left: 3px solid var(--accent); padding-left: 8px; }
+  .note { color: var(--muted); font-size: 12px; }
+  .thinking { color: var(--muted); font-style: italic; }
+  details.tool { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  details.tool summary { cursor: pointer; font-family: ui-monospace, monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  details.tool.err { border-color: var(--err); }
+  details.tool pre { font-size: 12px; max-height: 300px; overflow: auto; margin: 4px 0; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.run { background: #30a46c; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  form { display: flex; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--line); }
+  textarea { flex: 1; font: inherit; min-height: 40px; resize: vertical; }
+  #queued { padding: 0 16px; }
+</style>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+  <header id="head" class="muted">No session selected</header>
+  <div id="log"></div>
+  <div id="queued" class="muted"></div>
+  <form id="form">
+    <textarea id="text" placeholder="Message for the agent (Enter to send, Shift+Enter for a new line). During a run it goes along with the next tool results; when idle it starts a run."></textarea>
+    <button>Send</button>
+  </form>
+</main>
+<script>
+let current = location.hash.slice(1) || null;
+let events = [];   // of the current session
+let timer = null;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const ago = (ms) => { const s = Math.round((Date.now() - ms) / 1000); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`; };
+const tokens = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`;
+
+async function getJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+
+async function refreshList() {
+  const list = await getJson("/api/sessions");
+  if (!current && list.length) select(list[0].id);
+  $("nav").innerHTML = list.map((s) => `
+    <a href="#${esc(s.id)}" class="${s.id === current ? "on" : ""}">
+      <span class="dot ${s.running ? "run" : ""}"></span>${esc(s.title || "Untitled")}<br>
+      <small>${esc(s.cwd)} · ${esc(s.profile)} · ${ago(s.updated)}</small>
+    </a>`).join("") || `<p class="muted" style="padding:12px">No open sessions.</p>`;
+}
+
+function select(id) {
+  current = id;
+  events = [];
+  $("log").innerHTML = "";
+  if (location.hash.slice(1) !== id) location.hash = id;
+}
+
+/// One block per event; tool ends fold into their call.
+function render() {
+  const sorted = [...events].sort((a, b) => a.turn - b.turn || a.slot - b.slot || a.seq - b.seq);
+  const tools = new Map();
+  for (const e of sorted) {
+    if (e.kind === "tool") tools.set(e.id, { ...e });
+    if (e.kind === "tool_end") tools.set(e.id, { ...(tools.get(e.id) || { id: e.id, name: e.name, input: e.input }), end: e });
+  }
+  const html = [];
+  const shown = new Set();
+  for (const e of sorted) {
+    if (e.kind === "user") {
+      const note = e.text.startsWith("<system-reminder>");
+      html.push(`<div class="ev ${note ? "note" : "user"}">${esc(note ? e.text.replace(/<\/?system-reminder>/g, "").trim() : e.text)}</div>`);
+    } else if (e.kind === "assistant") {
+      html.push(`<div class="ev">${esc(e.text)}</div>`);
+    } else if (e.kind === "thinking") {
+      html.push(`<details class="ev thinking"><summary>thinking</summary>${esc(e.text)}</details>`);
+    } else if ((e.kind === "tool" || e.kind === "tool_end") && !shown.has(e.id)) {
+      shown.add(e.id);
+      const t = tools.get(e.id);
+      const arg = t.input && (t.input.command || t.input.path || t.input.plan || "");
+      const state = !t.end ? "⏳" : t.end.is_error ? "✗" : "✓";
+      html.push(`<details class="ev tool ${t.end && t.end.is_error ? "err" : ""}">
+        <summary>${state} ${esc(t.name)} ${esc(String(arg).split("\n")[0])}</summary>
+        <pre>${esc(JSON.stringify(t.input, null, 2))}</pre>
+        ${t.end ? `<pre>${esc(t.end.output)}</pre>` : ""}
+      </details>`);
+    }
+  }
+  const log = $("log");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  // Keep open details open across re-renders.
+  const open = [...log.querySelectorAll("details")].map((d) => d.open);
+  log.innerHTML = html.join("");
+  log.querySelectorAll("details").forEach((d, i) => { if (open[i]) d.open = true; });
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+async function refreshSession() {
+  if (!current) return;
+  let s;
+  try {
+    s = await getJson(`/api/sessions/${encodeURIComponent(current)}?since=${events.length}`);
+  } catch (e) {
+    $("head").textContent = "Session closed";
+    return;
+  }
+  $("head").className = "";
+  $("head").innerHTML = `<span class="dot ${s.running ? "run" : ""}"></span><b>${esc(s.title || "Untitled")}</b>
+    <span class="muted"> · ${esc(s.profile)} · ${s.running ? "working" : "idle"} · ${ago(s.updated)}${s.context ? ` · context ${tokens(s.context)}` : ""}</span>`;
+  $("queued").innerHTML = s.queued.map((q) => `<div>⏳ queued: ${esc(q)}</div>`).join("");
+  if (s.events.length) {
+    events.push(...s.events);
+    render();
+  }
+}
+
+async function tick() {
+  try {
+    await refreshList();
+    await refreshSession();
+  } catch (e) {
+    $("head").textContent = "rho is not reachable";
+  }
+}
+
+window.addEventListener("hashchange", () => { select(location.hash.slice(1)); tick(); });
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const text = $("text").value.trim();
+  if (!text || !current) return;
+  const r = await fetch(`/api/sessions/${encodeURIComponent(current)}/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (r.ok) $("text").value = "";
+  tick();
+});
+$("text").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("form").requestSubmit(); }
+});
+
+if (current) select(current);
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

@@ -6,7 +6,7 @@ Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
 - `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GoCheck`,
-  `SessionTitle`, `BackgroundTasks`, `AskUser`, `PlanMode`) and a
+  `SessionTitle`, `BackgroundTasks`, `AskUser`, `PlanMode`, `WebUi`) and a
   `main` that calls `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -247,6 +247,27 @@ plan is shown on the tool call and the user is asked to approve it
 implementing. Rejected: the session stays in plan mode and the run stops, so
 the user can say what to change. Picking `write` in the selector needs no
 approval.
+
+## Web view
+
+`WebUi` (in the `rho` binary, `agent/src/web_ui.rs`) serves a page to follow
+the process's open sessions and queue messages for them, at
+`http://127.0.0.1:8787` (`RHO_WEB_UI` sets `ip:port`, `off` disables it; a
+taken port moves on to the next of ten, e.g. for a second rho). `/web` in a
+session shows its link.
+
+It is an extension like any other, so it sees what hooks see: messages as
+they go to the model (prompts, queued messages, profile notes), tool calls
+as they start and finish, and the model's text and thinking when its turn
+ends; it does not stream text. A loaded session shows its stored history.
+"Working" means a model request started and the model has not settled since;
+a cancelled run stays "working" until the next one.
+
+A message from the page goes to `ctx.send(text, trigger_turn)`: during a run
+it rides along with the next tool results, when idle it starts a run (the
+ACP client sees that run's updates, but not the message itself). Only
+requests with a localhost `Host` header (no DNS rebinding) are served, and
+sending requires a JSON body, which other sites cannot post cross-origin.
 
 ## Images
 
