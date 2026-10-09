@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::agent::AgentEvent;
 use crate::provider::{Content, Event, Message, Registry, Request, StopReason, Thinking, Usage};
 use crate::sandbox::{Access, Policy};
+use crate::store::Store;
 use crate::tools::DynTool;
 
 /// Hooks into the agent loop. Every method is optional; implement them with
@@ -198,6 +199,9 @@ pub struct SessionSetup {
     pub system: String,
     /// Slash commands to offer the user; handled by `Extension::command`.
     pub commands: Vec<SlashCommand>,
+    /// The session continues a stored one (ACP `session/load` or
+    /// `session/resume`); its history is in `ctx.store()`.
+    pub resumed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -367,6 +371,9 @@ struct Inner {
     wake: tokio::sync::Notify,
     /// What `Bash` may touch; `None` runs commands unsandboxed.
     sandbox: Mutex<Option<Policy>>,
+    /// Where the session is saved; unset if it is not.
+    store: OnceLock<Store>,
+    title: Mutex<Option<String>>,
 }
 
 impl Context {
@@ -386,7 +393,28 @@ impl Context {
             inbox: Mutex::default(),
             stop: Mutex::default(),
             wake: tokio::sync::Notify::new(),
+            store: OnceLock::new(),
+            title: Mutex::default(),
         }))
+    }
+
+    /// The database this session is saved in, `None` if it is not saved.
+    /// Use it to read past sessions; writing is up to rho.
+    pub fn store(&self) -> Option<&Store> {
+        self.0.store.get()
+    }
+
+    pub(crate) fn set_store(&self, store: Store) {
+        let _ = self.0.store.set(store);
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.0.title.lock().unwrap().clone()
+    }
+
+    /// Sets the title without showing or saving it (restored sessions).
+    pub(crate) fn restore_title(&self, title: Option<String>) {
+        *self.0.title.lock().unwrap() = title;
     }
 
     pub fn session_id(&self) -> &str {
@@ -452,7 +480,17 @@ impl Context {
         });
     }
 
+    /// Shows the title and saves it with the session.
     pub fn set_title(&self, title: &str) {
+        self.restore_title(Some(title.into()));
+        // Saved sessions also get it with their next save; this covers a
+        // title that arrives after the last one.
+        if let Some(store) = self.store().cloned()
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            let (id, title) = (self.session_id().to_string(), title.to_string());
+            rt.spawn(async move { store.set_title(&id, &title).await });
+        }
         self.emit(AgentEvent::Title(title));
     }
 

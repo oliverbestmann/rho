@@ -8,14 +8,17 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
-    CancelNotification, ContentBlock, ContentChunk, Cost, CreateElicitationRequest, Diff,
-    ElicitationAction, ElicitationContentValue, ElicitationFormMode, ElicitationSchema,
-    ElicitationSessionScope, EmbeddedResourceResource, EnumOption, Implementation,
-    InitializeRequest, InitializeResponse, Meta, MultiSelectPropertySchema, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities,
-    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionId, SessionInfoUpdate, SessionNotification, SessionUpdate,
+    CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
+    Cost, CreateElicitationRequest, Diff, ElicitationAction, ElicitationContentValue,
+    ElicitationFormMode, ElicitationSchema, ElicitationSessionScope, EmbeddedResourceResource,
+    EnumOption, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, Meta, MultiSelectPropertySchema,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
+    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionId, SessionInfo as AcpSessionInfo, SessionInfoUpdate,
+    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     StringPropertySchema, Terminal, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage as AcpUsage, UsageUpdate,
@@ -25,7 +28,8 @@ use futures::future::{AbortHandle, Abortable};
 
 use crate::agent::{Agent, AgentEvent, Session};
 use crate::extension::{Answers, BoxFuture, Context, Field, FieldKind, Form, FormReply, Frontend};
-use crate::provider::{self, Content, Thinking, Usage};
+use crate::provider::{self, Content, Role, Thinking, Usage};
+use crate::store::Store;
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
 
@@ -46,7 +50,6 @@ struct ClientCaps {
 #[derive(Default)]
 struct State {
     sessions: Mutex<HashMap<SessionId, Entry>>,
-    next_id: AtomicU64,
     caps: ClientCaps,
 }
 
@@ -76,9 +79,11 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
         state.clone(),
         state.clone(),
         state.clone(),
-        state,
+        state.clone(),
     );
-    let (prompt_agent, config_agent) = (agent.clone(), agent.clone());
+    let (load_state, resume_state, close_state) = (state.clone(), state.clone(), state);
+    let (prompt_agent, config_agent, init_agent) = (agent.clone(), agent.clone(), agent.clone());
+    let (load_agent, resume_agent, list_agent) = (agent.clone(), agent.clone(), agent.clone());
 
     agent_client_protocol::Agent
         .builder()
@@ -98,13 +103,22 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         .unwrap_or(false),
                     Ordering::Relaxed,
                 );
+                let saved = init_agent.sessions_db.is_some();
+                let mut sessions = SessionCapabilities::new()
+                    .additional_directories(SessionAdditionalDirectoriesCapabilities::new())
+                    .close(SessionCloseCapabilities::new());
+                if saved {
+                    sessions = sessions
+                        .list(SessionListCapabilities::new())
+                        .resume(SessionResumeCapabilities::new());
+                }
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1)
-                        .agent_capabilities(AgentCapabilities::new().session_capabilities(
-                            SessionCapabilities::new().additional_directories(
-                                SessionAdditionalDirectoriesCapabilities::new(),
-                            ),
-                        ))
+                        .agent_capabilities(
+                            AgentCapabilities::new()
+                                .load_session(saved)
+                                .session_capabilities(sessions),
+                        )
                         .agent_info(Implementation::new("rho", env!("CARGO_PKG_VERSION"))),
                 )
             },
@@ -114,25 +128,13 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             async move |req: NewSessionRequest,
                         responder: Responder<NewSessionResponse>,
                         cx: ConnectionTo<Client>| {
-                let n = new_state.next_id.fetch_add(1, Ordering::Relaxed);
-                let sid = SessionId::new(format!("rho-{}-{n}", std::process::id()));
+                // Unique across processes: sessions are stored by id.
+                let sid = SessionId::new(crate::store::new_session_id());
                 let (agent, state) = (agent.clone(), new_state.clone());
                 // Extension session_start hooks are async; keep them off the dispatch loop.
                 cx.clone().spawn(async move {
-                    let frontend = Arc::new(AcpFrontend {
-                        cx: cx.clone(),
-                        sid: sid.clone(),
-                        notices: AtomicU64::new(0),
-                        forms: state.caps.forms.load(Ordering::Relaxed),
-                        terminal_cwd: state
-                            .caps
-                            .terminal_output
-                            .load(Ordering::Relaxed)
-                            .then(|| req.cwd.clone()),
-                        shown: Mutex::default(),
-                        last_usage: Mutex::default(),
-                    });
-                    let session = agent
+                    let frontend = frontend(&cx, &sid, &state, &req.cwd);
+                    let started = agent
                         .start_session(
                             sid.0.to_string(),
                             req.cwd,
@@ -140,49 +142,100 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                             frontend,
                         )
                         .await;
-                    let ctx = session.ctx.clone();
-                    let mut commands = vec![
-                        AvailableCommand::new(
-                            "compact",
-                            "Summarize the conversation to free up context",
-                        )
-                        .input(AvailableCommandInput::Unstructured(
-                            UnstructuredCommandInput::new("optional focus for the summary"),
-                        )),
-                        AvailableCommand::new(
-                            "usage",
-                            "Show token, cache and cost usage of this session",
-                        ),
-                    ];
-                    for c in &session.commands {
-                        let mut command = AvailableCommand::new(&c.name, &c.description);
-                        if let Some(hint) = &c.hint {
-                            command = command.input(AvailableCommandInput::Unstructured(
-                                UnstructuredCommandInput::new(hint),
-                            ));
-                        }
-                        commands.push(command);
-                    }
-                    let config_options = config_options(&agent, &session);
-                    let session = Arc::new(tokio::sync::Mutex::new(session));
-                    state.sessions.lock().unwrap().insert(
-                        sid.clone(),
-                        Entry {
-                            session,
-                            running: None,
-                        },
-                    );
-                    cx.spawn(watch_inbox(agent, state, sid.clone(), ctx))?;
-                    responder.respond(
-                        NewSessionResponse::new(sid.clone()).config_options(config_options),
-                    )?;
-                    cx.send_notification(SessionNotification::new(
-                        sid,
-                        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(
-                            commands,
-                        )),
-                    ))
+                    let session = match started {
+                        Ok(s) => s,
+                        Err(e) => return responder.respond_with_internal_error(format!("{e:#}")),
+                    };
+                    let (options, commands) =
+                        (config_options(&agent, &session), commands(&session));
+                    register(&agent, &state, &cx, &sid, session)?;
+                    responder
+                        .respond(NewSessionResponse::new(sid.clone()).config_options(options))?;
+                    send_commands(&cx, &sid, commands)
                 })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: LoadSessionRequest,
+                        responder: Responder<LoadSessionResponse>,
+                        cx: ConnectionTo<Client>| {
+                let (agent, state) = (load_agent.clone(), load_state.clone());
+                cx.clone().spawn(async move {
+                    let sid = req.session_id;
+                    let opened = open_stored(
+                        &agent,
+                        &state,
+                        &cx,
+                        &sid,
+                        req.cwd,
+                        req.additional_directories,
+                        true,
+                    );
+                    match opened.await {
+                        Ok((options, commands)) => {
+                            responder
+                                .respond(LoadSessionResponse::new().config_options(options))?;
+                            send_commands(&cx, &sid, commands)
+                        }
+                        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
+                    }
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: ResumeSessionRequest,
+                        responder: Responder<ResumeSessionResponse>,
+                        cx: ConnectionTo<Client>| {
+                let (agent, state) = (resume_agent.clone(), resume_state.clone());
+                cx.clone().spawn(async move {
+                    let sid = req.session_id;
+                    let opened = open_stored(
+                        &agent,
+                        &state,
+                        &cx,
+                        &sid,
+                        req.cwd,
+                        req.additional_directories,
+                        false,
+                    );
+                    match opened.await {
+                        Ok((options, commands)) => {
+                            responder
+                                .respond(ResumeSessionResponse::new().config_options(options))?;
+                            send_commands(&cx, &sid, commands)
+                        }
+                        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
+                    }
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: ListSessionsRequest,
+                        responder: Responder<ListSessionsResponse>,
+                        cx: ConnectionTo<Client>| {
+                let agent = list_agent.clone();
+                cx.spawn(async move {
+                    match list_sessions(&agent, req).await {
+                        Ok(list) => responder.respond(list),
+                        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
+                    }
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: CloseSessionRequest,
+                        responder: Responder<CloseSessionResponse>,
+                        _cx| {
+                // Dropping the entry ends the session once a running turn lets go.
+                let entry = close_state.sessions.lock().unwrap().remove(&req.session_id);
+                if let Some(abort) = entry.and_then(|e| e.running) {
+                    abort.abort();
+                }
+                responder.respond(CloseSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -206,9 +259,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                                 .await
                                 .map(|()| provider::StopReason::EndTurn),
                             Some(("usage", _)) => {
-                                session
-                                    .ctx
-                                    .emit(AgentEvent::Text(&session.usage_report()));
+                                session.ctx.emit(AgentEvent::Text(&session.usage_report()));
                                 Ok(provider::StopReason::EndTurn)
                             }
                             Some((name, args))
@@ -250,7 +301,9 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                 // Waits for a running turn: the change applies from the next one.
                 cx.spawn(async move {
                     let mut session = session.lock().await;
-                    match set_config(&agent, &mut session, &req) {
+                    let result = set_config(&agent, &mut session, &req);
+                    session.save().await;
+                    match result {
                         Ok(()) => responder.respond(SetSessionConfigOptionResponse::new(
                             config_options(&agent, &session),
                         )),
@@ -272,6 +325,219 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             },
             agent_client_protocol::on_receive_notification!(),
         )
+}
+
+fn frontend(
+    cx: &ConnectionTo<Client>,
+    sid: &SessionId,
+    state: &State,
+    cwd: &Path,
+) -> Arc<AcpFrontend> {
+    Arc::new(AcpFrontend {
+        cx: cx.clone(),
+        sid: sid.clone(),
+        notices: AtomicU64::new(0),
+        forms: state.caps.forms.load(Ordering::Relaxed),
+        terminal_cwd: state
+            .caps
+            .terminal_output
+            .load(Ordering::Relaxed)
+            .then(|| cwd.to_path_buf()),
+        shown: Mutex::default(),
+        last_usage: Mutex::default(),
+    })
+}
+
+/// Built-in slash commands plus the extensions'.
+fn commands(session: &Session) -> Vec<AvailableCommand> {
+    let mut commands = vec![
+        AvailableCommand::new("compact", "Summarize the conversation to free up context").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+                "optional focus for the summary",
+            )),
+        ),
+        AvailableCommand::new("usage", "Show token, cache and cost usage of this session"),
+    ];
+    for c in &session.commands {
+        let mut command = AvailableCommand::new(&c.name, &c.description);
+        if let Some(hint) = &c.hint {
+            command = command.input(AvailableCommandInput::Unstructured(
+                UnstructuredCommandInput::new(hint),
+            ));
+        }
+        commands.push(command);
+    }
+    commands
+}
+
+fn send_commands(
+    cx: &ConnectionTo<Client>,
+    sid: &SessionId,
+    commands: Vec<AvailableCommand>,
+) -> Result<(), Error> {
+    cx.send_notification(SessionNotification::new(
+        sid.clone(),
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands)),
+    ))
+}
+
+/// Makes an opened session reachable for prompts and triggered messages.
+fn register(
+    agent: &Arc<Agent>,
+    state: &Arc<State>,
+    cx: &ConnectionTo<Client>,
+    sid: &SessionId,
+    session: Session,
+) -> Result<SharedSession, Error> {
+    let ctx = session.ctx.clone();
+    let session = Arc::new(tokio::sync::Mutex::new(session));
+    state.sessions.lock().unwrap().insert(
+        sid.clone(),
+        Entry {
+            session: session.clone(),
+            running: None,
+        },
+    );
+    cx.spawn(watch_inbox(agent.clone(), state.clone(), sid.clone(), ctx))?;
+    Ok(session)
+}
+
+/// `session/load` (with `replay`) and `session/resume`: the open session, or
+/// the stored one continued. Returns its config options and commands.
+async fn open_stored(
+    agent: &Arc<Agent>,
+    state: &Arc<State>,
+    cx: &ConnectionTo<Client>,
+    sid: &SessionId,
+    cwd: PathBuf,
+    additional_dirs: Vec<PathBuf>,
+    replay: bool,
+) -> anyhow::Result<(Vec<SessionConfigOption>, Vec<AvailableCommand>)> {
+    let session = match state.session(sid) {
+        Some(session) => session,
+        None => {
+            let frontend = frontend(cx, sid, state, &cwd);
+            let session = agent
+                .resume_session(&sid.0, cwd, additional_dirs, frontend)
+                .await?;
+            register(agent, state, cx, sid, session)?
+        }
+    };
+    let session = session.lock().await;
+    if replay {
+        replay_history(cx, sid, &session)?;
+    }
+    Ok((config_options(agent, &session), commands(&session)))
+}
+
+/// Sends the history as session updates, as if it was happening now. Edit
+/// diffs are not stored, so edits show their output only.
+fn replay_history(
+    cx: &ConnectionTo<Client>,
+    sid: &SessionId,
+    session: &Session,
+) -> Result<(), Error> {
+    let ctx = &session.ctx;
+    for msg in &session.history {
+        let mut user = vec![];
+        for block in &msg.content {
+            match block {
+                Content::Text { text } if msg.role == Role::User => user.push(text.as_str()),
+                Content::Text { text } => ctx.emit(AgentEvent::Text(text)),
+                Content::Thinking { thinking, .. } => ctx.emit(AgentEvent::Thinking(thinking)),
+                Content::ToolUse { id, name, input } => {
+                    let description = session
+                        .tools
+                        .iter()
+                        .find(|t| t.spec().name == *name)
+                        .and_then(|t| t.describe(input));
+                    ctx.emit(AgentEvent::ToolStart {
+                        id,
+                        name,
+                        input,
+                        description: description.as_deref(),
+                    });
+                }
+                Content::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => ctx.emit(AgentEvent::ToolEnd {
+                    id: tool_use_id,
+                    output: content,
+                    is_error: *is_error,
+                    diff: None,
+                }),
+                Content::RedactedThinking { .. } => {}
+            }
+        }
+        if !user.is_empty() {
+            cx.send_notification(SessionNotification::new(
+                sid.clone(),
+                SessionUpdate::UserMessageChunk(ContentChunk::new(
+                    user.join("\n\n").as_str().into(),
+                )),
+            ))?;
+        }
+    }
+    if let Some(title) = ctx.title() {
+        ctx.emit(AgentEvent::Title(&title));
+    }
+    Ok(())
+}
+
+const LIST_PAGE: usize = 100;
+
+/// `session/list`. Without a cwd filter, the database for rho's own cwd is
+/// listed.
+async fn list_sessions(
+    agent: &Agent,
+    req: ListSessionsRequest,
+) -> anyhow::Result<ListSessionsResponse> {
+    let db = agent
+        .sessions_db
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("sessions are not saved"))?;
+    let path = match &req.cwd {
+        Some(cwd) => db(cwd),
+        None => db(&std::env::current_dir()?),
+    };
+    let store = tokio::task::spawn_blocking(move || Store::open(path)).await??;
+    let page = store
+        .list(req.cwd.as_deref(), req.cursor.as_deref(), LIST_PAGE)
+        .await?;
+    let sessions = page
+        .sessions
+        .into_iter()
+        .map(|s| {
+            AcpSessionInfo::new(s.id, s.cwd)
+                .additional_directories(s.additional_dirs)
+                .title(s.title)
+                .updated_at(rfc3339(s.updated_at))
+        })
+        .collect();
+    Ok(ListSessionsResponse::new(sessions).next_cursor(page.next))
+}
+
+/// Unix milliseconds as an RFC 3339 UTC timestamp.
+fn rfc3339(ms: i64) -> String {
+    let (secs, ms) = (ms.div_euclid(1000), ms.rem_euclid(1000));
+    let (days, t) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z",
+        t / 3600,
+        t % 3600 / 60,
+        t % 60
+    )
 }
 
 /// Runs turns for extension messages sent with `trigger_turn` while no
@@ -1052,6 +1318,13 @@ mod tests {
                 "cachedWriteTokens": 4,
             })
         );
+    }
+
+    #[test]
+    fn timestamps_are_rfc3339() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
+        assert_eq!(rfc3339(951_782_400_000), "2000-02-29T00:00:00.000Z");
     }
 
     #[test]

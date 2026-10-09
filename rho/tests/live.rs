@@ -49,7 +49,8 @@ async fn session(agent: &Agent) -> (Session, Arc<Collect>) {
     (
         agent
             .start_session("live", ".", vec![], collect.clone())
-            .await,
+            .await
+            .unwrap(),
         collect,
     )
 }

@@ -9,6 +9,7 @@ pub mod extension;
 pub mod prompt;
 pub mod provider;
 pub mod sandbox;
+pub mod store;
 pub mod tools;
 
 pub use cli::{Options, run};

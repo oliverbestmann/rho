@@ -1,7 +1,7 @@
 use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, SessionsDb};
 use crate::anthropic::Anthropic;
 use crate::auth::{self, AuthStore, Pkce};
 use crate::extension::{DynExtension, Frontend};
@@ -22,6 +22,7 @@ options:
 env:
   RHO_AUTH_FILE      credential file
   RHO_COMPACT_MODEL  model for /compact when the cache expired
+  RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
 
 files in ~/.config/rho: SYSTEM.md (replaces the base prompt), APPEND_SYSTEM.md, AGENTS.md";
 
@@ -51,6 +52,10 @@ pub struct Options {
     /// "provider/model" for `/compact` with an expired cache, unless
     /// `RHO_COMPACT_MODEL` is set.
     pub compact_model: String,
+    /// Database for ACP sessions, by cwd; `None` does not save them.
+    /// Default: `store::default_path()` (`RHO_SESSIONS_DB` or
+    /// `~/.config/rho/sessions.db`) for every cwd. One-shot runs are not saved.
+    pub sessions_db: Option<SessionsDb>,
 }
 
 impl Default for Options {
@@ -65,6 +70,7 @@ impl Default for Options {
             extensions: vec![],
             model: "anthropic/claude-sonnet-5-5".into(),
             compact_model: "anthropic/claude-haiku-5-5".into(),
+            sessions_db: Some(Arc::new(|_| crate::store::default_path())),
         }
     }
 }
@@ -88,7 +94,9 @@ pub async fn run(options: Options) -> Result<()> {
         }
         Some("login") => login().await,
         Some("acp") => {
-            let agent = make_agent(options, &model, thinking)?;
+            let sessions_db = options.sessions_db.clone();
+            let mut agent = make_agent(options, &model, thinking)?;
+            agent.sessions_db = sessions_db;
             use agent_client_protocol::ConnectTo;
             crate::acp::agent(Arc::new(agent))
                 .connect_to(agent_client_protocol::Stdio::new())
@@ -183,7 +191,7 @@ async fn one_shot(agent: Agent, prompt: String) -> Result<()> {
     let cli = Arc::new(Cli::default());
     let mut session = agent
         .start_session("cli", std::env::current_dir()?, vec![], cli.clone())
-        .await;
+        .await?;
     let mut stop = agent.run(&mut session, vec![Content::text(prompt)]).await?;
     // ponytail: only handles messages already triggered when the run ends; a
     // one-shot run does not wait for background work that reports later.

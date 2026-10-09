@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use rho::extension::{Context, Extension, PromptSetup};
+use rho::extension::{Context, Extension, PromptSetup, SessionSetup};
 use rho::provider::Content;
 
 const MODEL: &str = "anthropic/claude-haiku-5-5";
@@ -18,6 +18,14 @@ pub struct SessionTitle {
 }
 
 impl Extension for SessionTitle {
+    async fn session_start(&self, session: &mut SessionSetup) {
+        // A resumed session keeps its title.
+        if session.resumed {
+            let id = session.ctx.session_id().to_string();
+            self.seen.lock().unwrap().insert(id);
+        }
+    }
+
     async fn before_prompt(&self, ctx: &Context, prompt: &mut PromptSetup) {
         if !self.seen.lock().unwrap().insert(ctx.session_id().into()) {
             return;

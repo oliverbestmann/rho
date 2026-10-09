@@ -141,6 +141,7 @@ impl Agent {
         }];
         // The new prefix is not cached yet.
         session.last_request = None;
+        session.save_compacted().await;
         session.ctx.notify(
             &format!("Compacted ({label})"),
             &format!(

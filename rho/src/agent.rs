@@ -2,11 +2,11 @@
 //! feed results back, repeat until the model stops asking for tools. Extension
 //! hooks run at each step.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
 use serde_json::Value;
 
@@ -17,7 +17,11 @@ use crate::extension::{
 use crate::provider::{
     Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, Usage,
 };
+use crate::store::{State, Store};
 use crate::tools::DynTool;
+
+/// Picks the database for a session from its cwd, see `Agent::sessions_db`.
+pub type SessionsDb = Arc<dyn Fn(&Path) -> PathBuf + Send + Sync>;
 
 /// What the agent is doing, for frontends (CLI printer, ACP session updates).
 #[derive(Debug, PartialEq)]
@@ -86,6 +90,9 @@ pub struct Agent {
     pub thinking: Thinking,
     /// Starting sandbox for each session, from `sandbox.json`.
     pub sandbox: crate::sandbox::Config,
+    /// Where sessions are saved, by cwd. Each session opens its own
+    /// connection. `None`: sessions are not saved and cannot be resumed.
+    pub sessions_db: Option<SessionsDb>,
 }
 
 /// One conversation. Tools and system prompt are fixed at session start.
@@ -110,9 +117,103 @@ pub struct Session {
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
     extensions: Vec<Arc<dyn DynExtension>>,
+    persist: Option<Persist>,
+}
+
+/// How much of a session is in its store.
+struct Persist {
+    store: Store,
+    roots: Vec<PathBuf>,
+    epoch: i64,
+    /// `seq` of `history[0]`.
+    base: i64,
+    /// Messages saved, and the block count of the last one: `push_user` can
+    /// merge into it.
+    saved: usize,
+    last_len: usize,
+    /// The session row exists. Sessions without a prompt are not stored.
+    created: bool,
+    /// A save failed and the user was told; not repeated.
+    failed: bool,
 }
 
 impl Session {
+    /// Writes new history and the session state (model, usage, ...) to the
+    /// store, if the session has one. A failure is shown to the user once
+    /// and does not stop the session.
+    pub async fn save(&mut self) {
+        let Some(p) = &mut self.persist else {
+            return;
+        };
+        if !p.created && self.history.is_empty() {
+            return;
+        }
+        let id = self.ctx.session_id().to_string();
+        // Rewrite the last saved message if it grew, and drop rows past the
+        // end if the history shrank.
+        let from = match p.saved.checked_sub(1) {
+            Some(last) if self.history.get(last).map(|m| m.content.len()) != Some(p.last_len) => {
+                last
+            }
+            _ => p.saved,
+        }
+        .min(self.history.len());
+        let state = State {
+            id: id.clone(),
+            cwd: p.roots[0].clone(),
+            additional_dirs: p.roots[1..].to_vec(),
+            title: self.ctx.title(),
+            model: self.model_spec.clone(),
+            thinking: self.thinking,
+            usage: self.usage,
+            cost: self.cost,
+        };
+        let messages = self.history[from..].to_vec();
+        let result = async {
+            p.store.save_state(state).await?;
+            p.store
+                .save_messages(&id, p.epoch, p.base + from as i64, messages)
+                .await
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                p.created = true;
+                p.saved = self.history.len();
+                p.last_len = self.history.last().map_or(0, |m| m.content.len());
+            }
+            Err(e) if !p.failed => {
+                p.failed = true;
+                self.ctx.notify(
+                    "Session not saved",
+                    &format!("{}: {e:#}", p.store.path().display()),
+                    true,
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The history was replaced (compaction): keep the old messages under
+    /// their epoch and save the new history under the next one.
+    pub(crate) async fn save_compacted(&mut self) {
+        if let Some(p) = &mut self.persist
+            && p.created
+        {
+            match p.store.next_epoch(self.ctx.session_id()).await {
+                Ok((epoch, base)) => {
+                    (p.epoch, p.base, p.saved, p.last_len) = (epoch, base, 0, 0);
+                }
+                Err(e) => {
+                    self.ctx
+                        .notify("Session not saved", &format!("{e:#}"), true);
+                    return;
+                }
+            }
+        }
+        self.save().await;
+    }
+
     /// Markdown summary of token, cache and cost usage, for `/usage`.
     pub fn usage_report(&self) -> String {
         let (last, total) = (&self.last_usage, &self.usage);
@@ -123,7 +224,10 @@ impl Session {
         }
         out += "| | Last request | Session |\n|---|---:|---:|\n";
         for (label, f) in [
-            ("Input (uncached)", (|u: &Usage| u.input) as fn(&Usage) -> u64),
+            (
+                "Input (uncached)",
+                (|u: &Usage| u.input) as fn(&Usage) -> u64,
+            ),
             ("Cache read", |u| u.cache_read),
             ("Cache write", |u| u.cache_write),
             ("Output", |u| u.output),
@@ -150,9 +254,16 @@ impl Session {
         out += &match self.last_request.map(|t| t.elapsed()) {
             Some(age) if age < ttl => {
                 let left = (ttl - age).as_secs();
-                format!("- Cache: warm, expires in ~{}m {:02}s", left / 60, left % 60)
+                format!(
+                    "- Cache: warm, expires in ~{}m {:02}s",
+                    left / 60,
+                    left % 60
+                )
             }
-            _ => format!("- Cache: cold (no request in the last {}m)", ttl.as_secs() / 60),
+            _ => format!(
+                "- Cache: cold (no request in the last {}m)",
+                ttl.as_secs() / 60
+            ),
         };
         out
     }
@@ -215,18 +326,91 @@ impl Agent {
             max_turns: 50,
             thinking: Thinking::default(),
             sandbox: Default::default(),
+            sessions_db: None,
         }
     }
 
+    /// The store for sessions in `cwd`, `None` if sessions are not saved.
+    async fn open_store(&self, cwd: &Path) -> Result<Option<Store>> {
+        let Some(db) = &self.sessions_db else {
+            return Ok(None);
+        };
+        let path = db(cwd);
+        Ok(Some(
+            tokio::task::spawn_blocking(move || Store::open(path)).await??,
+        ))
+    }
+
+    /// A new session. It is saved from its first prompt on if
+    /// `sessions_db` is set.
     pub async fn start_session(
         &self,
         id: impl Into<String>,
         cwd: impl Into<PathBuf>,
         additional_dirs: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
-    ) -> Session {
+    ) -> Result<Session> {
         let mut roots = vec![cwd.into()];
         roots.extend(additional_dirs);
+        let store = self.open_store(&roots[0]).await?;
+        Ok(self.setup(id.into(), roots, frontend, store, false).await)
+    }
+
+    /// Continues stored session `id`. `cwd` must be the one it started in;
+    /// `additional_dirs` replace the stored ones.
+    pub async fn resume_session(
+        &self,
+        id: &str,
+        cwd: impl Into<PathBuf>,
+        additional_dirs: Vec<PathBuf>,
+        frontend: Arc<dyn Frontend>,
+    ) -> Result<Session> {
+        let mut roots = vec![cwd.into()];
+        roots.extend(additional_dirs);
+        let store = self
+            .open_store(&roots[0])
+            .await?
+            .context("sessions are not saved")?;
+        let loaded = store
+            .load(id)
+            .await?
+            .with_context(|| format!("unknown session {id}"))?;
+        let info = loaded.info;
+        if info.cwd != roots[0] {
+            bail!("session {id} belongs to {}", info.cwd.display());
+        }
+        let mut session = self
+            .setup(id.into(), roots, frontend, Some(store), true)
+            .await;
+        session.ctx.restore_title(info.title);
+        if info.model != session.model_spec
+            && let Err(e) = self.set_model(&mut session, &info.model)
+        {
+            session.ctx.notify(
+                "Model unavailable",
+                &format!("{e:#}; using {}", session.model_spec),
+                true,
+            );
+        }
+        session.thinking = info.thinking;
+        session.usage = info.usage;
+        session.cost = info.cost;
+        let p = session.persist.as_mut().expect("store");
+        (p.epoch, p.base, p.created) = (info.epoch, loaded.base, true);
+        p.saved = loaded.history.len();
+        p.last_len = loaded.history.last().map_or(0, |m| m.content.len());
+        session.history = loaded.history;
+        Ok(session)
+    }
+
+    async fn setup(
+        &self,
+        id: String,
+        roots: Vec<PathBuf>,
+        frontend: Arc<dyn Frontend>,
+        store: Option<Store>,
+        resumed: bool,
+    ) -> Session {
         let system = crate::prompt::build(
             &self.system,
             &self.tools,
@@ -235,11 +419,15 @@ impl Agent {
         );
         let ctx = Context::new(id, roots[0].clone(), frontend, self.registry.clone());
         ctx.set_sandbox(self.sandbox.policy(&roots));
+        if let Some(store) = &store {
+            ctx.set_store(store.clone());
+        }
         let mut setup = SessionSetup {
             ctx: ctx.clone(),
             tools: self.tools.clone(),
             system,
             commands: vec![],
+            resumed,
         };
         for ext in &self.extensions {
             ext.session_start(&mut setup).await;
@@ -262,6 +450,16 @@ impl Agent {
             history: vec![],
             last_request: None,
             extensions: self.extensions.clone(),
+            persist: store.map(|store| Persist {
+                store,
+                roots,
+                epoch: 0,
+                base: 0,
+                saved: 0,
+                last_len: 0,
+                created: false,
+                failed: false,
+            }),
         }
     }
 
@@ -326,6 +524,7 @@ impl Agent {
             return Ok(stop);
         }
         push_user(&mut session.history, setup.content);
+        session.save().await;
 
         let mut tools_called = Vec::new();
         for _ in 0..self.max_turns {
@@ -430,11 +629,14 @@ impl Agent {
                     role: Role::User,
                     content: results,
                 });
+                session.save().await;
                 if let Some(stop) = stopped(&ctx) {
                     return Ok(stop);
                 }
                 continue;
             }
+            // The final assistant message (and usage).
+            session.save().await;
 
             let settle = Settle {
                 stop,
@@ -455,6 +657,7 @@ impl Agent {
                 return Ok(stop);
             }
             push_user(&mut session.history, more);
+            session.save().await;
         }
         Ok(StopReason::MaxTurns)
     }

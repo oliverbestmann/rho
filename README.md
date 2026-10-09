@@ -16,7 +16,8 @@ Cargo workspace:
 - `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat)
 - `rho/src/extension.rs` - `Extension` hooks, `Context` session handle, `Frontend` trait
-- `rho/src/acp.rs` - Agent Client Protocol server (initialize, session/new, session/prompt, session/cancel)
+- `rho/src/store.rs` - session persistence in SQLite
+- `rho/src/acp.rs` - Agent Client Protocol server (initialize, session/new, load, resume, list, close, prompt, cancel)
 
 ## Use
 
@@ -74,6 +75,29 @@ history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` (default
 `anthropic/claude-haiku-5-5`) gets the conversation as text, without tool
 outputs and with tool arguments cut to 2000 chars. The notice shows which path
 ran and its token usage.
+
+## Sessions
+
+ACP sessions are saved to SQLite, `~/.config/rho/sessions.db`
+(`RHO_SESSIONS_DB` overrides), from their first prompt on: history, title,
+model, thinking level, usage and cost. One-shot CLI runs are not saved.
+Clients can list them (`session/list`, filtered by cwd), continue them
+(`session/load` replays the conversation, `session/resume` does not) and
+`session/close` them. Sandbox grants are not saved: a continued session
+starts from `sandbox.json` again. Edit diffs are not stored either, so
+replayed edits show only their output.
+
+Every session opens its own connection; `Options::sessions_db` maps a cwd
+to a database file (default: the same file for all). Tables are `STRICT`
+with foreign keys and checks, in WAL mode so processes can share the file.
+`/compact` keeps the old messages: it starts a new epoch, and a session's
+history is the messages of its latest epoch. Each message also stores its
+text and tool calls as plain text, ready for full-text search.
+
+Extensions read the database through `ctx.store()` (`session`, `list`,
+`history`); writing is up to rho. `SessionSetup::resumed` tells
+`session_start` that a stored session continues (`SessionTitle` keeps its
+title then).
 
 ## Sandbox
 
