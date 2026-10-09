@@ -85,6 +85,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         cx: cx.clone(),
                         sid: sid.clone(),
                         notices: AtomicU64::new(0),
+                        commands: Mutex::default(),
                     });
                     let session = agent
                         .start_session(
@@ -218,15 +219,31 @@ struct AcpFrontend {
     cx: ConnectionTo<Client>,
     sid: SessionId,
     notices: AtomicU64,
+    /// Shell commands of running tool calls, by id; ToolEnd replaces the
+    /// call's content, so it has to repeat the command.
+    commands: Mutex<HashMap<String, String>>,
 }
 
 impl Frontend for AcpFrontend {
     fn event(&self, ev: AgentEvent<'_>) {
         let n = self.notices.fetch_add(1, Ordering::Relaxed);
+        let command = match &ev {
+            AgentEvent::ToolStart { id, input, .. } => {
+                if let Some(c) = input["command"].as_str() {
+                    self.commands
+                        .lock()
+                        .unwrap()
+                        .insert(id.to_string(), c.to_string());
+                }
+                None
+            }
+            AgentEvent::ToolEnd { id, .. } => self.commands.lock().unwrap().remove(*id),
+            _ => None,
+        };
         // Dropped updates only affect display; the turn continues.
         let _ = self
             .cx
-            .send_notification(SessionNotification::new(self.sid.clone(), to_update(ev, n)));
+            .send_notification(SessionNotification::new(self.sid.clone(), to_update(ev, n, command.as_deref())));
     }
 
     fn confirm<'a>(&'a self, tool_call_id: Option<&'a str>, title: &'a str) -> BoxFuture<'a, bool> {
@@ -282,7 +299,20 @@ fn to_content(blocks: Vec<ContentBlock>) -> Vec<Content> {
         .collect()
 }
 
-fn to_update(ev: AgentEvent, n: u64) -> SessionUpdate {
+/// The command as a fenced `sh` block, so Zed highlights it. The fence is
+/// longer than any backtick run in the command.
+fn command_block(command: &str) -> String {
+    let (mut run, mut longest) = (0, 0);
+    for c in command.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}sh\n{command}\n{fence}")
+}
+
+/// `command` is the shell command of a finished tool call, see `AcpFrontend::commands`.
+fn to_update(ev: AgentEvent, n: u64, command: Option<&str>) -> SessionUpdate {
     match ev {
         // Rendered as a finished tool call, like pi-acp does for extension messages.
         AgentEvent::Notice {
@@ -318,12 +348,14 @@ fn to_update(ev: AgentEvent, n: u64) -> SessionUpdate {
                 "Bash" => ToolKind::Execute,
                 _ => ToolKind::Other,
             };
-            SessionUpdate::ToolCall(
-                ToolCall::new(id.to_string(), title(name, input))
-                    .kind(kind)
-                    .status(ToolCallStatus::InProgress)
-                    .raw_input(input.clone()),
-            )
+            let mut call = ToolCall::new(id.to_string(), title(name, input))
+                .kind(kind)
+                .status(ToolCallStatus::InProgress)
+                .raw_input(input.clone());
+            if let Some(c) = input["command"].as_str() {
+                call = call.content(vec![command_block(c).as_str().into()]);
+            }
+            SessionUpdate::ToolCall(call)
         }
         AgentEvent::ToolEnd {
             id,
@@ -332,6 +364,9 @@ fn to_update(ev: AgentEvent, n: u64) -> SessionUpdate {
             diff,
         } => {
             let mut content = vec![];
+            if let Some(c) = command {
+                content.push(command_block(c).as_str().into());
+            }
             if let Some(d) = diff {
                 content.push(Diff::new(&d.path, &d.new).old_text(d.old.clone()).into());
             }
@@ -389,6 +424,7 @@ mod tests {
                 diff: Some(&diff),
             },
             0,
+            None,
         );
         let wire = serde_json::to_value(update).unwrap();
         assert_eq!(
@@ -396,6 +432,31 @@ mod tests {
             serde_json::json!({"type": "diff", "path": "/w/f.txt", "oldText": "a\n", "newText": "b\n"})
         );
         assert_eq!(wire["content"][1]["content"]["text"], "ok");
+    }
+
+    #[test]
+    fn commands_are_fenced_as_sh() {
+        assert_eq!(command_block("ls -la"), "```sh\nls -la\n```");
+        assert_eq!(command_block("echo ```"), "````sh\necho ```\n````");
+
+        let input = serde_json::json!({"command": "ls"});
+        let start = AgentEvent::ToolStart {
+            id: "t1",
+            name: "Bash",
+            input: &input,
+        };
+        let wire = serde_json::to_value(to_update(start, 0, None)).unwrap();
+        assert_eq!(wire["content"][0]["content"]["text"], "```sh\nls\n```");
+
+        let end = AgentEvent::ToolEnd {
+            id: "t1",
+            output: "out",
+            is_error: false,
+            diff: None,
+        };
+        let wire = serde_json::to_value(to_update(end, 1, Some("ls"))).unwrap();
+        assert_eq!(wire["content"][0]["content"]["text"], "```sh\nls\n```");
+        assert_eq!(wire["content"][1]["content"]["text"], "out");
     }
 
     #[test]
