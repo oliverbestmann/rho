@@ -5,7 +5,7 @@ A small ACP-native coding agent in Rust. Prototype.
 Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
-- `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GitGate`,
+- `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Memory`, `SessionTitle`,
   `BackgroundTasks`, `AskUser`, `PlanMode`, `WebUi`) and a `main` that calls
   `rho::run` with its `rho::Options`.
@@ -148,7 +148,7 @@ change to ACP clients.
 Hooks and `Tool::run` are plain `async fn` (no `async-trait`):
 
 ```rust
-impl Extension for RipgrepGate {
+impl Extension for GitGate {
     async fn tool_call(&self, _ctx: &Context, call: &mut ToolCall) -> Decision { ... }
 }
 ```
@@ -161,7 +161,7 @@ object-safe twins `DynExtension` / `DynTool`, implemented automatically;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rho::run(rho::Options {
-        extensions: vec![Arc::new(RipgrepGate), Arc::new(GoCheck::default())],
+        extensions: vec![Arc::new(GitGate), Arc::new(GoCheck::default())],
         ..Default::default()
     })
     .await

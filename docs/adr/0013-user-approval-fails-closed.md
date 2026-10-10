@@ -31,7 +31,8 @@ with a UI (ACP) and without one (one-shot CLI, tests).
   inbox (ADR 0010): with the next tool results if a run is active,
   otherwise with the next prompt.
 - Advice that needs no approval is a plain block with a reason the model
-  can act on, e.g. `RipgrepGate` blocks `grep` and asks for `rg`.
+  can act on. (`RipgrepGate`, which blocked `grep` in favour of `rg`, was
+  removed; the `Grep` tool covers searching.)
 
 ## Consequences
 
@@ -41,5 +42,4 @@ with a UI (ACP) and without one (one-shot CLI, tests).
   guardrails, the sandbox is the boundary.
 
 Code: `RequestAccess` in `rho/src/tools.rs`, `GrantCommands` in
-`rho/src/sandbox.rs`, `agent/src/git_gate.rs`,
-`agent/src/ripgrep_gate.rs`, `AcpFrontend::confirm`.
+`rho/src/sandbox.rs`, `agent/src/git_gate.rs`, `AcpFrontend::confirm`.
