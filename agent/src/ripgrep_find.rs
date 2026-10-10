@@ -42,6 +42,10 @@ struct Input {
 struct Grep;
 
 impl Tool for Grep {
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use Grep to find files and search their contents instead of rg, grep or find in Bash."]
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Grep".into(),

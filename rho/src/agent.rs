@@ -602,12 +602,6 @@ impl Agent {
         store: Option<Store>,
         resumed: bool,
     ) -> Session {
-        let system = crate::prompt::build(
-            &self.system,
-            &self.tools,
-            self.config_dir.as_deref(),
-            &roots,
-        );
         let ctx = Context::new(id, roots[0].clone(), frontend, self.registry.clone());
         ctx.set_sandbox(self.sandbox.policy(&roots));
         if let Some(store) = &store {
@@ -616,7 +610,7 @@ impl Agent {
         let mut setup = SessionSetup {
             ctx: ctx.clone(),
             tools: self.tools.clone(),
-            system,
+            system: String::new(),
             commands: vec![],
             resumed,
             profiles: vec![crate::extension::Profile::write()],
@@ -625,6 +619,13 @@ impl Agent {
             ext.session_start(&mut setup).await;
         }
         ctx.set_profiles(setup.profiles);
+        // After the hooks, so the tools extensions added are listed too.
+        let system = crate::prompt::build(
+            &self.system,
+            &setup.tools,
+            self.config_dir.as_deref(),
+            &roots,
+        ) + &setup.system;
         Session {
             ctx,
             provider: self.provider.clone(),
@@ -639,7 +640,7 @@ impl Agent {
             cost: 0.0,
             specs: setup.tools.iter().map(|t| t.spec()).collect(),
             tools: setup.tools,
-            system: setup.system,
+            system,
             commands: setup.commands,
             history: vec![],
             last_request: None,

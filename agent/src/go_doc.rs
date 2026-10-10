@@ -38,6 +38,10 @@ struct Input {
 struct GoDocTool;
 
 impl Tool for GoDocTool {
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use GoDoc for Go documentation and source instead of searching the module cache."]
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "GoDoc".into(),

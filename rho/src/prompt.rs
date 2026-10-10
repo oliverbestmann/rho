@@ -29,6 +29,7 @@ pub fn config_dir() -> PathBuf {
         .join("rho")
 }
 
+/// `<rules>` are each tool's `Tool::rules`, then the general ones.
 pub fn build(
     preamble: &str,
     tools: &[Arc<dyn DynTool>],
@@ -43,10 +44,10 @@ pub fn build(
     let mut prompt = match custom {
         Some(custom) => custom.trim().to_string(),
         None => {
-            let specs: Vec<_> = tools.iter().map(|t| t.spec()).collect();
-            let list: Vec<String> = specs
+            let list: Vec<String> = tools
                 .iter()
-                .map(|s| {
+                .map(|t| {
+                    let s = t.spec();
                     format!(
                         "- {}: {}",
                         s.name,
@@ -56,30 +57,13 @@ pub fn build(
                 .collect();
             sections.push((
                 "tools",
-                format!(
-                    "{}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.",
-                    if list.is_empty() { "(none)".into() } else { list.join("\n") }
-                ),
+                if list.is_empty() {
+                    "(none)".into()
+                } else {
+                    list.join("\n")
+                },
             ));
-            let has = |name: &str| specs.iter().any(|s| s.name == name);
-            let mut rules = vec![];
-            if has("Bash") {
-                rules.push("Use Bash for file operations like ls, rg, find");
-            }
-            if has("Read") {
-                rules.push("Use Read to examine files instead of cat or sed.");
-            }
-            if has("Edit") {
-                rules.extend([
-                    "Use Edit for precise changes (edits[].oldText must match exactly)",
-                    "When changing multiple separate locations in one file, use one Edit call with multiple entries in edits[] instead of multiple Edit calls",
-                    "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
-                    "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
-                ]);
-            }
-            if has("Write") {
-                rules.push("Use Write only for new files or complete rewrites.");
-            }
+            let mut rules: Vec<&str> = tools.iter().flat_map(|t| t.rules()).copied().collect();
             rules.push("Be concise in your responses");
             rules.push("Show file paths clearly when working with files");
             let rules: Vec<String> = rules.iter().map(|r| format!("- {r}")).collect();

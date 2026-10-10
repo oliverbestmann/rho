@@ -42,6 +42,10 @@ struct Fetch {
 }
 
 impl Tool for Fetch {
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use FetchUrl to read web pages and files from URLs instead of curl or wget in Bash."]
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "FetchUrl".into(),

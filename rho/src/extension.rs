@@ -25,7 +25,7 @@ use crate::tools::DynTool;
 /// Hooks run in registration order. Extensions handle their own errors (for
 /// example by `ctx.notify(..)`); a hook cannot fail the turn.
 pub trait Extension: Send + Sync {
-    /// A session was created: register tools, adjust the system prompt.
+    /// A session was created: register tools, add to the system prompt.
     fn session_start(&self, _session: &mut SessionSetup) -> impl Future<Output = ()> + Send {
         async {}
     }
@@ -195,7 +195,10 @@ impl<T: Extension> DynExtension for T {
 
 pub struct SessionSetup {
     pub ctx: Context,
+    /// Starts with the agent's tools. The system prompt is built after
+    /// `session_start`, so tools added here are listed in it too.
     pub tools: Vec<Arc<dyn DynTool>>,
+    /// Appended to the system prompt (after `<cwd>`); starts empty.
     pub system: String,
     /// Slash commands to offer the user; handled by `Extension::command`.
     pub commands: Vec<SlashCommand>,

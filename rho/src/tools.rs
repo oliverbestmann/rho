@@ -32,6 +32,11 @@ pub trait Tool: Send + Sync {
     fn describe(&self, _input: &Value) -> Option<String> {
         None
     }
+    /// Lines for the system prompt's `<rules>` when the tool is present,
+    /// e.g. to prefer it over a shell command.
+    fn rules(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// Object-safe form of [`Tool`], implemented for every tool.
@@ -39,6 +44,7 @@ pub trait DynTool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>>;
     fn describe(&self, input: &Value) -> Option<String>;
+    fn rules(&self) -> &'static [&'static str];
 }
 
 impl<T: Tool> DynTool for T {
@@ -50,6 +56,9 @@ impl<T: Tool> DynTool for T {
     }
     fn describe(&self, input: &Value) -> Option<String> {
         Tool::describe(self, input)
+    }
+    fn rules(&self) -> &'static [&'static str] {
+        Tool::rules(self)
     }
 }
 
@@ -114,6 +123,10 @@ struct BashInput {
 pub struct Read;
 
 impl Tool for Read {
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use Read to examine files instead of cat or sed."]
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Read".into(),
@@ -214,6 +227,10 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
 pub struct Write;
 
 impl Tool for Write {
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use Write only for new files or complete rewrites."]
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Write".into(),
@@ -243,6 +260,10 @@ impl Tool for Write {
 pub struct Bash;
 
 impl Tool for Bash {
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use Bash for file operations like ls, mv or mkdir."]
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Bash".into(),

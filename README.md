@@ -58,10 +58,13 @@ layout is the same as pi's `~/.pi/agent/auth.json`.
 
 ## System prompt
 
-Built per session like pi's (`rho/src/prompt.rs`): preamble, `<tools>`, `<rules>`,
+Built per session like pi's (`rho/src/prompt.rs`), after the extensions'
+`session_start`: preamble, `<tools>` (every tool, also the extensions'),
+`<rules>` (each tool's `Tool::rules`, e.g. `Grep` over `rg` in `Bash`),
 then `<addendum>` from `~/.config/rho/APPEND_SYSTEM.md`, `<project_context>`
 from `AGENTS.md`/`CLAUDE.md` (config dir, then cwd ancestors outermost first)
-and `<cwd>`. `~/.config/rho/SYSTEM.md` replaces preamble, tools and rules.
+and `<cwd>`, then what extensions added to `SessionSetup::system`.
+`~/.config/rho/SYSTEM.md` replaces preamble, tools and rules.
 To reuse pi's addendum:
 
     ln -s ~/.dotfiles/pia/config/APPEND_SYSTEM.md ~/.config/rho/APPEND_SYSTEM.md
@@ -170,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
 
 | rho hook | pi event | use |
 |---|---|---|
-| `session_start(&mut SessionSetup)` | `session_start` + `registerTool` | add tools, edit the system prompt |
+| `session_start(&mut SessionSetup)` | `session_start` + `registerTool` | add tools, add to the system prompt |
 | `session_end(&Context)` | `session_shutdown` | cleanup (runs when the session is dropped) |
 | `before_prompt(&mut PromptSetup)` | `before_agent_start` | add context, per-run system prompt |
 | `before_request(&mut Request)` | `context` / `before_provider_request` | prune or edit the request |

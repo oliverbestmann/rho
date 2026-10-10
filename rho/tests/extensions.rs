@@ -48,6 +48,10 @@ impl Tool for Echo {
         }
     }
 
+    fn rules(&self) -> &'static [&'static str] {
+        &["Use Echo instead of echo in Bash."]
+    }
+
     async fn run(&self, input: Value, _ctx: &Context) -> Result<ToolOutput> {
         Ok(input["text"].as_str().unwrap_or_default().into())
     }
@@ -133,6 +137,13 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
     // session_start: extra tool and system prompt; before_request: max_tokens.
     assert!(requests[0].tools.iter().any(|t| t.name == "Echo"));
     assert!(requests[0].system.ends_with(" +ext"));
+    // The prompt is built after session_start: it lists the tool and its rule.
+    assert!(requests[0].system.contains("- Echo: echo\n"));
+    assert!(
+        requests[0]
+            .system
+            .contains("- Use Echo instead of echo in Bash.\n")
+    );
     assert_eq!(requests[0].max_tokens, 123);
     // before_prompt added content after the prompt.
     assert_eq!(
