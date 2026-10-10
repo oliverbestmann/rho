@@ -329,8 +329,11 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                             responder.respond(PromptResponse::new(to_stop(stop)).usage(usage))
                         }
                         Ok(Err(e)) => responder.respond_with_internal_error(format!("{e:#}")),
-                        Err(_aborted) => responder
-                            .respond(PromptResponse::new(StopReason::Cancelled).usage(usage)),
+                        Err(_aborted) => {
+                            session.ctx.notify(INTERRUPTED, "", false);
+                            responder
+                                .respond(PromptResponse::new(StopReason::Cancelled).usage(usage))
+                        }
                     }
                 })
             },
@@ -568,6 +571,8 @@ fn replay_history(
 
 const LIST_PAGE: usize = 100;
 
+const INTERRUPTED: &str = "Interrupted by the user";
+
 /// `session/list`. Without a cwd filter, the database for rho's own cwd is
 /// listed.
 async fn list_sessions(
@@ -640,8 +645,10 @@ async fn watch_inbox(
         let mut session = session.lock().await;
         // A prompt may have consumed the message while we waited for the lock.
         let turn = agent.run_triggered(&mut session);
-        if let Ok(Some(Err(e))) = Abortable::new(turn, registration).await {
-            ctx.notify("rho", &format!("{e:#}"), true);
+        match Abortable::new(turn, registration).await {
+            Ok(Some(Err(e))) => ctx.notify("rho", &format!("{e:#}"), true),
+            Err(_aborted) => ctx.notify(INTERRUPTED, "", false),
+            _ => {}
         }
     }
 }

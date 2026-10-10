@@ -926,6 +926,29 @@ impl Agent {
             input: &call.input,
             description: description.as_deref(),
         });
+        let mut pending = Pending {
+            ctx,
+            id: Some(call.id.clone()),
+        };
+        let out = self.decide_and_run(session, call, tool).await;
+        pending.id = None;
+        ctx.emit(AgentEvent::ToolEnd {
+            id: &call.id,
+            output: &out.output,
+            is_error: out.is_error,
+            diff: out.diff.as_ref(),
+            images: &out.images,
+        });
+        out
+    }
+
+    async fn decide_and_run(
+        &self,
+        session: &Session,
+        call: &mut ToolCall,
+        tool: Option<&Arc<dyn DynTool>>,
+    ) -> ToolOutput {
+        let ctx = &session.ctx;
         let profile = ctx.profile();
         let mut decision = if profile.shows(&call.name) {
             Decision::Allow
@@ -967,14 +990,29 @@ impl Agent {
                 ..Default::default()
             };
         }
-        ctx.emit(AgentEvent::ToolEnd {
-            id: &call.id,
-            output: &out.output,
-            is_error: out.is_error,
-            diff: out.diff.as_ref(),
-            images: &out.images,
-        });
         out
+    }
+}
+
+/// Ends a started tool call in the frontend if the run is cancelled (its
+/// future dropped) before the call finished; `id` is cleared once it did.
+struct Pending<'a> {
+    ctx: &'a Context,
+    id: Option<String>,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        let Some(id) = &self.id else {
+            return;
+        };
+        self.ctx.emit(AgentEvent::ToolEnd {
+            id,
+            output: "cancelled",
+            is_error: true,
+            diff: None,
+            images: &[],
+        });
     }
 }
 

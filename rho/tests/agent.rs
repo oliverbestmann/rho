@@ -292,10 +292,26 @@ async fn acp_cancel_stops_a_running_prompt() {
                     // First update proves the turn is running; then cancel it.
                     let _ = session.read_update().await?;
                     cx.send_notification(CancelNotification::new(session.session_id().clone()))?;
+                    let mut titles = vec![];
                     loop {
-                        if let SessionMessage::StopReason(r) = session.read_update().await? {
-                            assert_eq!(r, StopReasonAcp::Cancelled);
-                            return Ok(());
+                        match session.read_update().await? {
+                            SessionMessage::SessionMessage(dispatch) => {
+                                MatchDispatch::new(dispatch)
+                                    .if_notification(async |n: SessionNotification| {
+                                        if let SessionUpdate::ToolCall(t) = n.update {
+                                            titles.push(t.title);
+                                        }
+                                        Ok(())
+                                    })
+                                    .await
+                                    .otherwise_ignore()?
+                            }
+                            SessionMessage::StopReason(r) => {
+                                assert_eq!(r, StopReasonAcp::Cancelled);
+                                assert_eq!(titles, vec!["Interrupted by the user"]);
+                                return Ok(());
+                            }
+                            _ => {}
                         }
                     }
                 })
@@ -306,6 +322,34 @@ async fn acp_cancel_stops_a_running_prompt() {
         .await
         .expect("timed out")
         .expect("acp failed");
+}
+
+#[tokio::test]
+async fn cancelled_tool_call_is_ended() {
+    let provider = Scripted::new(vec![vec![
+        Event::Block(Content::ToolUse {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: json!({"command": "sleep 30"}),
+        }),
+        Event::Done(StopReason::ToolUse),
+    ]]);
+    let agent = Agent::new(provider, "m", rho::tools::builtin());
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, log) = common::session(&agent, dir.path()).await;
+    // Dropping the run future is how ACP cancels it.
+    let run = agent.run(&mut session, vec![Content::text("hi")]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), run)
+            .await
+            .is_err()
+    );
+    let log = log.lines();
+    let end = log.iter().find(|l| l.starts_with("ToolEnd"));
+    assert!(
+        end.is_some_and(|l| l.contains(r#"id: "t1", output: "cancelled", is_error: true"#)),
+        "{log:?}"
+    );
 }
 
 /// Returns an image the API would reject.
