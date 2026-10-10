@@ -12,7 +12,7 @@ const SHELL_TOOLS: [&str; 2] = ["Bash", "BackgroundTask"];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
 /// Tried in order; a missing provider or a failed request tries the next.
 const SUMMARY_MODELS: [&str; 2] = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"];
-const SUMMARY_PROMPT: &str = "Summarize in one or two short sentences what this shell command does to the git repository: what gets committed, pushed or tagged, and where. Plain text, no markdown.";
+const SUMMARY_PROMPT: &str = "Say in at most 10 words what this shell command does to the git repository. Name only what matters: what is committed, pushed or tagged, and where. No details on staging or output, no quotes, no markdown. Examples: \"Commits all changes locally.\" \"Pushes main to origin.\" \"Tags HEAD as v1.2 and pushes the tag.\"";
 
 /// The first summary a model in `SUMMARY_MODELS` gives, if any.
 async fn summarize(ctx: &Context, command: &str) -> Option<String> {
