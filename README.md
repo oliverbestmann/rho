@@ -7,7 +7,7 @@ Cargo workspace:
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Memory`, `SessionTitle`,
-  `BackgroundTasks`, `AskUser`, `PlanMode`, `WebUi`) and a `main` that calls
+  `BackgroundTasks`, `AskUser`, `PlanMode`, `Ponytail`, `WebUi`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -221,6 +221,9 @@ Ports of the other pi extensions:
 - `Memory` (pi's `memory`) talks to mcp-memory-service (`MCP_MEMORY_URL`,
   default `http://localhost:6758`; `MCP_API_KEY`). Output over 2000 lines or
   50KB is cut, the full JSON goes to a file in the temp dir.
+
+`Ponytail` adds the [ponytail](https://github.com/DietrichGebert/ponytail)
+skill ("full" level, vendored in `agent/src/ponytail.md`) to the system prompt.
 
 pi's `exit` extension is not ported: rho has no interactive TUI.
 

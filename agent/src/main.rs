@@ -8,6 +8,7 @@ mod go_check;
 mod go_doc;
 mod memory;
 mod plan_mode;
+mod ponytail;
 mod ripgrep_find;
 mod session_title;
 mod web_ui;
@@ -31,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(background_task::BackgroundTasks::default()),
             Arc::new(ask_user::AskUser),
             Arc::new(plan_mode::PlanMode),
+            Arc::new(ponytail::Ponytail),
         ],
         ..Default::default()
     })
