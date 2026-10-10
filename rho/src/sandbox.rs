@@ -1,6 +1,6 @@
-//! Per-session filesystem sandbox for `Bash`, `Read` and `Write` (and any
-//! extension using `Context::run_sandboxed` / `Context::sandbox_command`),
-//! enforced with Landlock via nono.
+//! Per-session filesystem sandbox for the built-in tools (and any extension
+//! using `Context::run_sandboxed` / `Context::sandbox_command`), enforced
+//! with Landlock via nono.
 //!
 //! Deny by default: a session starts with read access to system directories
 //! (enough to run programs) and read-write access to its workspace

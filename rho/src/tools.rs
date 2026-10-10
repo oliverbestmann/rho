@@ -71,11 +71,7 @@ pub(crate) fn resolve(cwd: &Path, path: &str) -> PathBuf {
 /// Cuts `s` to `MAX_OUTPUT` bytes (on a char boundary) and marks the cut.
 pub fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
-        let mut end = MAX_OUTPUT;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
+        s.truncate(s.floor_char_boundary(MAX_OUTPUT));
         s.push_str("\n[output truncated]");
     }
     s
@@ -129,16 +125,13 @@ impl Tool for Read {
     }
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
-        let cwd = ctx.cwd();
-        {
-            let i: ReadInput = parse(input)?;
-            let path = resolve(cwd, &i.path);
-            let text = ctx
-                .run_sandboxed(move || std::fs::read_to_string(path))
-                .await?
-                .with_context(|| format!("reading {}", i.path))?;
-            Ok(truncate(text).into())
-        }
+        let i: ReadInput = parse(input)?;
+        let path = resolve(ctx.cwd(), &i.path);
+        let text = ctx
+            .run_sandboxed(move || std::fs::read_to_string(path))
+            .await?
+            .with_context(|| format!("reading {}", i.path))?;
+        Ok(truncate(text).into())
     }
 }
 
@@ -232,21 +225,18 @@ impl Tool for Write {
     }
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
-        let cwd = ctx.cwd();
-        {
-            let i: WriteInput = parse(input)?;
-            let path = resolve(cwd, &i.path);
-            let len = i.content.len();
-            ctx.run_sandboxed(move || {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                std::fs::write(&path, i.content)
-            })
-            .await?
-            .with_context(|| format!("writing {}", i.path))?;
-            Ok(format!("wrote {len} bytes to {}", i.path).into())
-        }
+        let i: WriteInput = parse(input)?;
+        let path = resolve(ctx.cwd(), &i.path);
+        let len = i.content.len();
+        ctx.run_sandboxed(move || {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, i.content)
+        })
+        .await?
+        .with_context(|| format!("writing {}", i.path))?;
+        Ok(format!("wrote {len} bytes to {}", i.path).into())
     }
 }
 

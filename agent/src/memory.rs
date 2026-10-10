@@ -268,11 +268,7 @@ fn truncate_head(text: &str) -> (String, bool) {
         let sep = usize::from(n > 0);
         if n == MAX_LINES || out.len() + sep + line.len() > MAX_BYTES {
             if n == 0 {
-                let mut end = MAX_BYTES;
-                while !line.is_char_boundary(end) {
-                    end -= 1;
-                }
-                out.push_str(&line[..end]);
+                out.push_str(&line[..line.floor_char_boundary(MAX_BYTES)]);
             }
             return (out, true);
         }

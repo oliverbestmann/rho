@@ -43,7 +43,8 @@ pub struct Options {
     /// Providers by name; `-m name/model` picks one. Default: `anthropic`
     /// (subscription auth from `RHO_AUTH_FILE` / `~/.config/rho/auth.json`).
     pub providers: Registry,
-    /// Default: `Read`, `Write`, `Bash`.
+    /// Default: `tools::builtin()` (`Read`, `ReadImage`, `Write`, `Edit`,
+    /// `Bash`, `RequestAccess`).
     pub tools: Vec<Arc<dyn DynTool>>,
     /// Default: none.
     pub extensions: Vec<Arc<dyn DynExtension>>,
