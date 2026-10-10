@@ -57,8 +57,10 @@ impl Extension for GitGate {
             return Decision::Allow;
         }
         let title = match summarize(ctx, command).await {
-            Some(summary) => format!("Allow this git operation?\n\n{summary}\n\n{command}"),
-            None => format!("Allow this git operation? {command}"),
+            // Zed renders the title as inline markdown and shows the
+            // command with the tool call already.
+            Some(summary) => format!("Allow this git operation? **{summary}**"),
+            None => format!("Allow this git operation? `{command}`"),
         };
         if ctx.confirm(Some(&call.id), &title).await {
             Decision::Allow
@@ -147,7 +149,7 @@ mod tests {
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
         assert_eq!(
             *approve.0.lock().unwrap(),
-            ["Allow this git operation? git push"]
+            ["Allow this git operation? `git push`"]
         );
 
         // With a summary from the first model that is available.
@@ -158,7 +160,7 @@ mod tests {
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
         assert_eq!(
             approve.0.lock().unwrap().last().unwrap(),
-            "Allow this git operation? Pushes main to origin.\n\ngit push origin main"
+            "Allow this git operation? **Pushes main to origin.**"
         );
 
         // No UI: blocked.
