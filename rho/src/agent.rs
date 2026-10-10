@@ -640,6 +640,8 @@ impl Agent {
             session.ctx.set_sandbox(Some(policy));
         }
         session.system = crate::prompt::replace_dirs(&session.system, &roots[0], &roots[1..]);
+        // Only the tools before the system prompt are still cached.
+        session.last_request = None;
         session.roots = roots;
         notify_dirs_changed(session);
         true

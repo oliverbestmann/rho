@@ -32,9 +32,9 @@ Treat the prefix as append-only within a session:
   replaces that message).
 - `Session::last_request` records when the cache was last refreshed; this
   drives `/usage` ("warm, expires in ...") and compaction (ADR 0015).
-- Changes that do invalidate the cache are explicit: switching the model
-  (`last_request` reset), changing the additional directories (system
-  prompt rewritten).
+- Changes that do invalidate the cache are explicit: switching the model,
+  changing the additional directories (system prompt rewritten). Both
+  reset `last_request`.
 
 ## Consequences
 
@@ -44,9 +44,6 @@ Treat the prefix as append-only within a session:
   and reported per request, per prompt and per session, with the hit rate.
 - Small prompts below the model's minimum cacheable size are not cached;
   nothing is done about that.
-- `set_additional_dirs` does not reset `last_request`, so right after a
-  directory change `/usage` still says "warm" and `/compact` takes the
-  warm path although only the tools are still cached.
 
 Code: `build_body` in `rho/src/anthropic.rs`, `Session::tool_specs` and
 `profile_note` in `rho/src/agent.rs`.
