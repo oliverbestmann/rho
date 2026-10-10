@@ -56,11 +56,11 @@ impl Extension for GitGate {
         if !mutates_git(command) {
             return Decision::Allow;
         }
+        // The title replaces the shell call's title (same call id) and is
+        // plain text in Zed, so it gives the summary and keeps the whole command.
         let title = match summarize(ctx, command).await {
-            // Zed renders the title as inline markdown and shows the
-            // command with the tool call already.
-            Some(summary) => format!("Allow this git operation? **{summary}**"),
-            None => format!("Allow this git operation? `{command}`"),
+            Some(summary) => format!("{}\n\n{command}", summary.replace('\n', " ")),
+            None => command.to_string(),
         };
         if ctx.confirm(Some(&call.id), &title).await {
             Decision::Allow
@@ -147,10 +147,7 @@ mod tests {
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
         let mut c = call("Write", "git push");
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
-        assert_eq!(
-            *approve.0.lock().unwrap(),
-            ["Allow this git operation? `git push`"]
-        );
+        assert_eq!(*approve.0.lock().unwrap(), ["git push"]);
 
         // With a summary from the first model that is available.
         let mut registry = rho::provider::Registry::default();
@@ -160,7 +157,7 @@ mod tests {
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
         assert_eq!(
             approve.0.lock().unwrap().last().unwrap(),
-            "Allow this git operation? **Pushes main to origin.**"
+            "Pushes main to origin.\n\ngit push origin main"
         );
 
         // No UI: blocked.
