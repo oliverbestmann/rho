@@ -181,7 +181,6 @@ impl Tool for ReadImage {
             media_type: media_type.into(),
             data: base64::engine::general_purpose::STANDARD.encode(&bytes),
         };
-        source.check()?;
         Ok(ToolOutput {
             output: format!(
                 "{} ({media_type}, {} KB)",

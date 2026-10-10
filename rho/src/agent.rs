@@ -896,6 +896,14 @@ impl Agent {
         for ext in &self.extensions {
             ext.tool_result(ctx, call, &mut out).await;
         }
+        // An image the API rejects would fail every later request.
+        if let Some(e) = out.images.iter().find_map(|i| i.check().err()) {
+            out = ToolOutput {
+                output: format!("{e:#}"),
+                is_error: true,
+                ..Default::default()
+            };
+        }
         ctx.emit(AgentEvent::ToolEnd {
             id: &call.id,
             output: &out.output,

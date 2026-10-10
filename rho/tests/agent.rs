@@ -302,3 +302,62 @@ async fn acp_cancel_stops_a_running_prompt() {
         .expect("timed out")
         .expect("acp failed");
 }
+
+/// Returns an image the API would reject.
+struct BadImage;
+
+impl rho::tools::Tool for BadImage {
+    fn spec(&self) -> rho::provider::ToolSpec {
+        rho::provider::ToolSpec {
+            name: "BadImage".into(),
+            description: "returns a TIFF".into(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    async fn run(
+        &self,
+        _input: serde_json::Value,
+        _ctx: &rho::extension::Context,
+    ) -> Result<rho::extension::ToolOutput> {
+        Ok(rho::extension::ToolOutput {
+            output: "here".into(),
+            images: vec![rho::provider::ImageSource::Base64 {
+                media_type: "image/tiff".into(),
+                data: "AAAA".into(),
+            }],
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn tool_images_the_api_rejects_become_errors() {
+    let call = Event::Block(Content::ToolUse {
+        id: "t1".into(),
+        name: "BadImage".into(),
+        input: json!({}),
+    });
+    let provider = Scripted::new(vec![
+        vec![call, Event::Done(StopReason::ToolUse)],
+        vec![text("ok"), Event::Done(StopReason::EndTurn)],
+    ]);
+    let agent = Agent::new(provider, "m", vec![Arc::new(BadImage)]);
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _) = common::session(&agent, dir.path()).await;
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    let Content::ToolResult {
+        content,
+        is_error,
+        images,
+        ..
+    } = &session.history[2].content[0]
+    else {
+        panic!("no tool result: {:?}", session.history);
+    };
+    assert!(*is_error && images.is_empty(), "{content}");
+    assert!(content.contains("unsupported image type"), "{content}");
+}
