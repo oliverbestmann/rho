@@ -29,6 +29,18 @@ pub fn config_dir() -> PathBuf {
         .join("rho")
 }
 
+/// Creates empty `SYSTEM.md` and `APPEND_SYSTEM.md` in `config_dir` if
+/// missing, so users find where to put them. Best effort.
+pub fn ensure_files(config_dir: &Path) {
+    let _ = std::fs::create_dir_all(config_dir);
+    for name in ["SYSTEM.md", "APPEND_SYSTEM.md"] {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(config_dir.join(name));
+    }
+}
+
 /// `<rules>` are each tool's `Tool::rules`, then the general ones.
 pub fn build(
     preamble: &str,
@@ -37,7 +49,12 @@ pub fn build(
     roots: &[PathBuf],
 ) -> String {
     let cwd = &roots[0];
-    let read = |dir: &Path, name: &str| std::fs::read_to_string(dir.join(name)).ok();
+    // Empty files count as absent: `ensure_files` creates them empty.
+    let read = |dir: &Path, name: &str| {
+        std::fs::read_to_string(dir.join(name))
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    };
     let mut sections: Vec<(&str, String)> = vec![];
 
     let custom = config_dir.and_then(|d| read(d, "SYSTEM.md"));
@@ -178,6 +195,25 @@ mod tests {
             p.ends_with(&format!("<cwd>\n{}\n</cwd>", cwd.display())),
             "{p}"
         );
+
+        // Empty files count as absent.
+        ensure_files(config.path());
+        let empty = build(
+            PREAMBLE,
+            &crate::tools::builtin(),
+            Some(config.path()),
+            std::slice::from_ref(&cwd),
+        );
+        assert_eq!(empty, p);
+        std::fs::write(config.path().join("APPEND_SYSTEM.md"), " \n").unwrap();
+        let p = build(
+            PREAMBLE,
+            &crate::tools::builtin(),
+            Some(config.path()),
+            std::slice::from_ref(&cwd),
+        );
+        assert!(!p.contains("<addendum>"), "{p}");
+        std::fs::write(config.path().join("APPEND_SYSTEM.md"), "# Mine\nuse rg\n").unwrap();
 
         // SYSTEM.md replaces preamble, tools and rules.
         std::fs::write(config.path().join("SYSTEM.md"), "Custom.\n").unwrap();

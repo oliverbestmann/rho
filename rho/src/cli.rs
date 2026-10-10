@@ -24,7 +24,8 @@ env:
   RHO_COMPACT_MODEL  model for /compact when the cache expired
   RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
 
-files in ~/.config/rho: SYSTEM.md (replaces the base prompt), APPEND_SYSTEM.md, AGENTS.md";
+files in ~/.config/rho: SYSTEM.md (replaces the base prompt), APPEND_SYSTEM.md, AGENTS.md;
+the first two are created empty on startup, and empty files are ignored";
 
 /// What a `rho` binary is made of. Start from the defaults and change what
 /// you need:
@@ -127,6 +128,7 @@ fn make_agent(options: Options, spec: &str, thinking: Thinking) -> Result<Agent>
     agent.thinking = thinking;
     agent.registry = options.providers;
     let config_dir = crate::prompt::config_dir();
+    crate::prompt::ensure_files(&config_dir);
     agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
     agent.config_dir = Some(config_dir);
     agent.compact_model = Some(std::env::var("RHO_COMPACT_MODEL").unwrap_or(options.compact_model));
