@@ -36,6 +36,7 @@ rho acp                                    # ACP on stdio
 The one-shot mode prints the answer to stdout, and thinking (dimmed), tool calls
 and a token usage line to stderr. In ACP mode, thinking goes out as
 `agent_thought_chunk` and usage as `usage_update` after every model request.
+After each run a "Turn" notice sums up its requests, tokens, time and cost.
 
 ## Thinking and caching
 
@@ -219,7 +220,9 @@ tasks are killed when the session ends.
 Ports of the other pi extensions:
 
 - `GitGate` asks the user before `Bash` or `BackgroundTask` runs `git commit`,
-  `git push` or `git tag`; without a UI (CLI) they are blocked.
+  `git push` or `git tag`, with a summary of the command by
+  `claude-haiku-5-5` (or `gpt-6-luna` if that fails); without a UI (CLI) they
+  are blocked.
 - `RipgrepFind` adds `Grep` (pi's `grep`): `rg` for file names or contents,
   sandboxed like `Bash`, 50 lines by default.
 - `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,

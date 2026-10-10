@@ -1,6 +1,7 @@
 //! Hard gate on `git commit`, `git push` and `git tag` (pi's git-gate): the
 //! user has to approve them, on top of what AGENTS.md asks. Read-only git
-//! commands pass. Without a UI (CLI) they are blocked.
+//! commands pass. Without a UI (CLI) they are blocked. The question comes
+//! with a summary of the command by a cheap model, the first that answers.
 
 use rho::extension::{Context, Decision, Extension, ToolCall};
 
@@ -9,6 +10,21 @@ pub struct GitGate;
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [&str; 2] = ["Bash", "BackgroundTask"];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
+/// Tried in order; a missing provider or a failed request tries the next.
+const SUMMARY_MODELS: [&str; 2] = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"];
+const SUMMARY_PROMPT: &str = "Summarize in one or two short sentences what this shell command does to the git repository: what gets committed, pushed or tagged, and where. Plain text, no markdown.";
+
+/// The first summary a model in `SUMMARY_MODELS` gives, if any.
+async fn summarize(ctx: &Context, command: &str) -> Option<String> {
+    for model in SUMMARY_MODELS {
+        if let Ok(text) = ctx.complete(model, SUMMARY_PROMPT, command).await
+            && !text.trim().is_empty()
+        {
+            return Some(text.trim().to_string());
+        }
+    }
+    None
+}
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -40,7 +56,10 @@ impl Extension for GitGate {
         if !mutates_git(command) {
             return Decision::Allow;
         }
-        let title = format!("Allow this git operation? {command}");
+        let title = match summarize(ctx, command).await {
+            Some(summary) => format!("Allow this git operation? {summary}\n\n{command}"),
+            None => format!("Allow this git operation? {command}"),
+        };
         if ctx.confirm(Some(&call.id), &title).await {
             Decision::Allow
         } else {
@@ -95,6 +114,19 @@ mod tests {
         }
     }
 
+    /// A model that always answers `.0`.
+    struct Says(&'static str);
+
+    impl rho::provider::Provider for Says {
+        fn stream(
+            &self,
+            _: rho::provider::Request,
+        ) -> futures::stream::BoxStream<'static, anyhow::Result<rho::provider::Event>> {
+            let text = rho::provider::Event::TextDelta(self.0.into());
+            Box::pin(futures::stream::iter([Ok(text)]))
+        }
+    }
+
     fn call(name: &str, command: &str) -> ToolCall {
         ToolCall {
             id: "t1".into(),
@@ -116,6 +148,17 @@ mod tests {
         assert_eq!(
             *approve.0.lock().unwrap(),
             ["Allow this git operation? git push"]
+        );
+
+        // With a summary from the first model that is available.
+        let mut registry = rho::provider::Registry::default();
+        registry.register("openai", Arc::new(Says("Pushes main to origin.")));
+        let ctx = Context::new("s", "/tmp", approve.clone(), registry);
+        let mut c = call("Bash", "git push origin main");
+        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
+        assert_eq!(
+            approve.0.lock().unwrap().last().unwrap(),
+            "Allow this git operation? Pushes main to origin.\n\ngit push origin main"
         );
 
         // No UI: blocked.
