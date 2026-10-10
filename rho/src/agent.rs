@@ -15,7 +15,8 @@ use crate::extension::{
     SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
 use crate::provider::{
-    Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, Usage,
+    Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, ToolSpec,
+    Usage,
 };
 use crate::store::{State, Store};
 use crate::tools::DynTool;
@@ -113,7 +114,10 @@ pub struct Session {
     /// Usage of the latest request, see `Session::usage_report`.
     pub last_usage: Usage,
     pub cost: f64,
-    pub tools: Vec<Arc<dyn DynTool>>,
+    tools: Vec<Arc<dyn DynTool>>,
+    /// `tools` specs, built once: every request sends the same bytes, and
+    /// schemas are not regenerated per request.
+    specs: Vec<ToolSpec>,
     pub system: String,
     /// Slash commands registered by extensions.
     pub commands: Vec<SlashCommand>,
@@ -172,8 +176,14 @@ impl Session {
     /// Specs of all tools. Every request carries all of them, whatever the
     /// profile, so a profile switch keeps the prompt cache; the model learns
     /// what it may call from `profile_note`.
-    pub fn tool_specs(&self) -> Vec<crate::provider::ToolSpec> {
-        self.tools.iter().map(|t| t.spec()).collect()
+    pub fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.specs.clone()
+    }
+
+    /// The tool called `name`.
+    pub fn tool(&self, name: &str) -> Option<&Arc<dyn DynTool>> {
+        let i = self.specs.iter().position(|s| s.name == name)?;
+        Some(&self.tools[i])
     }
 
     /// What the model needs to know about the profile, once per change: on
@@ -190,10 +200,10 @@ impl Session {
         let before = seen
             .as_ref()
             .and_then(|id| profiles.iter().find(|p| &p.id == id));
-        let names: Vec<String> = self.tools.iter().map(|t| t.spec().name).collect();
         let changed = |gone: bool| -> Vec<&str> {
-            names
+            self.specs
                 .iter()
+                .map(|s| &s.name)
                 .filter(|n| {
                     let was = before.is_none_or(|b| b.shows(n));
                     if gone {
@@ -393,6 +403,47 @@ impl Session {
         out
     }
 
+    /// Streams one model response to the frontend. Returns its content, why
+    /// it stopped and its usage, which is also added to the session's.
+    async fn stream(&mut self, request: Request) -> Result<(Vec<Content>, StopReason, Usage)> {
+        let ctx = self.ctx.clone();
+        self.last_request = Some(Instant::now());
+        let mut stream = self.provider.stream(request);
+        let mut content: Vec<Content> = Vec::new();
+        let mut stop = StopReason::EndTurn;
+        let mut usage = Usage::default();
+        while let Some(event) = stream.next().await {
+            match event? {
+                Event::TextDelta(delta) => {
+                    ctx.emit(AgentEvent::Text(&delta));
+                    match content.last_mut() {
+                        Some(Content::Text { text }) => text.push_str(&delta),
+                        _ => content.push(Content::text(delta)),
+                    }
+                }
+                Event::ThinkingDelta(delta) => ctx.emit(AgentEvent::Thinking(&delta)),
+                Event::Block(block) => content.push(block),
+                Event::Usage(u) => {
+                    // A request can report usage more than once; each
+                    // report replaces the last, so only add the change.
+                    self.usage += u - usage;
+                    self.cost += self.price(&u) - self.price(&usage);
+                    usage = u;
+                    self.last_usage = u;
+                    ctx.emit(AgentEvent::Usage {
+                        model: &self.model_spec,
+                        usage,
+                        context_window: self.provider.context_window(&self.model),
+                        total: self.usage,
+                        cost: self.cost,
+                    });
+                }
+                Event::Done(reason) => stop = reason,
+            }
+        }
+        Ok((content, stop, usage))
+    }
+
     /// USD for one request to the session's model, 0 if the price is unknown.
     fn price(&self, usage: &Usage) -> f64 {
         self.provider
@@ -586,6 +637,7 @@ impl Agent {
             usage: Usage::default(),
             last_usage: Usage::default(),
             cost: 0.0,
+            specs: setup.tools.iter().map(|t| t.spec()).collect(),
             tools: setup.tools,
             system: setup.system,
             commands: setup.commands,
@@ -731,40 +783,7 @@ impl Agent {
                 return Ok(stop);
             }
 
-            session.last_request = Some(Instant::now());
-            let mut stream = session.provider.stream(request);
-            let mut content: Vec<Content> = Vec::new();
-            let mut stop = StopReason::EndTurn;
-            let mut usage = Usage::default();
-            while let Some(event) = stream.next().await {
-                match event? {
-                    Event::TextDelta(delta) => {
-                        ctx.emit(AgentEvent::Text(&delta));
-                        match content.last_mut() {
-                            Some(Content::Text { text }) => text.push_str(&delta),
-                            _ => content.push(Content::text(delta)),
-                        }
-                    }
-                    Event::ThinkingDelta(delta) => ctx.emit(AgentEvent::Thinking(&delta)),
-                    Event::Block(block) => content.push(block),
-                    Event::Usage(u) => {
-                        // A request can report usage more than once; each
-                        // report replaces the last, so only add the change.
-                        session.usage += u - usage;
-                        session.cost += session.price(&u) - session.price(&usage);
-                        usage = u;
-                        session.last_usage = u;
-                        ctx.emit(AgentEvent::Usage {
-                            model: &session.model_spec,
-                            usage,
-                            context_window: session.provider.context_window(&session.model),
-                            total: session.usage,
-                            cost: session.cost,
-                        });
-                    }
-                    Event::Done(reason) => stop = reason,
-                }
-            }
+            let (content, stop, usage) = session.stream(request).await?;
 
             let mut results = Vec::new();
             for block in &content {
@@ -854,11 +873,8 @@ impl Agent {
     async fn call_tool(&self, session: &Session, call: &mut ToolCall) -> ToolOutput {
         let ctx = &session.ctx;
         // Announce first, so a confirm prompt can refer to the visible call.
-        let description = session
-            .tools
-            .iter()
-            .find(|t| t.spec().name == call.name)
-            .and_then(|t| t.describe(&call.input));
+        let tool = session.tool(&call.name);
+        let description = tool.and_then(|t| t.describe(&call.input));
         ctx.emit(AgentEvent::ToolStart {
             id: &call.id,
             name: &call.name,
@@ -882,7 +898,7 @@ impl Agent {
         }
         let result = match decision {
             Decision::Block(reason) => Err(anyhow::anyhow!(reason)),
-            Decision::Allow => match session.tools.iter().find(|t| t.spec().name == call.name) {
+            Decision::Allow => match tool {
                 Some(tool) => tool.run(call.input.clone(), ctx).await,
                 None => Err(anyhow::anyhow!("unknown tool {}", call.name)),
             },

@@ -530,11 +530,7 @@ fn replay_history(
                 Content::Text { text } => ctx.emit(AgentEvent::Text(text)),
                 Content::Thinking { thinking, .. } => ctx.emit(AgentEvent::Thinking(thinking)),
                 Content::ToolUse { id, name, input } => {
-                    let description = session
-                        .tools
-                        .iter()
-                        .find(|t| t.spec().name == *name)
-                        .and_then(|t| t.describe(input));
+                    let description = session.tool(name).and_then(|t| t.describe(input));
                     ctx.emit(AgentEvent::ToolStart {
                         id,
                         name,
