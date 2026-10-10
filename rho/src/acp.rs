@@ -1142,7 +1142,11 @@ fn to_update(
             ToolCall::new(format!("notice-{n}"), title)
                 .kind(ToolKind::Other)
                 .status(status(is_error))
-                .content(vec![text.into()]),
+                .content(if text.is_empty() {
+                    vec![]
+                } else {
+                    vec![text.into()]
+                }),
         ),
         AgentEvent::Title(t) => {
             SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(t.to_string()))

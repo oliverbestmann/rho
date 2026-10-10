@@ -185,8 +185,9 @@ impl Frontend for Cli {
                 text,
                 is_error,
             } => eprintln!(
-                "\n[{}{title}]\n{text}",
-                if is_error { "failed: " } else { "" }
+                "\n[{}{title}]{}{text}",
+                if is_error { "failed: " } else { "" },
+                if text.is_empty() { "" } else { "\n" }
             ),
             AgentEvent::ToolEnd { .. } | AgentEvent::Title(_) | AgentEvent::Model { .. } => {}
         }

@@ -779,7 +779,8 @@ impl Agent {
                 &(session.usage - usage),
                 session.cost - cost,
             );
-            session.ctx.notify("Turn", &report, false);
+            // In the title: notices show as collapsed tool calls.
+            session.ctx.notify(&format!("Turn: {report}"), "", false);
         }
         result
     }
