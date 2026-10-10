@@ -5,9 +5,10 @@ A small ACP-native coding agent in Rust. Prototype.
 Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
-- `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GoCheck`,
-  `SessionTitle`, `BackgroundTasks`, `AskUser`, `PlanMode`, `WebUi`) and a
-  `main` that calls `rho::run` with its `rho::Options`.
+- `agent/` - the `rho` binary: its extensions (`RipgrepGate`, `GitGate`,
+  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Memory`, `SessionTitle`,
+  `BackgroundTasks`, `AskUser`, `PlanMode`, `WebUi`) and a `main` that calls
+  `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
 - `rho/src/anthropic.rs` - Anthropic Messages API with Claude Pro/Max subscription shaping
@@ -203,6 +204,22 @@ background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
 `BackgroundTaskCancel`: commands run sandboxed in their own process group, the
 result (exit status + last 10 lines) is sent with `trigger_turn`, and running
 tasks are killed when the session ends.
+
+Ports of the other pi extensions:
+
+- `GitGate` asks the user before `Bash` or `BackgroundTask` runs `git commit`,
+  `git push` or `git tag`; without a UI (CLI) they are blocked.
+- `RipgrepFind` adds `Grep` (pi's `grep`): `rg` for file names or contents,
+  sandboxed like `Bash`, 50 lines by default.
+- `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,
+  sandboxed, so the module cache and `GOCACHE` must be accessible.
+- `FetchUrl` (pi's `fetch_url`) fetches a URL; HTML becomes markdown via
+  `htmd`. The network is not sandboxed.
+- `Memory` (pi's `memory`) talks to mcp-memory-service (`MCP_MEMORY_URL`,
+  default `http://localhost:6758`; `MCP_API_KEY`). Output over 2000 lines or
+  50KB is cut, the full JSON goes to a file in the temp dir.
+
+pi's `exit` extension is not ported: rho has no interactive TUI.
 
 ## Profiles
 

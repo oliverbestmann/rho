@@ -67,7 +67,8 @@ pub(crate) fn resolve(cwd: &Path, path: &str) -> PathBuf {
     cwd.join(path)
 }
 
-pub(crate) fn truncate(mut s: String) -> String {
+/// Cuts `s` to `MAX_OUTPUT` bytes (on a char boundary) and marks the cut.
+pub fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
         let mut end = MAX_OUTPUT;
         while !s.is_char_boundary(end) {
