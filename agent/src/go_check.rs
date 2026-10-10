@@ -8,6 +8,7 @@
 //! have changed there, and `go` could not write its cache.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rho::extension::{Context, Extension, PromptSetup, Settle};
@@ -15,10 +16,20 @@ use rho::extension::{Context, Extension, PromptSetup, Settle};
 /// Failed checks in a row (per session) before giving back to the user.
 pub const MAX_FAILURES: u32 = 3;
 
-#[derive(Default)]
 pub struct GoCheck {
+    /// The `go` binary; tests use a mock.
+    go: PathBuf,
     /// Failures in a row, by session id.
     failures: Mutex<HashMap<String, u32>>,
+}
+
+impl Default for GoCheck {
+    fn default() -> Self {
+        Self {
+            go: "go".into(),
+            failures: Default::default(),
+        }
+    }
 }
 
 const CHECKS: [[&str; 2]; 2] = [["test", "./..."], ["vet", "./..."]];
@@ -44,7 +55,7 @@ impl Extension for GoCheck {
         let mut failed = false;
         for args in CHECKS {
             let label = format!("go {}", args.join(" "));
-            let mut cmd = tokio::process::Command::new("go");
+            let mut cmd = tokio::process::Command::new(&self.go);
             cmd.args(args)
                 .current_dir(ctx.cwd())
                 .stdin(std::process::Stdio::null())
@@ -97,7 +108,7 @@ impl Extension for GoCheck {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use super::*;
@@ -130,15 +141,13 @@ mod tests {
         check_in(go, &ctx(dir), tools).await
     }
 
-    fn go_installed() -> bool {
-        let ok = std::process::Command::new("go")
-            .arg("version")
-            .output()
-            .is_ok();
-        if !ok {
-            eprintln!("go not installed, skipping");
-        }
-        ok
+    /// An executable `go` in `dir` running the shell script `body`.
+    pub(crate) fn mock_go(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("go");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
     }
 
     fn passing_module(dir: &std::path::Path) {
@@ -166,44 +175,55 @@ mod tests {
     #[tokio::test]
     async fn runs_in_the_sandbox() {
         let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
         passing_module(dir.path());
-        if !go_installed() {
-            return;
-        }
-        // The base policy does not grant the Go caches, so a module that
-        // passes unsandboxed fails here.
-        let msg = check_in(&GoCheck::default(), &sandboxed(dir.path()), &["Write"]).await;
+        let probe = outside.path().join("probe");
+        let go = GoCheck {
+            go: mock_go(dir.path(), &format!("touch '{}'\n", probe.display())),
+            ..Default::default()
+        };
+        // The base policy grants only the cwd, so writing elsewhere fails.
+        let msg = check_in(&go, &sandboxed(dir.path()), &["Write"]).await;
         assert!(msg.is_some_and(|m| m.contains("❌")));
+        assert!(!probe.exists());
+        // Unsandboxed it passes.
+        assert_eq!(check(&go, dir.path(), &["Write"]).await, None);
+        assert!(probe.exists());
     }
 
     #[tokio::test]
     async fn continues_on_failure_with_a_retry_limit() {
-        let go = GoCheck::default();
+        let bin = tempfile::tempdir().unwrap();
+        // Fails with the content of `fail` in the cwd, if there is one.
+        let go = GoCheck {
+            go: mock_go(
+                bin.path(),
+                "echo \"$@\" >> calls\n[ -f fail ] && cat fail && exit 1\nexit 0\n",
+            ),
+            ..Default::default()
+        };
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
         // Not a Go module: nothing to do.
         assert_eq!(check(&go, dir, &["Write"]).await, None);
 
-        if !go_installed() {
-            return;
-        }
         let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
         w("go.mod", "module example.com/m\n\ngo 1.21\n");
-        w(
-            "m.go",
-            "package m\n\nfunc Add(a, b int) int { return a - b }\n",
-        );
-        w(
-            "m_test.go",
-            "package m\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"bad add\")\n\t}\n}\n",
-        );
+        w("fail", "--- FAIL: TestAdd\n    bad add\n");
         // Read-only runs are not checked.
         assert_eq!(check(&go, dir, &["Read"]).await, None);
+        assert!(!dir.join("calls").exists());
 
         let msg = check(&go, dir, &["Write"]).await.expect("should continue");
         assert!(
-            msg.contains("bad add") && msg.contains("Please fix"),
+            msg.contains("❌ go test ./...")
+                && msg.contains("bad add")
+                && msg.contains("Please fix"),
             "{msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("calls")).unwrap(),
+            "test ./...\nvet ./...\n"
         );
 
         // Gives up after MAX_FAILURES in a row ...
@@ -220,10 +240,7 @@ mod tests {
         assert!(check(&go, dir, &["Write"]).await.is_some());
 
         // Passing resets the count too.
-        w(
-            "m.go",
-            "package m\n\nfunc Add(a, b int) int { return a + b }\n",
-        );
+        std::fs::remove_file(dir.join("fail")).unwrap();
         assert_eq!(check(&go, dir, &["Write"]).await, None);
         assert_eq!(go.failures.lock().unwrap()["t"], 0);
     }

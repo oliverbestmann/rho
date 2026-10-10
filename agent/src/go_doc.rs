@@ -2,6 +2,7 @@
 //! offered in sessions whose cwd is a Go module. Runs in the session's
 //! sandbox, like Bash; the module cache (`~/go`) has to be readable.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ pub struct GoDoc;
 impl Extension for GoDoc {
     async fn session_start(&self, session: &mut SessionSetup) {
         if session.ctx.cwd().join("go.mod").exists() {
-            session.tools.push(Arc::new(GoDocTool));
+            session.tools.push(Arc::new(GoDocTool { go: "go".into() }));
         }
     }
 }
@@ -35,7 +36,10 @@ struct Input {
     all: bool,
 }
 
-struct GoDocTool;
+struct GoDocTool {
+    /// The `go` binary; tests use a mock.
+    go: PathBuf,
+}
 
 impl Tool for GoDocTool {
     fn rules(&self) -> &'static [&'static str] {
@@ -55,7 +59,7 @@ impl Tool for GoDocTool {
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         let i: Input = parse(input)?;
-        let mut cmd = tokio::process::Command::new("go");
+        let mut cmd = tokio::process::Command::new(&self.go);
         cmd.arg("doc");
         if i.src {
             cmd.arg("-src");
@@ -124,43 +128,23 @@ mod tests {
 
     #[tokio::test]
     async fn looks_up_docs() {
-        if std::process::Command::new("go")
-            .arg("version")
-            .output()
-            .is_err()
-        {
-            eprintln!("go not installed, skipping");
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("go.mod"),
-            "module example.com/m\n\ngo 1.21\n",
-        )
-        .unwrap();
+        let go = crate::go_check::tests::mock_go(
+            dir.path(),
+            "case \"$*\" in *nosuchpkg*) echo 'doc: no such package' >&2; exit 1;; esac\necho \"$*\"\n",
+        );
+        let tool = GoDocTool { go };
+        // Sandboxed with the base policy, which grants the mock's dir.
         let ctx = Context::new("s", dir.path(), Arc::new(NoFrontend), Default::default());
-        // Unsandboxed: the test machine's Go cache may be anywhere.
-        ctx.set_sandbox(None);
+        let run = async |input| tool.run(input, &ctx).await;
 
-        let out = GoDocTool
-            .run(json!({"target": "strings.TrimSpace"}), &ctx)
+        let out = run(json!({"target": "strings.TrimSpace"})).await.unwrap();
+        assert_eq!(out.output, "doc -- strings.TrimSpace");
+        let out = run(json!({"target": "fmt", "src": true, "all": true}))
             .await
             .unwrap();
-        assert!(
-            out.output.contains("func TrimSpace(s string) string"),
-            "{}",
-            out.output
-        );
-        let out = GoDocTool
-            .run(json!({"target": "strings.TrimSpace", "src": true}), &ctx)
-            .await
-            .unwrap();
-        assert!(out.output.contains("return"), "{}", out.output);
-        assert!(
-            GoDocTool
-                .run(json!({"target": "nosuchpkg.X"}), &ctx)
-                .await
-                .is_err()
-        );
+        assert_eq!(out.output, "doc -src -all -- fmt");
+        let err = run(json!({"target": "nosuchpkg.X"})).await.unwrap_err();
+        assert!(err.to_string().contains("doc: no such package"), "{err}");
     }
 }
