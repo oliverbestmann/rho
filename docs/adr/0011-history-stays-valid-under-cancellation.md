@@ -14,8 +14,9 @@ run's future at any `await`.
 ## Decision
 
 Cancellation is done by dropping the future (`Abortable` in ACP,
-`kill_on_drop` for child processes), and `Agent::run` is written so that
-the history is valid at every point where it can be dropped or fail:
+`kill_on_drop` for child processes; `Bash` also kills its process group),
+and `Agent::run` is written so that the history is valid at every point
+where it can be dropped or fail:
 
 - An assistant turn is appended only after all its tool calls have run,
   together with the user message holding their results.

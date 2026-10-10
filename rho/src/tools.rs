@@ -4,6 +4,7 @@
 //! what subscription requests are expected to carry.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -265,31 +266,52 @@ impl Tool for Bash {
     }
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
-        let cwd = ctx.cwd();
-        {
-            let i: BashInput = parse(input)?;
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c")
-                .arg(&i.command)
-                .current_dir(cwd)
-                .stdin(std::process::Stdio::null())
-                // Cancelling the prompt drops this future; take the process with it.
-                .kill_on_drop(true);
-            ctx.sandbox_command(&mut cmd)
-                .context("setting up the sandbox")?;
-            let child = cmd.output();
-            let timeout = Duration::from_secs_f64(i.timeout.unwrap_or(120.0));
-            let Ok(out) = tokio::time::timeout(timeout, child).await else {
-                bail!("command timed out after {timeout:?}");
-            };
-            let out = out?;
-            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&out.stderr));
-            let text = truncate(text);
-            if !out.status.success() {
-                bail!("{text}\n[{}]", out.status);
-            }
-            Ok(text.into())
+        let i: BashInput = parse(input)?;
+        let timeout = Duration::try_from_secs_f64(i.timeout.unwrap_or(120.0))
+            .ok()
+            .filter(|t| !t.is_zero())
+            .context("timeout must be a positive number of seconds")?;
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(&i.command)
+            .current_dir(ctx.cwd())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Its own group, so a timeout or cancel can kill what it started.
+            .process_group(0)
+            .kill_on_drop(true);
+        ctx.sandbox_command(&mut cmd)
+            .context("setting up the sandbox")?;
+        let child = cmd.spawn()?;
+        // Cancelling the prompt drops this future; take the processes with it.
+        let mut group = KillGroup(child.id());
+        let out = tokio::time::timeout(timeout, child.wait_with_output()).await;
+        let Ok(out) = out else {
+            bail!("command timed out after {timeout:?}");
+        };
+        let out = out?;
+        // Finished: processes left in the group closed their output and run
+        // on (e.g. `nohup cmd >log &`).
+        group.0 = None;
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let text = truncate(text);
+        if !out.status.success() {
+            bail!("{text}\n[{}]", out.status);
+        }
+        Ok(text.into())
+    }
+}
+
+/// Kills the process group led by this pid when dropped.
+struct KillGroup(Option<u32>);
+
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: plain syscall; the group was created by `process_group(0)`.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         }
     }
 }
@@ -346,6 +368,7 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn ctx(dir: &Path) -> Context {
         Context::new(
@@ -428,6 +451,45 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bash_rejects_bad_timeouts() {
+        let dir = tempfile::tempdir().unwrap();
+        for timeout in [json!(-1), json!(0), json!(1e300)] {
+            let input = json!({"command": "true", "timeout": timeout});
+            let err = Bash.run(input, &ctx(dir.path())).await.unwrap_err();
+            assert!(err.to_string().contains("positive"), "{err}");
+        }
+    }
+
+    /// Whether `pid` is gone (or a zombie, waiting to be reaped).
+    #[cfg(target_os = "linux")]
+    fn dead(pid: &str) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, s)| s.starts_with('Z')),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bash_timeout_kills_what_the_command_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = json!({"command": "sleep 30 & echo $! > pid; wait", "timeout": 0.5});
+        let err = Bash.run(input, &ctx(dir.path())).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let pid = pid.trim();
+        for _ in 0..50 {
+            if dead(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("sleep {pid} survived the timeout");
     }
 
     #[tokio::test]
