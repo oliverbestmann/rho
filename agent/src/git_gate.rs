@@ -3,7 +3,7 @@
 //! commands pass. Without a UI (CLI) they are blocked. The question comes
 //! with a summary of the command by a cheap model, the first that answers.
 
-use rho::extension::{Context, Decision, Extension, ToolCall};
+use rho::extension::{Context, Decision, Extension, Form, ToolCall};
 
 pub struct GitGate;
 
@@ -52,17 +52,22 @@ impl Extension for GitGate {
         if !SHELL_TOOLS.contains(&call.name.as_str()) {
             return Decision::Allow;
         }
+
         let command = call.input["command"].as_str().unwrap_or_default();
         if !mutates_git(command) {
             return Decision::Allow;
         }
         // The title replaces the shell call's title (same call id) and is
         // plain text in Zed, so it gives the summary and keeps the whole command.
-        let title = match summarize(ctx, command).await {
-            Some(summary) => format!("{}\n\n{command}", summary.replace('\n', " ")),
-            None => command.to_string(),
-        };
-        if ctx.confirm(Some(&call.id), &title).await {
+        let summary = summarize(ctx, command).await;
+
+        // print the summary as text
+        if let Some(summary) = summary {
+            let summary = summary.replace("\n", " ");
+            ctx.emit(rho::agent::AgentEvent::Text(&summary));
+        }
+
+        if ctx.confirm(Some(&call.id), command).await {
             Decision::Allow
         } else {
             Decision::Block("Git operation not approved by the user".into())
