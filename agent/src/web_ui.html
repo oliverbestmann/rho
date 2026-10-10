@@ -80,6 +80,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const ago = (ms) => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
 const tokens = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`;
+// Input keys shown in a tool summary, the first present one wins (as TITLE_KEYS in rho/src/acp.rs).
+const TITLE_KEYS = ["command", "url", "pattern", "glob", "target", "query", "path", "hash", "id", "action", "plan"];
 const touch = matchMedia("(hover: none)").matches;
 
 async function api(path, options = {}) {
@@ -139,7 +141,7 @@ function render() {
     } else if ((e.kind === "tool" || e.kind === "tool_end") && !shown.has(e.id)) {
       shown.add(e.id);
       const t = tools.get(e.id);
-      const arg = t.input && (t.input.command || t.input.path || t.input.plan || "");
+      const arg = (t.input && TITLE_KEYS.map((k) => t.input[k]).find((v) => typeof v === "string")) || "";
       const state = !t.end ? "⏳" : t.end.is_error ? "✗" : "✓";
       html.push(`<details class="ev tool ${t.end && t.end.is_error ? "err" : ""}">
         <summary>${state} ${esc(t.name || "")} ${esc(String(arg).split("\n")[0])}</summary>

@@ -1242,9 +1242,15 @@ fn to_update(
 
 const MAX_TITLE: usize = 160;
 
+/// Input keys shown in a tool call title, the first present one wins.
+/// Keep in sync with `TITLE_KEYS` in agent/src/web_ui.html.
+const TITLE_KEYS: [&str; 10] = [
+    "command", "url", "pattern", "glob", "target", "query", "path", "hash", "id", "action",
+];
+
 /// "Bash first line of the command", at most `MAX_TITLE` characters.
 fn title(name: &str, input: &serde_json::Value) -> String {
-    let arg = ["command", "path"].iter().find_map(|k| input[k].as_str());
+    let arg = TITLE_KEYS.iter().find_map(|k| input[k].as_str());
     let Some(arg) = arg else {
         return name.to_string();
     };
@@ -1432,6 +1438,10 @@ mod tests {
         assert_eq!(t.chars().count(), MAX_TITLE + 1);
         assert!(t.ends_with('…'));
         assert_eq!(title("Bash", &json!({"command": "ls\nmore"})), "Bash ls");
+        let grep = json!({"pattern": "fn x", "path": "src"});
+        assert_eq!(title("Grep", &grep), "Grep fn x");
+        let fetch = json!({"url": "https://x.y", "raw": true});
+        assert_eq!(title("FetchUrl", &fetch), "FetchUrl https://x.y");
     }
 
     #[test]
