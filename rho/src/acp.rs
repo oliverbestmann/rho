@@ -36,7 +36,9 @@ type SharedSession = Arc<tokio::sync::Mutex<Session>>;
 
 struct Entry {
     session: SharedSession,
-    running: Option<AbortHandle>,
+    /// Runs that `session/cancel` aborts: a prompt, and a run for a
+    /// triggered message (`watch_inbox`) it may be waiting for.
+    running: Vec<(u64, AbortHandle)>,
     /// Reachable while a turn holds the session, e.g. to switch profiles.
     ctx: Context,
     frontend: Arc<AcpFrontend>,
@@ -54,26 +56,58 @@ struct ClientCaps {
 #[derive(Default)]
 struct State {
     sessions: Mutex<HashMap<SessionId, Entry>>,
+    next_run: AtomicU64,
     caps: ClientCaps,
 }
 
 impl State {
-    /// Registers the run that a cancel notification should abort.
     fn session(&self, sid: &SessionId) -> Option<(SharedSession, Context, Arc<AcpFrontend>)> {
         let sessions = self.sessions.lock().unwrap();
         let e = sessions.get(sid)?;
         Some((e.session.clone(), e.ctx.clone(), e.frontend.clone()))
     }
 
+    /// Registers a run that a cancel notification should abort, until the
+    /// returned `Run` is dropped.
     fn start_run(
-        &self,
+        self: &Arc<Self>,
         sid: &SessionId,
-    ) -> Option<(SharedSession, futures::future::AbortRegistration)> {
+    ) -> Option<(SharedSession, Run, futures::future::AbortRegistration)> {
         let (abort, registration) = AbortHandle::new_pair();
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let mut sessions = self.sessions.lock().unwrap();
         let entry = sessions.get_mut(sid)?;
-        entry.running = Some(abort);
-        Some((entry.session.clone(), registration))
+        entry.running.push((id, abort));
+        let run = Run {
+            state: self.clone(),
+            sid: sid.clone(),
+            id,
+        };
+        Some((entry.session.clone(), run, registration))
+    }
+
+    /// Aborts the session's runs.
+    fn cancel(&self, sid: &SessionId) {
+        if let Some(entry) = self.sessions.lock().unwrap().get_mut(sid) {
+            for (_, abort) in entry.running.drain(..) {
+                abort.abort();
+            }
+        }
+    }
+}
+
+/// A run registered with `State::start_run`.
+struct Run {
+    state: Arc<State>,
+    sid: SessionId,
+    id: u64,
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let Some(entry) = self.state.sessions.lock().unwrap().get_mut(&self.sid) {
+            entry.running.retain(|(id, _)| *id != self.id);
+        }
     }
 }
 
@@ -245,10 +279,8 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         responder: Responder<CloseSessionResponse>,
                         _cx| {
                 // Dropping the entry ends the session once a running turn lets go.
-                let entry = close_state.sessions.lock().unwrap().remove(&req.session_id);
-                if let Some(abort) = entry.and_then(|e| e.running) {
-                    abort.abort();
-                }
+                close_state.cancel(&req.session_id);
+                close_state.sessions.lock().unwrap().remove(&req.session_id);
                 responder.respond(CloseSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
@@ -257,7 +289,8 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             async move |req: PromptRequest,
                         responder: Responder<PromptResponse>,
                         cx: ConnectionTo<Client>| {
-                let Some((session, registration)) = prompt_state.start_run(&req.session_id) else {
+                let Some((session, run, registration)) = prompt_state.start_run(&req.session_id)
+                else {
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));
                 };
@@ -289,6 +322,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         }
                     };
                     let result = Abortable::new(turn, registration).await;
+                    drop(run);
                     let usage = turn_usage(session.usage - usage_before);
                     match result {
                         Ok(Ok(stop)) => {
@@ -339,11 +373,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
         )
         .on_receive_notification(
             async move |n: CancelNotification, _cx| {
-                if let Some(s) = cancel_state.sessions.lock().unwrap().get_mut(&n.session_id)
-                    && let Some(abort) = s.running.take()
-                {
-                    abort.abort();
-                }
+                cancel_state.cancel(&n.session_id);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -419,7 +449,7 @@ fn register(
         sid.clone(),
         Entry {
             session: session.clone(),
-            running: None,
+            running: vec![],
             ctx: ctx.clone(),
             frontend,
         },
@@ -608,13 +638,13 @@ async fn watch_inbox(
         if !ctx.has_triggered() {
             continue;
         }
-        let Some((session, registration)) = state.start_run(&sid) else {
+        let Some((session, _run, registration)) = state.start_run(&sid) else {
             return Ok(());
         };
         let mut session = session.lock().await;
         // A prompt may have consumed the message while we waited for the lock.
-        let run = agent.run_triggered(&mut session);
-        if let Ok(Some(Err(e))) = Abortable::new(run, registration).await {
+        let turn = agent.run_triggered(&mut session);
+        if let Ok(Some(Err(e))) = Abortable::new(turn, registration).await {
             ctx.notify("rho", &format!("{e:#}"), true);
         }
     }
