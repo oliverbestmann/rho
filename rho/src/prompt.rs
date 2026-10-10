@@ -29,15 +29,22 @@ pub fn config_dir() -> PathBuf {
         .join("rho")
 }
 
-/// Creates empty `PREAMBLE_SYSTEM.md` and `APPEND_SYSTEM.md` in `config_dir` if
-/// missing, so users find where to put them. Best effort.
+/// Creates `PREAMBLE_SYSTEM.md` (with `PREAMBLE`) and an empty
+/// `APPEND_SYSTEM.md` in `config_dir` if missing, to be edited. Best effort.
 pub fn ensure_files(config_dir: &Path) {
+    use std::io::Write as _;
     let _ = std::fs::create_dir_all(config_dir);
-    for name in ["PREAMBLE_SYSTEM.md", "APPEND_SYSTEM.md"] {
-        let _ = std::fs::OpenOptions::new()
+    for (name, content) in [
+        ("PREAMBLE_SYSTEM.md", format!("{PREAMBLE}\n")),
+        ("APPEND_SYSTEM.md", String::new()),
+    ] {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(config_dir.join(name));
+            .open(config_dir.join(name))
+        {
+            let _ = f.write_all(content.as_bytes());
+        }
     }
 }
 
@@ -49,7 +56,7 @@ pub fn build(
     roots: &[PathBuf],
 ) -> String {
     let cwd = &roots[0];
-    // Empty files count as absent: `ensure_files` creates them empty.
+    // Empty files count as absent.
     let read = |dir: &Path, name: &str| {
         std::fs::read_to_string(dir.join(name))
             .ok()
@@ -193,8 +200,12 @@ mod tests {
             "{p}"
         );
 
-        // Empty files count as absent.
+        // The written preamble is the default; empty files count as absent.
         ensure_files(config.path());
+        assert_eq!(
+            std::fs::read_to_string(config.path().join("PREAMBLE_SYSTEM.md")).unwrap(),
+            format!("{PREAMBLE}\n")
+        );
         let empty = build(
             PREAMBLE,
             &crate::tools::builtin(),

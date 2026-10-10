@@ -34,4 +34,5 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0024](0024-go-check-in-the-sandbox.md) | GoCheck runs in the sandbox | Accepted |
 | [0025](0025-prompt-after-session-start-tool-rules.md) | System prompt built after `session_start`; tools bring their rules | Accepted |
 | [0026](0026-prompt-files-created-empty.md) | `SYSTEM.md` and `APPEND_SYSTEM.md` created empty on startup | Accepted, amended by 0027 |
-| [0027](0027-preamble-system-md.md) | `PREAMBLE_SYSTEM.md` replaces only the preamble | Accepted |
+| [0027](0027-preamble-system-md.md) | `PREAMBLE_SYSTEM.md` replaces only the preamble | Accepted, amended by 0028 |
+| [0028](0028-preamble-written-to-disk.md) | `PREAMBLE_SYSTEM.md` created with the built-in preamble | Accepted |

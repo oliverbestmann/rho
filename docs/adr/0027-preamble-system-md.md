@@ -1,6 +1,6 @@
 # 27. `PREAMBLE_SYSTEM.md` replaces only the preamble
 
-- Status: Accepted
+- Status: Accepted, amended by ADR 0028 (preamble written to the file)
 - Date: 2026-10-10
 - Amends: ADR 0023, ADR 0026
 

@@ -65,7 +65,8 @@ then `<addendum>` from `~/.config/rho/APPEND_SYSTEM.md`, `<project_context>`
 from `AGENTS.md`/`CLAUDE.md` (config dir, then cwd ancestors outermost first)
 and `<cwd>`, then what extensions added to `SessionSetup::system`.
 `~/.config/rho/PREAMBLE_SYSTEM.md` replaces the preamble. It and
-`APPEND_SYSTEM.md` are created empty on startup; empty files are ignored.
+`APPEND_SYSTEM.md` are created on startup if missing, the first with the
+built-in preamble, the second empty; empty files are ignored.
 To reuse pi's addendum:
 
     ln -sf ~/.dotfiles/pia/config/APPEND_SYSTEM.md ~/.config/rho/APPEND_SYSTEM.md
