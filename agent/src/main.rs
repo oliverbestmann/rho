@@ -9,6 +9,7 @@ mod go_doc;
 mod memory;
 mod plan_mode;
 mod ponytail;
+mod project_context;
 mod ripgrep_find;
 mod session_title;
 mod web_ui;
@@ -33,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(ask_user::AskUser),
             Arc::new(plan_mode::PlanMode),
             Arc::new(ponytail::Ponytail),
+            // Last, so the project instructions end the system prompt.
+            Arc::new(project_context::ProjectContext::default()),
         ],
         ..Default::default()
     })

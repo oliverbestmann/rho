@@ -1,5 +1,5 @@
 //! System prompt, built like pi's: preamble, tools, rules, then the
-//! `APPEND_SYSTEM.md` addendum, project context files and the cwd, each in
+//! `APPEND_SYSTEM.md` addendum, the config dir's context file and the cwd, each in
 //! `<section>` tags. `PREAMBLE_SYSTEM.md` in the config dir replaces the
 //! preamble.
 
@@ -10,7 +10,7 @@ use crate::tools::DynTool;
 
 pub const PREAMBLE: &str = "You are an expert coding assistant operating inside rho, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 
-/// Looked up in the config dir, then in the cwd and each parent (outermost first).
+/// Looked up in that order; the first one present in a directory counts.
 const CONTEXT_FILES: [&str; 5] = [
     "AGENTS.override.md",
     "AGENTS.md",
@@ -56,12 +56,6 @@ pub fn build(
     roots: &[PathBuf],
 ) -> String {
     let cwd = &roots[0];
-    // Empty files count as absent.
-    let read = |dir: &Path, name: &str| {
-        std::fs::read_to_string(dir.join(name))
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    };
     let mut sections: Vec<(&str, String)> = vec![];
 
     let mut prompt = config_dir
@@ -97,29 +91,10 @@ pub fn build(
         sections.push(("addendum", addendum.trim().to_string()));
     }
 
-    let mut files = vec![];
-    let mut dirs: Vec<&Path> = cwd.ancestors().collect();
-    dirs.reverse();
-    for dir in config_dir.into_iter().chain(dirs) {
-        let found = CONTEXT_FILES
-            .iter()
-            .find_map(|name| Some((dir.join(name), read(dir, name)?)));
-        if let Some((path, content)) = found
-            && !files.iter().any(|(p, _)| p == &path)
-        {
-            files.push((path, content));
-        }
-    }
-    if !files.is_empty() {
-        let mut text = String::from("Project-specific instructions and guidelines:");
-        for (path, content) in files {
-            text += &format!(
-                "\n\n<project_instructions path=\"{}\">\n{}\n</project_instructions>",
-                path.display(),
-                content.trim()
-            );
-        }
-        sections.push(("project_context", text));
+    // Project context files in the cwd's ancestors need the user's consent;
+    // the agent binary's `ProjectContext` extension adds them.
+    if let Some(file) = config_dir.and_then(context_file) {
+        sections.push(("project_context", context_text(&[file])));
     }
 
     sections.push(("cwd", cwd.display().to_string()));
@@ -127,6 +102,33 @@ pub fn build(
         prompt += &format!("\n\n<{name}>\n{text}\n</{name}>");
     }
     prompt + &dirs_section(&roots[1..])
+}
+
+/// Empty files count as absent.
+fn read(dir: &Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(name))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// The first context file (`AGENTS.md`, `CLAUDE.md`, ...) in `dir`.
+pub fn context_file(dir: &Path) -> Option<(PathBuf, String)> {
+    CONTEXT_FILES
+        .iter()
+        .find_map(|name| Some((dir.join(name), read(dir, name)?)))
+}
+
+/// The body of a `<project_context>` section with `files` (path, content).
+pub fn context_text(files: &[(PathBuf, String)]) -> String {
+    let mut text = String::from("Project-specific instructions and guidelines:");
+    for (path, content) in files {
+        text += &format!(
+            "\n\n<project_instructions path=\"{}\">\n{}\n</project_instructions>",
+            path.display(),
+            content.trim()
+        );
+    }
+    text
 }
 
 const DIRS_OPEN: &str = "\n\n<additional_directories>\n";
@@ -189,12 +191,11 @@ mod tests {
         assert!(p.contains("<tools>\n- Read: Read a text file."), "{p}");
         assert!(p.contains("- Use Read to examine files"), "{p}");
         assert!(p.contains("<addendum>\n# Mine\nuse rg\n</addendum>"), "{p}");
-        let (g, pr, s) = (
-            p.find("global rules").unwrap(),
-            p.find("project rules").unwrap(),
-            p.find("sub rules").unwrap(),
+        assert!(p.contains("global rules"), "{p}");
+        assert!(
+            !p.contains("project rules") && !p.contains("sub rules"),
+            "{p}"
         );
-        assert!(g < pr && pr < s, "config, then outermost to innermost: {p}");
         assert!(
             p.ends_with(&format!("<cwd>\n{}\n</cwd>", cwd.display())),
             "{p}"

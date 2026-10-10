@@ -62,8 +62,11 @@ Built per session like pi's (`rho/src/prompt.rs`), after the extensions'
 `session_start`: preamble, `<tools>` (every tool, also the extensions'),
 `<rules>` (each tool's `Tool::rules`, e.g. `Grep` over `rg` in `Bash`),
 then `<addendum>` from `~/.config/rho/APPEND_SYSTEM.md`, `<project_context>`
-from `AGENTS.md`/`CLAUDE.md` (config dir, then cwd ancestors outermost first)
-and `<cwd>`, then what extensions added to `SessionSetup::system`.
+from the config dir's `AGENTS.md`/`CLAUDE.md` and `<cwd>`, then what
+extensions added to `SessionSetup::system`. Context files in the cwd and its
+parents are added last, by the `ProjectContext` extension, only if the user
+approves them; the answer is remembered per directory in
+`~/.config/rho/project_context.json`.
 `~/.config/rho/PREAMBLE_SYSTEM.md` replaces the preamble. It and
 `APPEND_SYSTEM.md` are created on startup if missing, the first with the
 built-in preamble, the second empty; empty files are ignored.
