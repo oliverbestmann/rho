@@ -198,6 +198,9 @@ async fn main() -> anyhow::Result<()> {
 
 `GoCheck` continues the run at most 3 times in a row per prompt; pi's
 go-check has no limit (pi itself has no turn limit, rho stops at 50).
+`go test` / `go vet` run sandboxed like `Bash`, so the module cache,
+`GOCACHE` and the temp dir must be writable; they are skipped in read-only
+profiles.
 
 `SessionTitle` names the session from the first prompt with haiku, in the
 background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and

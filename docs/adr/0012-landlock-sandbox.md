@@ -46,9 +46,9 @@ without root, and the `nono` crate wraps it.
 - Programs need their caches and config granted (`~/go`, `~/.cache`,
   `GOCACHE`, git config).
 - Code that extensions run without `run_sandboxed` / `sandbox_command` is
-  not restricted: `GoCheck` runs `go test` / `go vet` unsandboxed (they
-  run the model's code, so this may deserve its own decision), and
-  `Memory` writes its full output to a temp file from rho's process.
+  not restricted: `Memory` writes its full output to a temp file from
+  rho's process. (`GoCheck` ran `go test` / `go vet` unsandboxed until
+  ADR 0024.)
 - Rules for paths that do not exist when a command or thread starts are
   skipped, so a granted path that is created later only applies to the
   next call.

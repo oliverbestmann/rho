@@ -31,3 +31,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0021](0021-background-tasks.md) | Background tasks in process groups, reported with `trigger_turn` | Accepted |
 | [0022](0022-bounded-autonomous-loops.md) | Bound the agent's autonomous loops | Accepted |
 | [0023](0023-layered-system-prompt.md) | System prompt assembled from layered files, fixed per session | Accepted |
+| [0024](0024-go-check-in-the-sandbox.md) | GoCheck runs in the sandbox | Accepted |

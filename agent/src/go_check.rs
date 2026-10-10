@@ -1,6 +1,11 @@
 //! After the agent settles in a Go module, runs `go test` and `go vet`. On
 //! failure the output goes back to the model and the run continues, at most
 //! `MAX_FAILURES` times in a row per prompt (pi's go-check has no limit).
+//!
+//! The checks run the model's code, so they run in the session's sandbox,
+//! like Bash: the module cache and `GOCACHE` must be writable (`~/go`,
+//! `~/.cache` in `sandbox.json`). Not in a read-only profile: nothing could
+//! have changed there, and `go` could not write its cache.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,7 +36,7 @@ impl Extension for GoCheck {
     async fn before_settle(&self, ctx: &Context, settle: &Settle<'_>) -> Option<String> {
         // Skip pure Q&A runs: only check after tools that may have changed files.
         let changed = settle.tools_called.iter().any(|t| t != "Read");
-        if !changed || !ctx.cwd().join("go.mod").exists() {
+        if !changed || ctx.profile().read_only || !ctx.cwd().join("go.mod").exists() {
             return None;
         }
 
@@ -39,12 +44,17 @@ impl Extension for GoCheck {
         let mut failed = false;
         for args in CHECKS {
             let label = format!("go {}", args.join(" "));
-            let out = tokio::process::Command::new("go")
-                .args(args)
+            let mut cmd = tokio::process::Command::new("go");
+            cmd.args(args)
                 .current_dir(ctx.cwd())
-                .kill_on_drop(true)
-                .output()
-                .await;
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let out = match ctx.sandbox_command(&mut cmd) {
+                Ok(()) => cmd.output().await,
+                Err(e) => Err(std::io::Error::other(format!(
+                    "setting up the sandbox: {e:#}"
+                ))),
+            };
             match out {
                 Ok(o) if o.status.success() => results.push(format!("✅ {label}")),
                 Ok(o) => {
@@ -91,21 +101,79 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use rho::extension::NoFrontend;
+    use rho::extension::{NoFrontend, Profile};
     use rho::provider::StopReason;
 
-    fn ctx(dir: &std::path::Path) -> Context {
+    /// Sandboxed with the base policy (system dirs and `dir`).
+    fn sandboxed(dir: &std::path::Path) -> Context {
         Context::new("t", dir, Arc::new(NoFrontend), Default::default())
     }
 
-    async fn check(go: &GoCheck, dir: &std::path::Path, tools: &[&str]) -> Option<String> {
+    /// Unsandboxed: the test machine's Go cache may be anywhere.
+    fn ctx(dir: &std::path::Path) -> Context {
+        let ctx = sandboxed(dir);
+        ctx.set_sandbox(None);
+        ctx
+    }
+
+    async fn check_in(go: &GoCheck, ctx: &Context, tools: &[&str]) -> Option<String> {
         let tools: Vec<String> = tools.iter().map(|t| t.to_string()).collect();
         let settle = Settle {
             stop: StopReason::EndTurn,
             history: &[],
             tools_called: &tools,
         };
-        go.before_settle(&ctx(dir), &settle).await
+        go.before_settle(ctx, &settle).await
+    }
+
+    async fn check(go: &GoCheck, dir: &std::path::Path, tools: &[&str]) -> Option<String> {
+        check_in(go, &ctx(dir), tools).await
+    }
+
+    fn go_installed() -> bool {
+        let ok = std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .is_ok();
+        if !ok {
+            eprintln!("go not installed, skipping");
+        }
+        ok
+    }
+
+    fn passing_module(dir: &std::path::Path) {
+        std::fs::write(dir.join("go.mod"), "module example.com/m\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            dir.join("m.go"),
+            "package m\n\nfunc One() int { return 1 }\n",
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn skipped_in_read_only_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        passing_module(dir.path());
+        let ctx = ctx(dir.path());
+        ctx.set_profiles(vec![Profile {
+            read_only: true,
+            ..Profile::write()
+        }]);
+        // Would fail without go, or run it; neither happens.
+        assert_eq!(check_in(&GoCheck::default(), &ctx, &["Bash"]).await, None);
+    }
+
+    #[tokio::test]
+    async fn runs_in_the_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        passing_module(dir.path());
+        if !go_installed() {
+            return;
+        }
+        // The base policy does not grant the Go caches, so a module that
+        // passes unsandboxed fails here.
+        let msg = check_in(&GoCheck::default(), &sandboxed(dir.path()), &["Write"]).await;
+        assert!(msg.is_some_and(|m| m.contains("❌")));
     }
 
     #[tokio::test]
@@ -116,12 +184,7 @@ mod tests {
         // Not a Go module: nothing to do.
         assert_eq!(check(&go, dir, &["Write"]).await, None);
 
-        if std::process::Command::new("go")
-            .arg("version")
-            .output()
-            .is_err()
-        {
-            eprintln!("go not installed, skipping");
+        if !go_installed() {
             return;
         }
         let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
