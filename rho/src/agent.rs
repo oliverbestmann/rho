@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
@@ -114,6 +114,8 @@ pub struct Session {
     /// Usage of the latest request, see `Session::usage_report`.
     pub last_usage: Usage,
     pub cost: f64,
+    /// Model requests so far.
+    pub requests: u32,
     tools: Vec<Arc<dyn DynTool>>,
     /// `tools` specs, built once: every request sends the same bytes, and
     /// schemas are not regenerated per request.
@@ -408,6 +410,7 @@ impl Session {
     async fn stream(&mut self, request: Request) -> Result<(Vec<Content>, StopReason, Usage)> {
         let ctx = self.ctx.clone();
         self.last_request = Some(Instant::now());
+        self.requests += 1;
         let mut stream = self.provider.stream(request);
         let mut content: Vec<Content> = Vec::new();
         let mut stop = StopReason::EndTurn;
@@ -467,6 +470,23 @@ fn count(n: u64) -> String {
 }
 
 /// Share of the prompt read from cache.
+/// One line: "2 requests · 3.4s · input 1,030 (98% cached, 0 written) · output 12 · $0.0123".
+fn turn_report(requests: u32, took: Duration, u: &Usage, cost: f64) -> String {
+    let mut out = format!(
+        "{requests} request{} · {:.1}s · input {} ({} cached, {} written) · output {}",
+        if requests == 1 { "" } else { "s" },
+        took.as_secs_f64(),
+        count(u.prompt()),
+        hit_rate(u),
+        count(u.cache_write),
+        count(u.output),
+    );
+    if cost > 0.0 {
+        out += &format!(" · ${cost:.4}");
+    }
+    out
+}
+
 fn hit_rate(u: &Usage) -> String {
     match u.prompt() {
         0 => "–".into(),
@@ -638,6 +658,7 @@ impl Agent {
             usage: Usage::default(),
             last_usage: Usage::default(),
             cost: 0.0,
+            requests: 0,
             specs: setup.tools.iter().map(|t| t.spec()).collect(),
             tools: setup.tools,
             system,
@@ -741,7 +762,29 @@ impl Agent {
     /// History stays valid for the API if this future is dropped (cancelled)
     /// or fails: an assistant turn is only appended together with its tool
     /// results, and a dangling user message gets the next prompt merged in.
+    ///
+    /// Afterwards shows what the run cost as a notice.
     pub async fn run(&self, session: &mut Session, prompt: Vec<Content>) -> Result<StopReason> {
+        let (start, usage, cost, requests) = (
+            Instant::now(),
+            session.usage,
+            session.cost,
+            session.requests,
+        );
+        let result = self.run_prompt(session, prompt).await;
+        if session.requests > requests {
+            let report = turn_report(
+                session.requests - requests,
+                start.elapsed(),
+                &(session.usage - usage),
+                session.cost - cost,
+            );
+            session.ctx.notify("Turn", &report, false);
+        }
+        result
+    }
+
+    async fn run_prompt(&self, session: &mut Session, prompt: Vec<Content>) -> Result<StopReason> {
         let ctx = session.ctx.clone();
         let exts = &self.extensions;
         // A stop requested while idle must not end this new run.
@@ -950,5 +993,25 @@ pub(crate) fn push_user(history: &mut Vec<Message>, content: Vec<Content>) {
             role: Role::User,
             content,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_report_sums_up_the_run() {
+        let u = Usage {
+            input: 20,
+            cache_read: 1010,
+            cache_write: 1000,
+            output: 12,
+        };
+        assert_eq!(
+            turn_report(2, Duration::from_millis(3400), &u, 0.01234),
+            "2 requests · 3.4s · input 2,030 (50% cached, 1,000 written) · output 12 · $0.0123"
+        );
+        assert!(!turn_report(1, Duration::ZERO, &u, 0.0).contains('$'));
     }
 }

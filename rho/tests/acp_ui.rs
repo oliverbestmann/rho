@@ -270,6 +270,8 @@ async fn bash_is_a_terminal_for_clients_that_ask_for_it() {
             )
         })
         .map(|u| serde_json::to_value(u).unwrap())
+        // Not the turn's usage notice.
+        .filter(|v| v["toolCallId"] == "t1")
         .collect();
     assert_eq!(wire.len(), 2, "{wire:?}");
     assert_eq!(wire[0]["title"], "echo hi");

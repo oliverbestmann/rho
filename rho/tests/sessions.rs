@@ -381,7 +381,9 @@ async fn acp_lists_and_loads_saved_sessions() {
             "tool: t1",
             "agent: Done.",
             "usage: 15 of 10",
-            "agent: Again."
+            "agent: Again.",
+            // The new prompt's usage notice.
+            "tool: notice-6"
         ]
     );
 

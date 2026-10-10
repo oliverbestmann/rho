@@ -247,9 +247,14 @@ async fn acp_session_streams_text_and_tool_calls() {
                     assert_eq!(thoughts, "need a tool");
                     // used = whole prompt + output; size = provider's default window.
                     assert_eq!(used, vec![(1015, 200_000), (1037, 200_000)]);
+                    // The tool, then the turn's usage notice.
                     assert_eq!(
                         tool_statuses,
-                        vec![ToolCallStatus::InProgress, ToolCallStatus::Completed]
+                        vec![
+                            ToolCallStatus::InProgress,
+                            ToolCallStatus::Completed,
+                            ToolCallStatus::Completed
+                        ]
                     );
                     Ok(())
                 })

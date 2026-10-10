@@ -763,8 +763,8 @@ mod tests {
         let sent = http.post(&send).json(&json!({"text": "more"})).send().await;
         assert_eq!(sent.unwrap().status(), 204);
         assert_eq!(
-            *notices.0.lock().unwrap(),
-            ["Message from the web view: more"]
+            notices.0.lock().unwrap().last().unwrap(),
+            "Message from the web view: more"
         );
         let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
         assert_eq!(s["queued"], json!(["more"]));
