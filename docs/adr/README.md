@@ -37,3 +37,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0027](0027-preamble-system-md.md) | `PREAMBLE_SYSTEM.md` replaces only the preamble | Accepted, amended by 0028 |
 | [0028](0028-preamble-written-to-disk.md) | `PREAMBLE_SYSTEM.md` created with the built-in preamble | Accepted |
 | [0029](0029-project-context-needs-consent.md) | Project context files are read only with the user's consent | Accepted |
+| [0030](0030-local-memory-store.md) | Memories stored locally with embeddings in SQLite | Accepted |

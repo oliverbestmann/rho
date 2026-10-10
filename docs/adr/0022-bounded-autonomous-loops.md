@@ -21,8 +21,9 @@ then burn quota indefinitely.
   `before_prompt`, i.e. on a new prompt but also on a run started by a
   triggered message (e.g. a finished background task).
 - Tool output is bounded: `Bash`, `Read`, `Grep` and `GoDoc` cut to 50 KB
-  (`tools::truncate`, `tools::MAX_OUTPUT`); `Memory` cuts to 2000 lines /
-  50 KB and saves the full JSON to a temp file; `FetchUrl` cuts to
+  (`tools::truncate`, `tools::MAX_OUTPUT`); `Memory` cuts to 50 KB too
+  (ADR 0030; it used to cut to 2000 lines and save the full JSON to a
+  temp file); `FetchUrl` cuts to
   64,000 characters by default (`maxLength`, set by the model);
   background tasks keep 10 lines.
 - `Bash` has a default timeout of 120 s (the model can set another);

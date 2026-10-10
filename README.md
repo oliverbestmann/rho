@@ -229,9 +229,10 @@ Ports of the other pi extensions:
   sandboxed, so the module cache and `GOCACHE` must be accessible.
 - `FetchUrl` (pi's `fetch_url`) fetches a URL; HTML becomes markdown via
   `htmd`. The network is not sandboxed.
-- `Memory` (pi's `memory`) talks to mcp-memory-service (`MCP_MEMORY_URL`,
-  default `http://localhost:6758`; `MCP_API_KEY`). Output over 2000 lines or
-  50KB is cut, the full JSON goes to a file in the temp dir.
+- `Memory` (pi's `memory`) stores memories in `memory.db` in the config dir,
+  embedded locally with fastembed (all-MiniLM-L6-v2, downloaded on first use
+  to `~/.cache/rho/fastembed`) and ranked with sqlite-vec (ADR 0030).
+  onnxruntime comes from nixpkgs, so build inside `nix develop`.
 
 `Ponytail` adds the [ponytail](https://github.com/DietrichGebert/ponytail)
 skill ("full" level, vendored in `agent/src/ponytail.md`) to the system prompt.

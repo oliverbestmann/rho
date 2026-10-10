@@ -1,34 +1,99 @@
-//! `Memory`: persistent memories through the mcp-memory-service REST API
-//! (pi's memory). `MCP_MEMORY_URL` sets the service (default
-//! `http://localhost:6758`), `MCP_API_KEY` a bearer token. Responses are
-//! formatted per action; unexpected shapes fall back to the raw JSON. Long
-//! output is cut, the full JSON goes to a temporary file.
+//! `Memory`: persistent memories in `memory.db` in the config dir (ADR 0030).
+//! Content is embedded locally with fastembed (all-MiniLM-L6-v2, downloaded
+//! on first use to `$XDG_CACHE_HOME/rho/fastembed`); search ranks by cosine
+//! similarity with sqlite-vec's `vec_distance_cosine`.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Once};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
-use reqwest::{Method, Url};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
 use rho::provider::ToolSpec;
-use rho::tools::{Tool, input_schema, parse};
+use rho::tools::{Tool, input_schema, parse, truncate};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
-const DEFAULT_URL: &str = "http://localhost:6758";
-const MAX_LINES: usize = 2000;
-const MAX_BYTES: usize = 50 * 1024;
+/// Stores refuse content this similar to an existing memory, unless a
+/// conversation id is given.
+const DUPLICATE_SIMILARITY: f64 = 0.95;
 
-pub struct Memory;
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS memories (
+    -- SHA-256 of the content, hex.
+    hash TEXT NOT NULL PRIMARY KEY,
+    content TEXT NOT NULL CHECK (content <> ''),
+    tags TEXT NOT NULL CHECK (json_valid(tags) AND json_type(tags) = 'array'),
+    memory_type TEXT,
+    metadata TEXT NOT NULL CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
+    -- f32 little-endian, as sqlite-vec reads it.
+    embedding BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS memories_by_update ON memories (updated_at DESC, hash);
+"#;
+
+/// The columns `Mem::read` expects; tags joined with ", " (NULL if none).
+const COLUMNS: &str =
+    "hash, content, (SELECT group_concat(value, ', ') FROM json_each(tags)), memory_type";
+
+type Embed = Box<dyn Fn(&str) -> Result<Vec<f32>> + Send + Sync>;
+
+/// One instance serves all sessions; the database and the model are opened
+/// on first use.
+pub struct Memory(Arc<Inner>);
+
+struct Inner {
+    path: PathBuf,
+    conn: Mutex<Option<Connection>>,
+    embed: Embed,
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        let cache = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
+            })
+            .join("rho/fastembed");
+        let model = Mutex::new(None::<TextEmbedding>);
+        Memory::new(
+            rho::prompt::config_dir().join("memory.db"),
+            Box::new(move |text| {
+                let mut model = model.lock().unwrap();
+                if model.is_none() {
+                    let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                        .with_cache_dir(cache.clone())
+                        .with_show_download_progress(false);
+                    *model = Some(
+                        TextEmbedding::try_new(options).context("loading the embedding model")?,
+                    );
+                }
+                Ok(model.as_mut().unwrap().embed([text], None)?.remove(0))
+            }),
+        )
+    }
+}
+
+impl Memory {
+    fn new(path: PathBuf, embed: Embed) -> Memory {
+        Memory(Arc::new(Inner {
+            path,
+            conn: Mutex::new(None),
+            embed,
+        }))
+    }
+}
 
 impl Extension for Memory {
     async fn session_start(&self, session: &mut SessionSetup) {
-        let base = std::env::var("MCP_MEMORY_URL").unwrap_or_else(|_| DEFAULT_URL.into());
-        session.tools.push(Arc::new(MemoryTool {
-            base,
-            api_key: std::env::var("MCP_API_KEY").ok(),
-            http: reqwest::Client::new(),
-        }));
+        session.tools.push(Arc::new(MemoryTool(self.0.clone())));
     }
 }
 
@@ -42,20 +107,6 @@ enum Action {
     Update,
     Delete,
     Health,
-}
-
-impl Action {
-    fn name(self) -> &'static str {
-        match self {
-            Action::Search => "search",
-            Action::Store => "store",
-            Action::List => "list",
-            Action::Get => "get",
-            Action::Update => "update",
-            Action::Delete => "delete",
-            Action::Health => "health",
-        }
-    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -94,116 +145,18 @@ struct Input {
     agent_id: Option<String>,
 }
 
-struct MemoryTool {
-    base: String,
-    api_key: Option<String>,
-    http: reqwest::Client,
-}
-
-/// Method, URL and JSON body for the endpoint of `i.action`.
-fn request(base: &str, i: &Input) -> Result<(Method, Url, Option<Value>)> {
-    let hash;
-    let mut url =
-        Url::parse(base).with_context(|| format!("invalid memory service URL {base:?}"))?;
-    let mut path = vec!["api", "memories"];
-    let mut method = Method::GET;
-    let mut body = None;
-    let mut query: Vec<(&str, String)> = vec![];
-    let nonempty = |s: &Option<String>| s.clone().filter(|s| !s.is_empty());
-    let need_hash = || -> Result<String> {
-        match nonempty(&i.hash) {
-            Some(h) => Ok(h),
-            None => bail!("hash is required for {}", i.action.name()),
-        }
-    };
-
-    match i.action {
-        Action::Search => {
-            let Some(q) = nonempty(&i.query) else {
-                bail!("query is required for search");
-            };
-            path = vec!["api", "search"];
-            method = Method::POST;
-            let mut b = json!({ "query": q, "n_results": i.limit.unwrap_or(10) });
-            if let Some(t) = i.threshold {
-                b["similarity_threshold"] = t.into();
-            }
-            body = Some(b);
-        }
-        Action::Store => {
-            let Some(content) = nonempty(&i.content) else {
-                bail!("content is required for store");
-            };
-            method = Method::POST;
-            let mut b = json!({ "content": content, "tags": i.tags.clone().unwrap_or_default() });
-            if let Some(t) = nonempty(&i.memory_type) {
-                b["memory_type"] = t.into();
-            }
-            if let Some(m) = &i.metadata {
-                b["metadata"] = m.clone().into();
-            }
-            if let Some(c) = nonempty(&i.conversation_id) {
-                b["conversation_id"] = c.into();
-            }
-            body = Some(b);
-        }
-        Action::List => {
-            query.push(("page", i.page.unwrap_or(1).to_string()));
-            query.push(("page_size", i.page_size.unwrap_or(10).to_string()));
-            if let Some(t) = nonempty(&i.tag) {
-                query.push(("tag", t));
-            }
-            if let Some(t) = nonempty(&i.memory_type) {
-                query.push(("memory_type", t));
-            }
-        }
-        Action::Get | Action::Delete => {
-            hash = need_hash()?;
-            path.push(&hash);
-            if i.action == Action::Delete {
-                method = Method::DELETE;
-            }
-        }
-        Action::Update => {
-            hash = need_hash()?;
-            path.push(&hash);
-            method = Method::PUT;
-            let mut b = json!({});
-            if let Some(t) = &i.tags {
-                b["tags"] = t.clone().into();
-            }
-            if let Some(t) = nonempty(&i.memory_type) {
-                b["memory_type"] = t.into();
-            }
-            if let Some(m) = &i.metadata {
-                b["metadata"] = m.clone().into();
-            }
-            body = Some(b);
-        }
-        Action::Health => path = vec!["api", "health"],
-    }
-
-    url.path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("invalid memory service URL {base:?}"))?
-        .pop_if_empty()
-        .extend(path);
-    if !query.is_empty() {
-        url.query_pairs_mut().extend_pairs(query);
-    }
-    Ok((method, url, body))
-}
+struct MemoryTool(Arc<Inner>);
 
 impl Tool for MemoryTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Memory".into(),
             description: format!(
-                "Search, store, list, get, update, or delete persistent memories through {}. \
-                 Output is truncated to {MAX_LINES} lines or {}KB.\n\
+                "Search, store, list, get, update, or delete persistent memories, shared by all sessions. \
+                 Search is semantic (embeddings): it matches by meaning, so the query need not share words with the memory. Output is cut at {}KB.\n\
                  Use memory search at the start of a task for relevant decisions, conventions, errors, and unfinished work.\n\
                  Use memory store after substantial work to preserve reusable decisions and learnings, never secrets or transient progress.",
-                self.base,
-                MAX_BYTES / 1024
+                rho::tools::MAX_OUTPUT / 1024
             ),
             input_schema: input_schema::<Input>(),
         }
@@ -211,281 +164,382 @@ impl Tool for MemoryTool {
 
     async fn run(&self, input: Value, _ctx: &Context) -> Result<ToolOutput> {
         let i: Input = parse(input)?;
-        let (method, url, body) = request(&self.base, &i)?;
-        let mut req = self.http.request(method, url);
-        if let Some(body) = &body {
-            req = req.json(body);
-        }
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        if let Some(agent) = &i.agent_id {
-            req = req.header("X-Agent-ID", agent);
-        }
-        let res = req.send().await.context("memory service unreachable")?;
-        let status = res.status();
-        let text = res.text().await?;
-        if !status.is_success() {
-            bail!("memory service failed: {status}: {text}");
-        }
-
-        // `raw` is the full pretty JSON: saved when the output is cut, and
-        // shown when the response has an unexpected shape.
-        let data: Option<Value> = if text.is_empty() {
-            None
-        } else {
-            Some(serde_json::from_str(&text).context("memory service sent invalid JSON")?)
-        };
-        let raw = match &data {
-            Some(d) => serde_json::to_string_pretty(d)?,
-            None => "(empty)".into(),
-        };
-        let formatted = data.as_ref().and_then(|d| format(i.action, d));
-        let formatted = formatted.as_deref().unwrap_or(&raw);
-
-        let (mut output, cut) = truncate_head(formatted);
-        if cut {
-            let path = std::env::temp_dir().join(format!(
-                "rho-memory-{}-{}.json",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos()
-            ));
-            std::fs::write(&path, &raw)?;
-            output += &format!("\n\n[Output truncated. Full output: {}]", path.display());
-        }
-        Ok(output.into())
+        let inner = self.0.clone();
+        let out = tokio::task::spawn_blocking(move || inner.run(&i)).await??;
+        Ok(truncate(out).into())
     }
 }
 
-/// Whole lines from the start, at most `MAX_LINES` lines and `MAX_BYTES`
-/// bytes (pi's `truncateHead`). A first line over the limit is cut. Returns
-/// whether anything was dropped.
-fn truncate_head(text: &str) -> (String, bool) {
-    let mut out = String::new();
-    for (n, line) in text.split('\n').enumerate() {
-        let sep = usize::from(n > 0);
-        if n == MAX_LINES || out.len() + sep + line.len() > MAX_BYTES {
-            if n == 0 {
-                out.push_str(&line[..line.floor_char_boundary(MAX_BYTES)]);
+struct Mem {
+    hash: String,
+    content: String,
+    tags: Option<String>,
+    memory_type: Option<String>,
+}
+
+impl Mem {
+    fn read(r: &Row) -> rusqlite::Result<Mem> {
+        Ok(Mem {
+            hash: r.get(0)?,
+            content: r.get(1)?,
+            tags: r.get(2)?,
+            memory_type: r.get(3)?,
+        })
+    }
+
+    /// Title (number, type, score), content, tags and hash.
+    fn show(&self, number: Option<usize>, score: Option<f64>) -> String {
+        let title = [
+            number.map(|n| format!("{n}.")),
+            self.memory_type.as_ref().map(|t| format!("[{t}]")),
+            score.map(|s| format!("score {s:.3}")),
+        ];
+        let title: Vec<String> = title.into_iter().flatten().collect();
+        let mut lines = vec![title.join(" "), self.content.clone()];
+        lines.extend(self.tags.as_ref().map(|t| format!("Tags: {t}")));
+        lines.push(format!("Hash: {}", self.hash));
+        lines.retain(|l| !l.is_empty());
+        lines.join("\n")
+    }
+}
+
+fn nonempty(s: &Option<String>) -> Option<&str> {
+    s.as_deref().filter(|s| !s.is_empty())
+}
+
+fn blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+fn open(path: &Path) -> Result<Connection> {
+    static VEC: Once = Once::new();
+    // Registers sqlite-vec for every connection opened afterwards.
+    VEC.call_once(|| unsafe {
+        // sqlite-vec declares its init without parameters.
+        let init = std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::ffi::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> std::ffi::c_int,
+        >(sqlite_vec::sqlite3_vec_init as *const ());
+        rusqlite::ffi::sqlite3_auto_extension(Some(init));
+    });
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+    conn.execute_batch(SCHEMA)?;
+    Ok(conn)
+}
+
+fn get(c: &Connection, hash: &str) -> Result<Mem> {
+    let sql = format!("SELECT {COLUMNS} FROM memories WHERE hash = ?1");
+    c.query_row(&sql, [hash], Mem::read)
+        .optional()?
+        .with_context(|| format!("memory {hash} not found"))
+}
+
+impl Inner {
+    fn run(&self, i: &Input) -> Result<String> {
+        let action = format!("{:?}", i.action).to_lowercase();
+        let need = |s: &Option<String>, what: &str| {
+            nonempty(s)
+                .map(str::to_string)
+                .with_context(|| format!("{what} is required for {action}"))
+        };
+        // Embed before taking the connection: the first call loads the model.
+        let embedding = match i.action {
+            Action::Search => Some((self.embed)(&need(&i.query, "query")?)?),
+            Action::Store => Some((self.embed)(&need(&i.content, "content")?)?),
+            _ => None,
+        };
+        let hash = match i.action {
+            Action::Get | Action::Update | Action::Delete => need(&i.hash, "hash")?,
+            _ => String::new(),
+        };
+
+        let mut conn = self.conn.lock().unwrap();
+        if conn.is_none() {
+            *conn = Some(open(&self.path)?);
+        }
+        let c = conn.as_ref().unwrap();
+
+        match i.action {
+            Action::Search => {
+                let query = i.query.as_deref().unwrap_or_default();
+                let sql = format!(
+                    "SELECT * FROM (SELECT {COLUMNS}, 1 - vec_distance_cosine(embedding, ?1) AS score
+                     FROM memories) WHERE ?2 IS NULL OR score >= ?2 ORDER BY score DESC LIMIT ?3"
+                );
+                let mut stmt = c.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![
+                        blob(&embedding.unwrap()),
+                        i.threshold,
+                        i.limit.unwrap_or(10).clamp(1, 100)
+                    ],
+                    |r| Ok((Mem::read(r)?, r.get::<_, f64>(4)?)),
+                )?;
+                let found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                let noun = if found.len() == 1 {
+                    "memory"
+                } else {
+                    "memories"
+                };
+                let mut parts = vec![format!("Found {} {noun} for {query:?}.", found.len())];
+                for (n, (m, score)) in found.iter().enumerate() {
+                    parts.push(m.show(Some(n + 1), Some(*score)));
+                }
+                Ok(parts.join("\n\n"))
             }
-            return (out, true);
+            Action::Store => {
+                let content = i.content.as_deref().unwrap_or_default();
+                let embedding = blob(&embedding.unwrap());
+                let hash: String = Sha256::digest(content)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                let conversation = nonempty(&i.conversation_id);
+                let duplicate: Option<String> = c
+                    .query_row(
+                        "SELECT hash FROM memories WHERE hash = ?1
+                            OR (?2 AND 1 - vec_distance_cosine(embedding, ?3) >= ?4)
+                         ORDER BY hash = ?1 DESC LIMIT 1",
+                        params![
+                            hash,
+                            conversation.is_none(),
+                            embedding,
+                            DUPLICATE_SIMILARITY
+                        ],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(d) = duplicate {
+                    return Ok(format!(
+                        "Not stored: duplicate of an existing memory.\n{}",
+                        get(c, &d)?.show(None, None)
+                    ));
+                }
+                let mut tags = i.tags.clone().unwrap_or_default();
+                if let Some(agent) = nonempty(&i.agent_id) {
+                    let tag = format!("agent:{agent}");
+                    if !tags.contains(&tag) {
+                        tags.push(tag);
+                    }
+                }
+                let mut metadata = i.metadata.clone().unwrap_or_default();
+                if let Some(conversation) = conversation {
+                    metadata.insert("conversation_id".into(), conversation.into());
+                }
+                let now = now_ms();
+                c.execute(
+                    "INSERT INTO memories (hash, content, tags, memory_type, metadata, embedding,
+                         created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    params![
+                        hash,
+                        content,
+                        serde_json::to_string(&tags)?,
+                        nonempty(&i.memory_type),
+                        serde_json::to_string(&metadata)?,
+                        embedding,
+                        now,
+                    ],
+                )?;
+                Ok(format!(
+                    "Memory stored.\n{}",
+                    get(c, &hash)?.show(None, None)
+                ))
+            }
+            Action::List => {
+                let page = i.page.unwrap_or(1).max(1);
+                let size = i.page_size.unwrap_or(10).clamp(1, 100);
+                let filter =
+                    "(?1 IS NULL OR EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?1))
+                    AND (?2 IS NULL OR memory_type = ?2)";
+                let (tag, kind) = (nonempty(&i.tag), nonempty(&i.memory_type));
+                let total: i64 = c.query_row(
+                    &format!("SELECT count(*) FROM memories WHERE {filter}"),
+                    params![tag, kind],
+                    |r| r.get(0),
+                )?;
+                let sql = format!(
+                    "SELECT {COLUMNS} FROM memories WHERE {filter}
+                     ORDER BY updated_at DESC, hash LIMIT ?3 OFFSET ?4"
+                );
+                let offset = i64::from(page - 1) * i64::from(size);
+                let mut stmt = c.prepare(&sql)?;
+                let rows = stmt.query_map(params![tag, kind, size, offset], Mem::read)?;
+                let found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                let more = offset + (found.len() as i64) < total;
+                let mut parts = vec![format!(
+                    "{} of {total} memories, page {page}{}",
+                    found.len(),
+                    if more { " (more available)" } else { "" }
+                )];
+                for (n, m) in found.iter().enumerate() {
+                    parts.push(m.show(Some(n + 1), None));
+                }
+                Ok(parts.join("\n\n"))
+            }
+            Action::Get => Ok(get(c, &hash)?.show(None, None)),
+            Action::Update => {
+                let tags = i.tags.as_ref().map(serde_json::to_string).transpose()?;
+                let metadata = i.metadata.as_ref().map(serde_json::to_string).transpose()?;
+                // Metadata is merged (JSON merge patch: null removes a key).
+                let changed = c.execute(
+                    "UPDATE memories SET tags = COALESCE(?2, tags),
+                         memory_type = COALESCE(?3, memory_type),
+                         metadata = json_patch(metadata, COALESCE(?4, '{}')),
+                         updated_at = ?5
+                     WHERE hash = ?1",
+                    params![hash, tags, nonempty(&i.memory_type), metadata, now_ms()],
+                )?;
+                if changed == 0 {
+                    bail!("memory {hash} not found");
+                }
+                Ok(format!(
+                    "Memory updated.\n{}",
+                    get(c, &hash)?.show(None, None)
+                ))
+            }
+            Action::Delete => {
+                if c.execute("DELETE FROM memories WHERE hash = ?1", [&hash])? == 0 {
+                    bail!("memory {hash} not found");
+                }
+                Ok(format!("Memory {hash} deleted."))
+            }
+            Action::Health => {
+                let n: i64 = c.query_row("SELECT count(*) FROM memories", [], |r| r.get(0))?;
+                let version: String = c.query_row("SELECT vec_version()", [], |r| r.get(0))?;
+                Ok(format!(
+                    "Memory store: {n} memories in {} (sqlite-vec {version})",
+                    self.path.display()
+                ))
+            }
         }
-        if sep == 1 {
-            out.push('\n');
-        }
-        out.push_str(line);
     }
-    (out, false)
-}
-
-fn format(action: Action, data: &Value) -> Option<String> {
-    match action {
-        Action::Search => format_search(data),
-        Action::List => format_list(data),
-        Action::Get => format_get(data),
-        Action::Store | Action::Update => format_mutation(data),
-        Action::Delete => format_delete(data),
-        Action::Health => format_health(data),
-    }
-}
-
-fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key)?.as_str().filter(|s| !s.is_empty())
-}
-
-fn join(parts: impl IntoIterator<Item = Option<String>>, sep: &str) -> String {
-    let parts: Vec<String> = parts
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .collect();
-    parts.join(sep)
-}
-
-/// A number as JavaScript prints it (`3`, not `3.0`).
-fn number(v: &Value) -> String {
-    match v.as_f64() {
-        Some(f) if f.fract() == 0.0 && f.abs() < 1e15 => format!("{}", f as i64),
-        _ => v.to_string(),
-    }
-}
-
-/// Title (index, type, score), content, tags and hash; other fields
-/// (timestamps, access counts) are left out.
-fn format_memory(memory: Option<&Value>, title: Option<String>) -> String {
-    let memory = memory.unwrap_or(&Value::Null);
-    let tags: Vec<&str> = memory
-        .get("tags")
-        .and_then(Value::as_array)
-        .map(|t| t.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let content = match memory.get("content") {
-        Some(Value::String(s)) => s.clone(),
-        None | Some(Value::Null) => "(no content)".into(),
-        Some(other) => other.to_string(),
-    };
-    join(
-        [
-            title,
-            Some(content),
-            (!tags.is_empty()).then(|| format!("Tags: {}", tags.join(", "))),
-            str_of(memory, "content_hash").map(|h| format!("Hash: {h}")),
-        ],
-        "\n",
-    )
-}
-
-fn type_tag(memory: Option<&Value>) -> Option<String> {
-    memory
-        .and_then(|m| str_of(m, "memory_type"))
-        .map(|t| format!("[{t}]"))
-}
-
-/// POST /api/search -> { query, total_found, results: [{ memory, similarity_score }] }
-fn format_search(data: &Value) -> Option<String> {
-    let results = data.get("results")?.as_array()?;
-    let count = data
-        .get("total_found")
-        .filter(|v| !v.is_null())
-        .map(number)
-        .unwrap_or_else(|| results.len().to_string());
-    let noun = if count == "1" { "memory" } else { "memories" };
-    let query = str_of(data, "query")
-        .map(|q| format!(" for {}", Value::from(q)))
-        .unwrap_or_default();
-    let mut parts = vec![format!("Found {count} {noun}{query}.")];
-    for (n, result) in results.iter().enumerate() {
-        let memory = result.get("memory");
-        let score = result
-            .get("similarity_score")
-            .and_then(Value::as_f64)
-            .map(|s| format!("score {s:.3}"));
-        let title = join([Some(format!("{}.", n + 1)), type_tag(memory), score], " ");
-        parts.push(format_memory(memory, Some(title)));
-    }
-    Some(parts.join("\n\n"))
-}
-
-/// GET /api/memories -> { memories: [...], total, page, page_size, has_more }
-fn format_list(data: &Value) -> Option<String> {
-    let memories = data.get("memories")?.as_array()?;
-    let total = data
-        .get("total")
-        .filter(|v| !v.is_null())
-        .map(number)
-        .unwrap_or_else(|| memories.len().to_string());
-    let heading = join(
-        [
-            Some(format!("{} of {total} memories", memories.len())),
-            data.get("page")
-                .filter(|v| !v.is_null())
-                .map(|p| format!("page {}", number(p))),
-            (data.get("has_more") == Some(&Value::Bool(true))).then(|| "(more available)".into()),
-        ],
-        " ",
-    );
-    let mut parts = vec![heading];
-    for (n, memory) in memories.iter().enumerate() {
-        let title = join([Some(format!("{}.", n + 1)), type_tag(Some(memory))], " ");
-        parts.push(format_memory(Some(memory), Some(title)));
-    }
-    Some(parts.join("\n\n"))
-}
-
-/// GET /api/memories/{hash} -> the memory itself.
-fn format_get(data: &Value) -> Option<String> {
-    data.as_object()?.get("content")?;
-    Some(format_memory(Some(data), type_tag(Some(data))))
-}
-
-/// POST /api/memories, PUT /api/memories/{hash} -> { success, message, memory }
-fn format_mutation(data: &Value) -> Option<String> {
-    let memory = data.as_object()?.get("memory")?;
-    let memory = (!memory.is_null()).then_some(memory);
-    Some(join(
-        [
-            str_of(data, "message").map(String::from),
-            Some(format_memory(memory, None)),
-        ],
-        "\n",
-    ))
-}
-
-/// DELETE /api/memories/{hash} -> { success, message }
-fn format_delete(data: &Value) -> Option<String> {
-    match data.as_object()?.get("message")? {
-        Value::String(s) => Some(s.clone()),
-        other => Some(other.to_string()),
-    }
-}
-
-/// GET /api/health -> { status }
-fn format_health(data: &Value) -> Option<String> {
-    str_of(data, "status").map(|s| format!("Memory service status: {s}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rho::extension::NoFrontend;
+    use serde_json::json;
 
-    fn input(v: Value) -> Input {
-        parse(v).unwrap()
+    /// Letter counts: texts sharing letters are similar.
+    fn letters(text: &str) -> Result<Vec<f32>> {
+        let mut v = vec![0.0; 26];
+        for b in text.to_lowercase().bytes().filter(u8::is_ascii_lowercase) {
+            v[usize::from(b - b'a')] += 1.0;
+        }
+        Ok(v)
     }
 
-    #[test]
-    fn builds_requests() {
-        let base = "http://localhost:6758";
-        let (m, url, body) = request(
-            base,
-            &input(json!({"action": "search", "query": "q", "threshold": 0.5})),
-        )
-        .unwrap();
-        assert_eq!(
-            (m, url.as_str()),
-            (Method::POST, "http://localhost:6758/api/search")
-        );
-        assert_eq!(
-            body.unwrap(),
-            json!({"query": "q", "n_results": 10, "similarity_threshold": 0.5})
-        );
+    #[tokio::test]
+    async fn stores_searches_and_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::new(dir.path().join("memory.db"), Box::new(letters));
+        let tool = MemoryTool(memory.0.clone());
+        let ctx = Context::new("s", "/tmp", Arc::new(NoFrontend), Default::default());
+        let run = async |v: Value| tool.run(v, &ctx).await.map(|o| o.output);
 
-        let (m, url, body) = request(
-            base,
-            &input(json!({"action": "list", "tag": "a b", "pageSize": 5})),
-        )
-        .unwrap();
-        assert_eq!(m, Method::GET);
-        assert_eq!(
-            url.as_str(),
-            "http://localhost:6758/api/memories?page=1&page_size=5&tag=a+b"
+        let out = run(json!({"action": "store", "content": "aaa bbb", "tags": ["x"], "memoryType": "note", "agentId": "rho"})).await.unwrap();
+        assert!(
+            out.starts_with("Memory stored.\n[note]\naaa bbb\nTags: x, agent:rho\nHash: "),
+            "{out}"
         );
-        assert!(body.is_none());
+        let hash = out.rsplit("Hash: ").next().unwrap().to_string();
+        assert_eq!(hash.len(), 64);
+        run(json!({"action": "store", "content": "zzz"}))
+            .await
+            .unwrap();
 
-        let (m, url, _) = request(
-            "http://h/prefix/",
-            &input(json!({"action": "delete", "hash": "a/b"})),
-        )
-        .unwrap();
-        assert_eq!(
-            (m, url.as_str()),
-            (Method::DELETE, "http://h/prefix/api/memories/a%2Fb")
+        // The same content, and similar content without a conversation id.
+        for content in ["aaa bbb", "bbb aaa"] {
+            let out = run(json!({"action": "store", "content": content}))
+                .await
+                .unwrap();
+            assert!(
+                out.starts_with("Not stored: duplicate") && out.ends_with(&hash),
+                "{out}"
+            );
+        }
+        let out = run(json!({"action": "store", "content": "bbb aaa", "conversationId": "c"}))
+            .await
+            .unwrap();
+        assert!(out.starts_with("Memory stored."), "{out}");
+
+        let out = run(json!({"action": "search", "query": "zz", "limit": 2}))
+            .await
+            .unwrap();
+        assert!(
+            out.starts_with("Found 2 memories for \"zz\".\n\n1. score 1.000\nzzz\nHash: "),
+            "{out}"
         );
+        let out = run(json!({"action": "search", "query": "zz", "threshold": 0.5}))
+            .await
+            .unwrap();
+        assert!(out.starts_with("Found 1 memory"), "{out}");
 
-        let (_, _, body) = request(base, &input(json!({"action": "store", "content": "c", "memoryType": "note", "metadata": {"k": 1}}))).unwrap();
-        assert_eq!(
-            body.unwrap(),
-            json!({"content": "c", "tags": [], "memory_type": "note", "metadata": {"k": 1}})
+        let out = run(json!({"action": "list", "pageSize": 2})).await.unwrap();
+        assert!(
+            out.starts_with("2 of 3 memories, page 1 (more available)\n\n1."),
+            "{out}"
         );
+        let out = run(json!({"action": "list", "tag": "agent:rho"}))
+            .await
+            .unwrap();
+        assert!(
+            out.starts_with("1 of 1 memories, page 1\n\n1. [note]\naaa bbb"),
+            "{out}"
+        );
+        let out = run(json!({"action": "list", "page": 2, "pageSize": 2}))
+            .await
+            .unwrap();
+        assert!(out.starts_with("1 of 3 memories, page 2\n\n1."), "{out}");
 
-        let (m, _, body) = request(
-            base,
-            &input(json!({"action": "update", "hash": "h", "tags": ["x"]})),
-        )
-        .unwrap();
-        assert_eq!((m, body.unwrap()), (Method::PUT, json!({"tags": ["x"]})));
+        let out =
+            run(json!({"action": "update", "hash": hash, "tags": ["y"], "metadata": {"k": 1}}))
+                .await
+                .unwrap();
+        assert_eq!(
+            out,
+            format!("Memory updated.\n[note]\naaa bbb\nTags: y\nHash: {hash}")
+        );
+        let metadata: String = {
+            let conn = memory.0.conn.lock().unwrap();
+            conn.as_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT metadata FROM memories WHERE hash = ?1",
+                    [&hash],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(metadata, r#"{"k":1}"#);
+
+        let out = run(json!({"action": "delete", "hash": hash}))
+            .await
+            .unwrap();
+        assert_eq!(out, format!("Memory {hash} deleted."));
+        let err = run(json!({"action": "get", "hash": hash}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), format!("memory {hash} not found"));
+        let out = run(json!({"action": "health"})).await.unwrap();
+        assert!(out.starts_with("Memory store: 2 memories in "), "{out}");
 
         for (v, err) in [
             (json!({"action": "search"}), "query is required for search"),
@@ -496,119 +550,26 @@ mod tests {
                 "hash is required for update",
             ),
         ] {
-            assert_eq!(request(base, &input(v)).unwrap_err().to_string(), err);
+            assert_eq!(run(v).await.unwrap_err().to_string(), err);
         }
     }
 
+    /// Downloads the real model (~90 MB) on first run.
     #[test]
-    fn formats_responses() {
-        let search = json!({
-            "query": "go",
-            "total_found": 2,
-            "results": [
-                {"memory": {"content": "use rg", "content_hash": "h1", "tags": ["a", "b"], "memory_type": "note", "created_at": 1}, "similarity_score": 0.91234},
-                {"memory": {"content": "x", "tags": []}},
-            ]
-        });
-        assert_eq!(
-            format(Action::Search, &search).unwrap(),
-            "Found 2 memories for \"go\".\n\n1. [note] score 0.912\nuse rg\nTags: a, b\nHash: h1\n\n2.\nx"
-        );
-        assert_eq!(
-            format(Action::Search, &json!({"total_found": 1, "results": []})).unwrap(),
-            "Found 1 memory."
-        );
-        assert_eq!(format(Action::Search, &json!([])), None);
-
-        let list = json!({"memories": [{"content": "c", "memory_type": "t"}], "total": 3, "page": 1, "has_more": true});
-        assert_eq!(
-            format(Action::List, &list).unwrap(),
-            "1 of 3 memories page 1 (more available)\n\n1. [t]\nc"
-        );
-        assert_eq!(
-            format(
-                Action::Get,
-                &json!({"content": "c", "memory_type": "t", "content_hash": "h"})
-            )
-            .unwrap(),
-            "[t]\nc\nHash: h"
-        );
-        assert_eq!(format(Action::Get, &json!({"other": 1})), None);
-        assert_eq!(
-            format(
-                Action::Store,
-                &json!({"success": true, "message": "Stored", "memory": {"content": "c"}})
-            )
-            .unwrap(),
-            "Stored\nc"
-        );
-        assert_eq!(format(Action::Update, &json!({"success": false})), None);
-        assert_eq!(
-            format(Action::Delete, &json!({"message": "Deleted"})).unwrap(),
-            "Deleted"
-        );
-        assert_eq!(
-            format(Action::Health, &json!({"status": "healthy"})).unwrap(),
-            "Memory service status: healthy"
-        );
-        assert_eq!(format(Action::Health, &json!({})), None);
-    }
-
-    #[test]
-    fn truncates_from_the_head() {
-        assert_eq!(truncate_head("a\nb"), ("a\nb".into(), false));
-        let many = vec!["x"; MAX_LINES + 1].join("\n");
-        let (out, cut) = truncate_head(&many);
-        assert!(cut && out.lines().count() == MAX_LINES);
-        let long = "é".repeat(MAX_BYTES);
-        let (out, cut) = truncate_head(&format!("{long}\nnext"));
-        assert!(cut && out.len() == MAX_BYTES && !out.contains('\n'));
-    }
-
-    #[tokio::test]
-    async fn talks_to_the_service() {
-        use axum::routing::{get, post};
-        let app = axum::Router::new()
-            .route("/api/health", get(|| async { axum::Json(json!({"status": "healthy"})) }))
-            .route(
-                "/api/search",
-                post(|headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| async move {
-                    let auth = headers["authorization"].to_str().unwrap().to_string();
-                    let agent = headers["x-agent-id"].to_str().unwrap().to_string();
-                    axum::Json(json!({"query": body["query"], "results": [{"memory": {"content": format!("{auth} {agent}")}}]}))
-                }),
-            )
-            .route(
-                "/api/memories/{hash}",
-                get(|| async { (axum::http::StatusCode::NOT_FOUND, "no such memory") }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, app).await });
-
-        let tool = MemoryTool {
-            base,
-            api_key: Some("k".into()),
-            http: reqwest::Client::new(),
+    #[ignore]
+    fn embeds_with_the_real_model() {
+        let memory = Memory::default();
+        let embed = |t| (memory.0.embed)(t).unwrap();
+        let cos = |a: &[f32], b: &[f32]| {
+            let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+            dot(a, b) / (dot(a, a) * dot(b, b)).sqrt()
         };
-        let ctx = Context::new("s", "/tmp", Arc::new(NoFrontend), Default::default());
-        let out = tool.run(json!({"action": "health"}), &ctx).await.unwrap();
-        assert_eq!(out.output, "Memory service status: healthy");
-        let out = tool
-            .run(
-                json!({"action": "search", "query": "q", "agentId": "rho"}),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert_eq!(out.output, "Found 1 memory for \"q\".\n\n1.\nBearer k rho");
-        let err = tool
-            .run(json!({"action": "get", "hash": "h"}), &ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "memory service failed: 404 Not Found: no such memory"
+        let (cat, kitten, tax) = (
+            embed("The cat sits on the mat"),
+            embed("A kitten rests on a rug"),
+            embed("Quarterly tax filing deadline"),
         );
+        assert_eq!(cat.len(), 384);
+        assert!(cos(&cat, &kitten) > cos(&cat, &tax) + 0.2);
     }
 }

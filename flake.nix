@@ -27,8 +27,12 @@
               clippy
               rustfmt
               rust-analyzer
+              onnxruntime
             ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+            # Memory's embeddings: ort links onnxruntime from nixpkgs instead of downloading it.
+            ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+            ORT_PREFER_DYNAMIC_LINK = "1";
           };
         }
       );

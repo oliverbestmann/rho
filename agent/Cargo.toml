@@ -19,6 +19,10 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "process"
 htmd = "0.5.5"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+sqlite-vec = "0.1.9"
+fastembed = { version = "7.1.1", default-features = false, features = ["hf-hub-rustls-tls"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.11.0"
 
 [dev-dependencies]
 futures = "0.3.34"
