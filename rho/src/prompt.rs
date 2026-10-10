@@ -1,7 +1,7 @@
 //! System prompt, built like pi's: preamble, tools, rules, then the
 //! `APPEND_SYSTEM.md` addendum, project context files and the cwd, each in
-//! `<section>` tags. `SYSTEM.md` in the config dir replaces preamble, tools
-//! and rules (pi's custom prompt).
+//! `<section>` tags. `PREAMBLE_SYSTEM.md` in the config dir replaces the
+//! preamble.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,11 +29,11 @@ pub fn config_dir() -> PathBuf {
         .join("rho")
 }
 
-/// Creates empty `SYSTEM.md` and `APPEND_SYSTEM.md` in `config_dir` if
+/// Creates empty `PREAMBLE_SYSTEM.md` and `APPEND_SYSTEM.md` in `config_dir` if
 /// missing, so users find where to put them. Best effort.
 pub fn ensure_files(config_dir: &Path) {
     let _ = std::fs::create_dir_all(config_dir);
-    for name in ["SYSTEM.md", "APPEND_SYSTEM.md"] {
+    for name in ["PREAMBLE_SYSTEM.md", "APPEND_SYSTEM.md"] {
         let _ = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -57,37 +57,34 @@ pub fn build(
     };
     let mut sections: Vec<(&str, String)> = vec![];
 
-    let custom = config_dir.and_then(|d| read(d, "SYSTEM.md"));
-    let mut prompt = match custom {
-        Some(custom) => custom.trim().to_string(),
-        None => {
-            let list: Vec<String> = tools
-                .iter()
-                .map(|t| {
-                    let s = t.spec();
-                    format!(
-                        "- {}: {}",
-                        s.name,
-                        s.description.lines().next().unwrap_or("")
-                    )
-                })
-                .collect();
-            sections.push((
-                "tools",
-                if list.is_empty() {
-                    "(none)".into()
-                } else {
-                    list.join("\n")
-                },
-            ));
-            let mut rules: Vec<&str> = tools.iter().flat_map(|t| t.rules()).copied().collect();
-            rules.push("Be concise in your responses");
-            rules.push("Show file paths clearly when working with files");
-            let rules: Vec<String> = rules.iter().map(|r| format!("- {r}")).collect();
-            sections.push(("rules", rules.join("\n")));
-            preamble.to_string()
-        }
-    };
+    let mut prompt = config_dir
+        .and_then(|d| read(d, "PREAMBLE_SYSTEM.md"))
+        .map_or_else(|| preamble.to_string(), |p| p.trim().to_string());
+
+    let list: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            let s = t.spec();
+            format!(
+                "- {}: {}",
+                s.name,
+                s.description.lines().next().unwrap_or("")
+            )
+        })
+        .collect();
+    sections.push((
+        "tools",
+        if list.is_empty() {
+            "(none)".into()
+        } else {
+            list.join("\n")
+        },
+    ));
+    let mut rules: Vec<&str> = tools.iter().flat_map(|t| t.rules()).copied().collect();
+    rules.push("Be concise in your responses");
+    rules.push("Show file paths clearly when working with files");
+    let rules: Vec<String> = rules.iter().map(|r| format!("- {r}")).collect();
+    sections.push(("rules", rules.join("\n")));
 
     if let Some(addendum) = config_dir.and_then(|d| read(d, "APPEND_SYSTEM.md")) {
         sections.push(("addendum", addendum.trim().to_string()));
@@ -215,16 +212,16 @@ mod tests {
         assert!(!p.contains("<addendum>"), "{p}");
         std::fs::write(config.path().join("APPEND_SYSTEM.md"), "# Mine\nuse rg\n").unwrap();
 
-        // SYSTEM.md replaces preamble, tools and rules.
-        std::fs::write(config.path().join("SYSTEM.md"), "Custom.\n").unwrap();
+        // PREAMBLE_SYSTEM.md replaces only the preamble.
+        std::fs::write(config.path().join("PREAMBLE_SYSTEM.md"), "Custom.\n").unwrap();
         let p = build(
             PREAMBLE,
             &crate::tools::builtin(),
             Some(config.path()),
             std::slice::from_ref(&cwd),
         );
-        assert!(p.starts_with("Custom.\n\n<addendum>"), "{p}");
-        assert!(!p.contains("<tools>"), "{p}");
+        assert!(p.starts_with("Custom.\n\n<tools>\n- Read:"), "{p}");
+        assert!(p.contains("- Use Read to examine files"), "{p}");
         assert!(!p.contains("<additional_directories>"), "{p}");
 
         // Additional directories follow the cwd.

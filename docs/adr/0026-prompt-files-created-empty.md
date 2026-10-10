@@ -1,6 +1,6 @@
 # 26. `SYSTEM.md` and `APPEND_SYSTEM.md` created empty on startup
 
-- Status: Accepted
+- Status: Accepted, amended by ADR 0027 (`SYSTEM.md` is now `PREAMBLE_SYSTEM.md`)
 - Date: 2026-10-10
 - Amends: ADR 0023
 

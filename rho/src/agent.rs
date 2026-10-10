@@ -81,7 +81,7 @@ pub struct Agent {
     pub model_spec: Option<String>,
     /// Preamble of the system prompt, see `prompt::build`.
     pub system: String,
-    /// Where `SYSTEM.md`, `APPEND_SYSTEM.md` and a global `AGENTS.md` are read from.
+    /// Where `PREAMBLE_SYSTEM.md`, `APPEND_SYSTEM.md` and a global `AGENTS.md` are read from.
     pub config_dir: Option<PathBuf>,
     /// Cheaper "provider/model" for compacting when the prompt cache expired.
     pub compact_model: Option<String>,

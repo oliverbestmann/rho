@@ -1,6 +1,6 @@
 # 23. System prompt assembled from layered files, fixed per session
 
-- Status: Accepted, amended by ADR 0025 (built after `session_start`) and ADR 0026 (files created empty)
+- Status: Accepted, amended by ADR 0025 (built after `session_start`), ADR 0026 (files created empty) and ADR 0027 (`PREAMBLE_SYSTEM.md`)
 - Date: 2026-10-09
 
 ## Context

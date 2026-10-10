@@ -64,10 +64,11 @@ Built per session like pi's (`rho/src/prompt.rs`), after the extensions'
 then `<addendum>` from `~/.config/rho/APPEND_SYSTEM.md`, `<project_context>`
 from `AGENTS.md`/`CLAUDE.md` (config dir, then cwd ancestors outermost first)
 and `<cwd>`, then what extensions added to `SessionSetup::system`.
-`~/.config/rho/SYSTEM.md` replaces preamble, tools and rules.
+`~/.config/rho/PREAMBLE_SYSTEM.md` replaces the preamble. It and
+`APPEND_SYSTEM.md` are created empty on startup; empty files are ignored.
 To reuse pi's addendum:
 
-    ln -s ~/.dotfiles/pia/config/APPEND_SYSTEM.md ~/.config/rho/APPEND_SYSTEM.md
+    ln -sf ~/.dotfiles/pia/config/APPEND_SYSTEM.md ~/.config/rho/APPEND_SYSTEM.md
 
 ## Compaction
 

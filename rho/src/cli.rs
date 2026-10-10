@@ -24,7 +24,7 @@ env:
   RHO_COMPACT_MODEL  model for /compact when the cache expired
   RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
 
-files in ~/.config/rho: SYSTEM.md (replaces the base prompt), APPEND_SYSTEM.md, AGENTS.md;
+files in ~/.config/rho: PREAMBLE_SYSTEM.md (replaces the preamble), APPEND_SYSTEM.md, AGENTS.md;
 the first two are created empty on startup, and empty files are ignored";
 
 /// What a `rho` binary is made of. Start from the defaults and change what
