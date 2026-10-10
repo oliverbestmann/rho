@@ -1,9 +1,11 @@
 //! Hard gate on `git commit`, `git push` and `git tag` (pi's git-gate): the
 //! user has to approve them, on top of what AGENTS.md asks. Read-only git
-//! commands pass. Without a UI (CLI) they are blocked. The question comes
-//! with a summary of the command by a cheap model, the first that answers.
+//! commands pass. Without a UI (CLI) they are blocked. Before the question, a
+//! summary of the command by a cheap model (the first that answers) is shown
+//! as agent text.
 
-use rho::extension::{Context, Decision, Extension, Form, ToolCall};
+use rho::agent::AgentEvent;
+use rho::extension::{Context, Decision, Extension, ToolCall};
 
 pub struct GitGate;
 
@@ -52,21 +54,18 @@ impl Extension for GitGate {
         if !SHELL_TOOLS.contains(&call.name.as_str()) {
             return Decision::Allow;
         }
-
         let command = call.input["command"].as_str().unwrap_or_default();
         if !mutates_git(command) {
             return Decision::Allow;
         }
-        // The title replaces the shell call's title (same call id) and is
-        // plain text in Zed, so it gives the summary and keeps the whole command.
-        let summary = summarize(ctx, command).await;
-
-        // print the summary as text
-        if let Some(summary) = summary {
-            let summary = summary.replace("\n", " ");
-            ctx.emit(rho::agent::AgentEvent::Text(&summary));
+        // Shown like an agent message, not sent to the model. The blank line
+        // keeps the model's next text from running into it.
+        if let Some(summary) = summarize(ctx, command).await {
+            ctx.emit(AgentEvent::Text(&format!(
+                "{}\n\n",
+                summary.replace('\n', " ")
+            )));
         }
-
         if ctx.confirm(Some(&call.id), command).await {
             Decision::Allow
         } else {
@@ -80,7 +79,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use rho::agent::AgentEvent;
     use rho::extension::{BoxFuture, Frontend, NoFrontend};
     use serde_json::json;
 
@@ -113,7 +111,11 @@ mod tests {
     struct Approve(Mutex<Vec<String>>);
 
     impl Frontend for Approve {
-        fn event(&self, _event: AgentEvent<'_>) {}
+        fn event(&self, event: AgentEvent<'_>) {
+            if let AgentEvent::Text(t) = event {
+                self.0.lock().unwrap().push(format!("text: {t}"));
+            }
+        }
 
         fn confirm<'a>(&'a self, _id: Option<&'a str>, title: &'a str) -> BoxFuture<'a, bool> {
             self.0.lock().unwrap().push(title.into());
@@ -160,9 +162,10 @@ mod tests {
         let ctx = Context::new("s", "/tmp", approve.clone(), registry);
         let mut c = call("Bash", "git push origin main");
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
+        // The summary as text, then the plain command to approve.
         assert_eq!(
-            approve.0.lock().unwrap().last().unwrap(),
-            "Pushes main to origin.\n\ngit push origin main"
+            approve.0.lock().unwrap()[1..],
+            ["text: Pushes main to origin.\n\n", "git push origin main"]
         );
 
         // No UI: blocked.
