@@ -2,6 +2,7 @@
 
 mod ask_user;
 mod background_task;
+mod context_notice;
 mod fetch_url;
 mod git_gate;
 mod go_check;
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(memory::Memory::default()),
             Arc::new(session_title::SessionTitle::default()),
             Arc::new(background_task::BackgroundTasks::default()),
+            Arc::new(context_notice::ContextNotice),
             Arc::new(ask_user::AskUser),
             Arc::new(plan_mode::PlanMode),
             Arc::new(ponytail::Ponytail),

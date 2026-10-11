@@ -11,8 +11,8 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::extension::{
-    Context, Decision, Diff, DynExtension, Frontend, PromptSetup, SessionSetup, Settle,
-    SlashCommand, ToolCall, ToolOutput, TurnEnd,
+    Context, Decision, Diff, DynExtension, Frontend, PromptSetup, RunEnd, SessionInfo,
+    SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
 use crate::provider::{
     Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, ToolSpec,
@@ -161,6 +161,25 @@ struct Persist {
 }
 
 impl Session {
+    pub fn info(&self) -> SessionInfo {
+        SessionInfo {
+            model: self.model_spec.clone(),
+            context_window: self.provider.context_window(&self.model),
+            thinking: self.thinking,
+            profile: self.ctx.profile().id,
+            last_usage: self.last_usage,
+            usage: self.usage,
+            cost: self.cost,
+            requests: self.requests,
+        }
+    }
+
+    /// Updates `Context::session_info`; call it after changing the model,
+    /// thinking or usage fields directly.
+    pub fn publish_info(&self) {
+        self.ctx.set_session_info(self.info());
+    }
+
     /// Publishes the usage so far (e.g. for a resumed session), if any.
     pub fn emit_usage(&self) {
         if self.usage.prompt() + self.usage.output == 0 {
@@ -376,8 +395,8 @@ impl Session {
             hit_rate(last),
             hit_rate(total)
         );
-        let window = self.provider.context_window(&self.model);
-        let used = last.prompt() + last.output;
+        let info = self.info();
+        let (used, window) = (info.context_used(), info.context_window.max(1));
         out += &format!(
             "- Context: {} / {} ({:.1}%)\n",
             count(used),
@@ -433,6 +452,7 @@ impl Session {
                     self.cost += self.price(&u) - self.price(&usage);
                     usage = u;
                     self.last_usage = u;
+                    self.publish_info();
                     ctx.emit(AgentEvent::Usage {
                         model: &self.model_spec,
                         usage,
@@ -606,6 +626,7 @@ impl Agent {
         session.usage = info.usage;
         session.last_usage = info.last_usage;
         session.cost = info.cost;
+        session.publish_info();
         let p = session.persist.as_mut().expect("store");
         (p.epoch, p.base, p.created) = (info.epoch, loaded.base, true);
         p.saved = loaded.history.len();
@@ -646,7 +667,7 @@ impl Agent {
             self.config_dir.as_deref(),
             &roots,
         ) + &setup.system;
-        Session {
+        let session = Session {
             ctx,
             provider: self.provider.clone(),
             model: self.model.clone(),
@@ -677,7 +698,9 @@ impl Agent {
                 created: false,
                 failed: false,
             }),
-        }
+        };
+        session.publish_info();
+        session
     }
 
     /// Replaces the additional directories of an open session: its sandbox,
@@ -729,6 +752,7 @@ impl Agent {
         session.model = model;
         session.model_spec = spec.to_string();
         session.last_request = None;
+        session.publish_info();
         session.ctx.emit(AgentEvent::Model {
             spec,
             context_window: session.provider.context_window(&session.model),
@@ -765,11 +789,14 @@ impl Agent {
     ///
     /// Afterwards shows what the run cost as a notice.
     pub async fn run(&self, session: &mut Session, prompt: Vec<Content>) -> Result<StopReason> {
-        let (start, usage, cost, requests) = (
+        // Also picks up fields changed directly, like the thinking level.
+        session.publish_info();
+        let (start, usage, cost, requests, before) = (
             Instant::now(),
             session.usage,
             session.cost,
             session.requests,
+            session.ctx.session_info(),
         );
         let result = self.run_prompt(session, prompt).await;
         if session.requests > requests {
@@ -781,6 +808,13 @@ impl Agent {
             );
             // In the title: notices show as collapsed tool calls.
             session.ctx.notify(&format!("Turn: {report}"), "", false);
+        }
+        let run = RunEnd {
+            stop: result.as_ref().ok().copied(),
+            before,
+        };
+        for ext in &self.extensions {
+            ext.run_end(&session.ctx, &run).await;
         }
         result
     }

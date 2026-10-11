@@ -15,8 +15,9 @@ would box every future and makes signatures harder to read.
 
 - `Extension` has optional hooks, each a plain `async fn` with a default:
   `session_start`, `session_end` (sync, from `Drop`), `before_prompt`,
-  `before_request`, `tool_call -> Decision`, `tool_result`, `turn_end`,
-  `before_settle -> Option<String>`, `command -> Option<String>`.
+  `before_request`, `tool_call -> Decision`, `tool_result`, `turn_end`
+  (per model request), `before_settle -> Option<String>`, `run_end` (per
+  run, after the turn report), `command -> Option<String>`.
   `Tool::run` is an `async fn` too.
 - For storage, rho has object-safe twins `DynExtension` and `DynTool` that
   return `BoxFuture`s, with blanket impls for every `Extension` / `Tool`,

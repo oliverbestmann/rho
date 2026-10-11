@@ -947,6 +947,7 @@ fn set_config(
         }
         THINKING_OPTION => {
             session.thinking = value.parse()?;
+            session.publish_info();
             Ok(())
         }
         other => anyhow::bail!("unknown config option {other:?}"),

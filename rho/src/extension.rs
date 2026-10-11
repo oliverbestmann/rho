@@ -15,6 +15,32 @@ use serde_json::Value;
 
 use crate::agent::AgentEvent;
 use crate::provider::{Content, Event, Message, Registry, Request, StopReason, Thinking, Usage};
+
+/// What a session runs with and has used so far, see `Context::session_info`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionInfo {
+    /// "provider/model" if known.
+    pub model: String,
+    pub context_window: u64,
+    pub thinking: Thinking,
+    /// The current profile's id.
+    pub profile: String,
+    /// Usage of the latest request.
+    pub last_usage: Usage,
+    /// Usage of all requests so far.
+    pub usage: Usage,
+    /// USD so far, 0 if the price is unknown.
+    pub cost: f64,
+    /// Model requests so far.
+    pub requests: u32,
+}
+
+impl SessionInfo {
+    /// Context in use: the latest prompt plus its output.
+    pub fn context_used(&self) -> u64 {
+        self.last_usage.prompt() + self.last_usage.output
+    }
+}
 use crate::sandbox::{Access, Policy};
 use crate::store::Store;
 use crate::tools::DynTool;
@@ -76,6 +102,12 @@ pub trait Extension: Send + Sync {
         async {}
     }
 
+    /// A run (a prompt or triggered message, until the model stops) ended,
+    /// after its turn report. Not called when the run is cancelled.
+    fn run_end(&self, _ctx: &Context, _run: &RunEnd) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// The model stopped. Return a message to continue the run with it
     /// (e.g. failing test output), or `None` to let the run end.
     fn before_settle(
@@ -124,6 +156,7 @@ pub trait DynExtension: Send + Sync {
         result: &'a mut ToolOutput,
     ) -> BoxFuture<'a, ()>;
     fn turn_end<'a>(&'a self, ctx: &'a Context, turn: &'a TurnEnd<'_>) -> BoxFuture<'a, ()>;
+    fn run_end<'a>(&'a self, ctx: &'a Context, run: &'a RunEnd) -> BoxFuture<'a, ()>;
     fn before_settle<'a>(
         &'a self,
         ctx: &'a Context,
@@ -175,6 +208,9 @@ impl<T: Extension> DynExtension for T {
     }
     fn turn_end<'a>(&'a self, ctx: &'a Context, turn: &'a TurnEnd<'_>) -> BoxFuture<'a, ()> {
         Box::pin(Extension::turn_end(self, ctx, turn))
+    }
+    fn run_end<'a>(&'a self, ctx: &'a Context, run: &'a RunEnd) -> BoxFuture<'a, ()> {
+        Box::pin(Extension::run_end(self, ctx, run))
     }
     fn before_settle<'a>(
         &'a self,
@@ -316,6 +352,13 @@ pub struct TurnEnd<'a> {
     pub usage: Usage,
 }
 
+pub struct RunEnd {
+    /// `None` if the run failed.
+    pub stop: Option<StopReason>,
+    /// `Context::session_info` when the run started.
+    pub before: SessionInfo,
+}
+
 pub struct Settle<'a> {
     pub stop: StopReason,
     pub history: &'a [Message],
@@ -421,6 +464,8 @@ struct Inner {
     title: Mutex<Option<String>>,
     /// The available profiles and the index of the current one.
     profiles: Mutex<(Vec<Profile>, usize)>,
+    /// Kept up to date by the agent loop; `profile` is filled in on read.
+    info: Mutex<SessionInfo>,
 }
 
 impl Context {
@@ -443,7 +488,20 @@ impl Context {
             store: OnceLock::new(),
             title: Mutex::default(),
             profiles: Mutex::new((vec![Profile::write()], 0)),
+            info: Mutex::default(),
         }))
+    }
+
+    /// The session's model, thinking level, profile and usage right now.
+    pub fn session_info(&self) -> SessionInfo {
+        SessionInfo {
+            profile: self.profile().id,
+            ..self.0.info.lock().unwrap().clone()
+        }
+    }
+
+    pub(crate) fn set_session_info(&self, info: SessionInfo) {
+        *self.0.info.lock().unwrap() = info;
     }
 
     /// The current profile.

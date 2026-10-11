@@ -13,9 +13,12 @@ use agent_client_protocol::{Client, Responder, SessionMessage};
 use anyhow::Result;
 use rho::agent::Agent;
 use rho::extension::{
-    Context, Decision, Extension, PromptSetup, SessionSetup, Settle, ToolCall, ToolOutput, TurnEnd,
+    Context, Decision, Extension, PromptSetup, RunEnd, SessionSetup, Settle, ToolCall, ToolOutput,
+    TurnEnd,
 };
-use rho::provider::{Content, Event, Message, Registry, Request, Role, StopReason, ToolSpec};
+use rho::provider::{
+    Content, Event, Message, Registry, Request, Role, StopReason, ToolSpec, Usage,
+};
 use rho::tools::Tool;
 use serde_json::{Value, json};
 
@@ -180,6 +183,60 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
     assert!(!ended.load(Ordering::SeqCst));
     drop(session);
     assert!(ended.load(Ordering::SeqCst), "session_end runs on drop");
+}
+
+/// Records `run_end`: the stop and the context before and after.
+#[derive(Default)]
+struct Runs(Mutex<Vec<String>>);
+
+impl Extension for Runs {
+    async fn run_end(&self, ctx: &Context, run: &RunEnd) {
+        let now = ctx.session_info();
+        self.0.lock().unwrap().push(format!(
+            "{:?} {} -> {} after {} requests",
+            run.stop,
+            run.before.context_used(),
+            now.context_used(),
+            now.requests
+        ));
+    }
+}
+
+#[tokio::test]
+async fn run_end_sees_the_session_info_before_and_after() {
+    let usage = |input| {
+        Event::Usage(Usage {
+            input,
+            ..Default::default()
+        })
+    };
+    let provider = Scripted::new(vec![
+        vec![tool_use("e", "Echo", json!({})), usage(10)],
+        vec![text("done"), usage(20)],
+        vec![text("again"), usage(30)],
+    ]);
+    let runs = Arc::new(Runs::default());
+    let mut agent = Agent::new(provider, "m", vec![Arc::new(Echo)]);
+    agent.extensions = vec![runs.clone()];
+    let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
+    let info = session.ctx.session_info();
+    assert_eq!((info.model.as_str(), info.context_window), ("m", 200_000));
+    assert_eq!(info.profile, "write");
+
+    for prompt in ["a", "b"] {
+        agent
+            .run(&mut session, vec![Content::text(prompt)])
+            .await
+            .unwrap();
+    }
+    // Once per run, not per request.
+    assert_eq!(
+        *runs.0.lock().unwrap(),
+        [
+            "Some(EndTurn) 0 -> 20 after 2 requests",
+            "Some(EndTurn) 20 -> 30 after 3 requests"
+        ]
+    );
 }
 
 /// Sends one steering message right away and a triggering one later, like

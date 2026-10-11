@@ -185,7 +185,8 @@ async fn main() -> anyhow::Result<()> {
 | `before_request(&mut Request)` | `context` / `before_provider_request` | prune or edit the request |
 | `tool_call(&mut ToolCall) -> Decision` | `tool_call` | block (reason goes to the model) or edit input |
 | `tool_result(&ToolCall, &mut ToolOutput)` | `tool_result` | rewrite output |
-| `turn_end(&TurnEnd)` | `turn_end` | observe content, results, usage |
+| `turn_end(&TurnEnd)` | `turn_end` | observe content, results, usage (once per model request) |
+| `run_end(&RunEnd)` | `agent_end` | the run (prompt until the model stops) ended; `before` has the session info at its start |
 | `before_settle(&Settle) -> Option<String>` | `agent_before_settle` / `agent_settled` | continue the run with a message |
 | `command(name, args) -> Option<String>` | `registerCommand` | handle a `/name` the extension pushed to `SessionSetup::commands` (advertised over ACP); the reply goes to the user only |
 
@@ -199,6 +200,8 @@ async fn main() -> anyhow::Result<()> {
 - `confirm(tool_call_id, title)` - ACP `session/request_permission`; `false` without a UI (CLI).
 - `complete("provider/model", system, prompt)` - one-off LLM call, e.g. session titles.
 - `set_title(title)` - ACP `session_info_update`.
+- `session_info()` - model, context window, thinking, profile, usage, cost and
+  request count right now.
 - `stop(reason)` - end the current run cleanly (pi `ctx.abort()`), from any hook,
   tool or background task. Checked after `before_prompt` (prompt dropped, like
   pi `input` -> `handled`), after `before_request` (request not sent), between
@@ -210,6 +213,9 @@ go-check has no limit (pi itself has no turn limit, rho stops at 50).
 `go test` / `go vet` run sandboxed like `Bash`, so the module cache,
 `GOCACHE` and the temp dir must be writable; they are skipped in read-only
 profiles.
+
+`ContextNotice` tells the user once when a run takes the context past 25% of
+the window.
 
 `SessionTitle` names the session from the first prompt with haiku, in the
 background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
