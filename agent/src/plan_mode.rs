@@ -18,7 +18,7 @@ pub const PLAN: &str = "plan";
 const ENTER: &str = "EnterPlanMode";
 const EXIT: &str = "ExitPlanMode";
 
-const INSTRUCTIONS: &str = "You are in plan mode. Explore the code (Read, Bash, ...) and ask the user questions, \
+const INSTRUCTIONS: &str = "You are in plan mode. Explore the code (Read, Bash, Grep, ...) and ask the user questions, \
 but do not change anything: no file edits, no commits, no commands with side effects. \
 Work out a concrete implementation plan. When it is ready, call ExitPlanMode with the plan; \
 the user has to approve it before you can make changes.";
