@@ -39,3 +39,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0029](0029-project-context-needs-consent.md) | Project context files are read only with the user's consent | Accepted |
 | [0030](0030-local-memory-store.md) | Memories stored locally with embeddings in SQLite | Accepted |
 | [0031](0031-mcp-over-http.md) | MCP servers over Streamable HTTP, from mcp.json | Accepted |
+| [0032](0032-project-history-search.md) | Project history search: hybrid search over past sessions under `.rho-project-root` | Accepted |

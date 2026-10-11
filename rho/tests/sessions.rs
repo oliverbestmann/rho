@@ -253,6 +253,101 @@ async fn compaction_starts_a_new_epoch() {
     assert_eq!(rows, [(0, 0), (1, 0), (2, 0), (3, 0), (4, 1)]);
 }
 
+#[tokio::test]
+async fn acp_load_replays_all_epochs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let mut responses = tool_then_answer();
+    responses.push(vec![text("the summary")]);
+    responses.push(vec![text("After."), Event::Done(StopReason::EndTurn)]);
+    let agent = Arc::new(agent(Scripted::new(responses), &db));
+
+    let mut session = agent
+        .start_session("s", &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    agent.compact(&mut session, "").await.unwrap();
+    agent
+        .run(&mut session, vec![Content::text("next")])
+        .await
+        .unwrap();
+    drop(session);
+
+    let updates = Updates::default();
+    let record = updates.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    record.lock().unwrap().push(n.update);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(
+                rho::acp::agent(agent.clone()),
+                async |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    cx.send_request(LoadSessionRequest::new("s", cwd.clone()))
+                        .block_task()
+                        .await?;
+                    Ok(())
+                },
+            ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let updates = updates.lock().unwrap();
+    let shown: Vec<String> = updates
+        .iter()
+        .filter_map(|u| match u {
+            SessionUpdate::UserMessageChunk(ContentChunk {
+                content: ContentBlock::Text(t),
+                ..
+            }) => Some(format!("user: {}", t.text)),
+            SessionUpdate::AgentMessageChunk(ContentChunk {
+                content: ContentBlock::Text(t),
+                ..
+            }) => Some(format!("agent: {}", t.text)),
+            SessionUpdate::ToolCall(t) => {
+                let text = match t.content.first() {
+                    Some(agent_client_protocol::schema::v1::ToolCallContent::Content(c)) => {
+                        match &c.content {
+                            ContentBlock::Text(t) => t.text.clone(),
+                            _ => String::new(),
+                        }
+                    }
+                    _ => String::new(),
+                };
+                Some(format!("tool: {} {text}", t.title))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "user: hi",
+            "agent: Let me look.",
+            "tool: Bash echo from-tool ```sh\necho from-tool\n```",
+            "agent: Done.",
+            "tool: Compacted the summary",
+            "user: next",
+            "agent: After.",
+        ]
+    );
+}
+
 type Updates = Arc<Mutex<Vec<SessionUpdate>>>;
 
 fn prompt(sid: &agent_client_protocol::schema::v1::SessionId, text: &str) -> PromptRequest {

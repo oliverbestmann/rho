@@ -6,7 +6,7 @@ Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
-  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Memory`, `SessionTitle`,
+  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `AskUser`, `PlanMode`, `Ponytail`, `WebUi`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 
@@ -92,7 +92,8 @@ ACP sessions are saved to SQLite, `~/.config/rho/sessions.db`
 (`RHO_SESSIONS_DB` overrides), from `session/new` on: history, title,
 model, thinking level, profile, usage and cost. One-shot CLI runs are not saved.
 Clients can list them (`session/list`, filtered by cwd), continue them
-(`session/load` replays the conversation, `session/resume` does not) and
+(`session/load` replays the conversation with all epochs, each compaction
+summary as a "Compacted" notice; `session/resume` replays nothing) and
 `session/close` them. Sandbox grants are not saved: a continued session
 starts from `sandbox.json` again. Edit diffs are not stored either, so
 replayed edits show only their output.
@@ -105,7 +106,7 @@ history is the messages of its latest epoch. Each message also stores its
 text and tool calls as plain text, ready for full-text search.
 
 Extensions read the database through `ctx.store()` (`session`, `list`,
-`history`); writing is up to rho. `SessionSetup::resumed` tells
+`history`, `messages` for all epochs); writing is up to rho. `SessionSetup::resumed` tells
 `session_start` that a stored session continues (`SessionTitle` keeps its
 title then).
 
@@ -239,6 +240,14 @@ Ports of the other pi extensions:
   embedded locally with fastembed (all-MiniLM-L6-v2, downloaded on first use
   to `~/.cache/rho/fastembed`) and ranked with sqlite-vec (ADR 0030).
   onnxruntime comes from nixpkgs, so build inside `nix develop`.
+- `History` searches earlier conversations of a project: the nearest
+  directory above the cwd with a `.rho-project-root` file, and every session
+  whose cwd is in it (older epochs included). Without the file there is no
+  tool. Chunks of ~800 bytes with ~150 bytes overlap are embedded like
+  `Memory` and put into FTS5 in `~/.cache/rho/history.db`; search fuses both
+  rankings and merges hits on neighbouring chunks. `summarizeOver: n` lets
+  a cheap model answer from more than n results instead. `read` shows the
+  messages around a result (ADR 0032).
 - `Mcp` adds the tools of MCP servers over Streamable HTTP from `mcp.json`
   in the config dir (Claude's `mcpServers` format, `type: "http"`, headers
   with `${VAR}` from the environment) as `mcp__<server>__<tool>` (ADR 0031).

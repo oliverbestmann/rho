@@ -7,6 +7,7 @@ mod fetch_url;
 mod git_gate;
 mod go_check;
 mod go_doc;
+mod history;
 mod mcp;
 mod memory;
 mod plan_mode;
@@ -32,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(fetch_url::FetchUrl),
             Arc::new(mcp::Mcp::from_config()),
             Arc::new(memory::Memory::default()),
+            Arc::new(history::History::default()),
             Arc::new(session_title::SessionTitle::default()),
             Arc::new(background_task::BackgroundTasks::default()),
             Arc::new(context_notice::ContextNotice),

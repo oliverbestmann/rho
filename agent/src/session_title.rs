@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use rho::extension::{Context, Extension, PromptSetup, SessionSetup};
 use rho::provider::Content;
 
-const MODEL: &str = "anthropic/claude-haiku-5-5";
+pub const MODEL: &str = "anthropic/claude-haiku-5-5";
 const CONTEXT_LIMIT: usize = 800;
 const SYSTEM: &str = "Write a concise 3-7 word session title for a conversation that starts with the following user message. Return only the title, with no quotes, markdown, label, or punctuation at the end.";
 

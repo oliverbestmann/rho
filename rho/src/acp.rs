@@ -494,7 +494,16 @@ async fn open_stored(
         );
     }
     if replay {
-        replay_history(cx, sid, &session)?;
+        // Compaction keeps older epochs in the store; show them too.
+        let earlier = match session.ctx.store() {
+            Some(store) => store.messages(&sid.0).await?,
+            None => vec![],
+        };
+        let epoch = session.epoch();
+        let earlier = earlier.into_iter().filter(|m| m.epoch < epoch);
+        let mut messages: Vec<_> = earlier.map(|m| (m.epoch, m.message)).collect();
+        messages.extend(session.history.iter().map(|m| (epoch, m.clone())));
+        replay_history(cx, sid, &session, &messages)?;
     }
     if let Some(dirs) = dirs
         && agent.set_additional_dirs(&mut session, dirs)
@@ -510,17 +519,29 @@ async fn open_stored(
     ))
 }
 
-/// Sends the history as session updates, as if it was happening now. Edit
-/// diffs are not stored, so edits show their output only.
+/// Sends `(epoch, message)`s as session updates, as if they were happening
+/// now. A compaction summary (the first text of an epoch after the first)
+/// shows as a notice, like when it was made. Edit diffs are not stored, so
+/// edits show their output only.
 fn replay_history(
     cx: &ConnectionTo<Client>,
     sid: &SessionId,
     session: &Session,
+    messages: &[(i64, provider::Message)],
 ) -> Result<(), Error> {
     let ctx = &session.ctx;
-    for msg in &session.history {
+    let mut epoch = 0;
+    for (msg_epoch, msg) in messages {
         let mut user: Vec<ContentBlock> = vec![];
         for block in &msg.content {
+            let first = std::mem::replace(&mut epoch, *msg_epoch) != *msg_epoch;
+            if first
+                && let Content::Text { text } = block
+                && let Some(summary) = crate::compact::summary_of(text)
+            {
+                ctx.notify("Compacted", summary, false);
+                continue;
+            }
             match block {
                 Content::Text { text } if msg.role == Role::User => match user.last_mut() {
                     Some(ContentBlock::Text(last)) => {

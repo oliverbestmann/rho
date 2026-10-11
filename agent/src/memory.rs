@@ -54,29 +54,34 @@ struct Inner {
     embed: Embed,
 }
 
+/// `$XDG_CACHE_HOME/rho`.
+pub fn cache_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
+        })
+        .join("rho")
+}
+
+/// Embeds with the process's model, loaded on first use; shared with `History`.
+pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    static MODEL: Mutex<Option<TextEmbedding>> = Mutex::new(None);
+    let mut model = MODEL.lock().unwrap();
+    if model.is_none() {
+        let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            .with_cache_dir(cache_dir().join("fastembed"))
+            .with_show_download_progress(false);
+        *model = Some(TextEmbedding::try_new(options).context("loading the embedding model")?);
+    }
+    Ok(model.as_mut().unwrap().embed(texts, None)?)
+}
+
 impl Default for Memory {
     fn default() -> Self {
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
-            })
-            .join("rho/fastembed");
-        let model = Mutex::new(None::<TextEmbedding>);
         Memory::new(
             rho::prompt::config_dir().join("memory.db"),
-            Box::new(move |text| {
-                let mut model = model.lock().unwrap();
-                if model.is_none() {
-                    let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                        .with_cache_dir(cache.clone())
-                        .with_show_download_progress(false);
-                    *model = Some(
-                        TextEmbedding::try_new(options).context("loading the embedding model")?,
-                    );
-                }
-                Ok(model.as_mut().unwrap().embed([text], None)?.remove(0))
-            }),
+            Box::new(|text| Ok(embed(&[text.to_string()])?.remove(0))),
         )
     }
 }
@@ -207,7 +212,7 @@ fn nonempty(s: &Option<String>) -> Option<&str> {
     s.as_deref().filter(|s| !s.is_empty())
 }
 
-fn blob(v: &[f32]) -> Vec<u8> {
+pub fn blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
@@ -217,7 +222,8 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn open(path: &Path) -> Result<Connection> {
+/// Opens the database with sqlite-vec and applies `schema`.
+pub fn open(path: &Path, schema: &str) -> Result<Connection> {
     static VEC: Once = Once::new();
     // Registers sqlite-vec for every connection opened afterwards.
     VEC.call_once(|| unsafe {
@@ -238,7 +244,7 @@ fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(schema)?;
     Ok(conn)
 }
 
@@ -270,7 +276,7 @@ impl Inner {
 
         let mut conn = self.conn.lock().unwrap();
         if conn.is_none() {
-            *conn = Some(open(&self.path)?);
+            *conn = Some(open(&self.path, SCHEMA)?);
         }
         let c = conn.as_ref().unwrap();
 

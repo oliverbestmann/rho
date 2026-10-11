@@ -57,6 +57,15 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
+/// The first message after a compaction: `SUMMARY_START`, the summary, `SUMMARY_END`.
+pub(crate) const SUMMARY_START: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+pub(crate) const SUMMARY_END: &str = "\n</summary>";
+
+/// The summary in a compacted history's first text block.
+pub(crate) fn summary_of(text: &str) -> Option<&str> {
+    text.strip_prefix(SUMMARY_START)?.strip_suffix(SUMMARY_END)
+}
+
 /// Tool call arguments (e.g. whole files for Write) are cut to this many chars.
 const MAX_ARGS: usize = 2000;
 const MAX_SUMMARY_TOKENS: u32 = 16_000;
@@ -135,7 +144,7 @@ impl Agent {
         session.history = vec![Message {
             role: Role::User,
             content: vec![Content::text(format!(
-                "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{}\n</summary>",
+                "{SUMMARY_START}{}{SUMMARY_END}",
                 summary.trim()
             ))],
         }];

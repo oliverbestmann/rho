@@ -34,7 +34,10 @@ cheaper model is the better deal.
 
 ## Consequences
 
-- Nothing is deleted; old messages stay available for search.
+- Nothing is deleted; old messages stay available for search (ADR 0032).
+- `session/load` replays all epochs. Each compaction summary is shown as
+  a "Compacted" notice (a finished tool call), like when it was made,
+  not as a user message.
 - After compaction the cache is cold (`last_request` reset).
 - Compaction is only manual (`/compact`, ACP only); there is no automatic
   trigger near the context limit.

@@ -118,6 +118,16 @@ pub struct Page {
     pub next: Option<String>,
 }
 
+/// A stored message of any epoch, see `Store::messages`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredMessage {
+    pub seq: i64,
+    pub epoch: i64,
+    pub message: Message,
+    /// Unix milliseconds.
+    pub created_at: i64,
+}
+
 /// What `Store::save_state` writes besides messages.
 pub(crate) struct State {
     pub id: String,
@@ -290,6 +300,36 @@ impl Store {
     /// The session's current history (messages since the last compaction).
     pub async fn history(&self, id: &str) -> Result<Vec<Message>> {
         Ok(self.load(id).await?.map(|l| l.history).unwrap_or_default())
+    }
+
+    /// All messages of the session, older epochs included, by `seq`.
+    pub async fn messages(&self, id: &str) -> Result<Vec<StoredMessage>> {
+        let id = id.to_string();
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT seq, epoch, role, content, created_at FROM messages
+                 WHERE session_id = ?1 ORDER BY seq",
+            )?;
+            let mut rows = stmt.query([&id])?;
+            let mut out = vec![];
+            while let Some(row) = rows.next()? {
+                let seq: i64 = row.get(0)?;
+                let role = match row.get_ref(2)?.as_str()? {
+                    "user" => Role::User,
+                    _ => Role::Assistant,
+                };
+                let content = serde_json::from_str(row.get_ref(3)?.as_str()?)
+                    .with_context(|| format!("session {id}: message {seq}"))?;
+                out.push(StoredMessage {
+                    seq,
+                    epoch: row.get(1)?,
+                    message: Message { role, content },
+                    created_at: row.get(4)?,
+                });
+            }
+            Ok(out)
+        })
+        .await
     }
 
     pub(crate) async fn load(&self, id: &str) -> Result<Option<Loaded>> {
@@ -596,6 +636,10 @@ mod tests {
         let loaded = store.load("s").await.unwrap().unwrap();
         assert_eq!((loaded.base, loaded.info.epoch), (3, 1));
         assert_eq!(loaded.history, [msg(Role::User, "summary")]);
+        let all = store.messages("s").await.unwrap();
+        let seqs: Vec<_> = all.iter().map(|m| (m.seq, m.epoch)).collect();
+        assert_eq!(seqs, [(0, 0), (1, 0), (2, 0), (3, 1)]);
+        assert_eq!(all[1].message, msg(Role::Assistant, "b2"));
 
         store.set_title("s", "Title").await.unwrap();
         // A later save without a title keeps it.

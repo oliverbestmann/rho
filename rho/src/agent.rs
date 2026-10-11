@@ -161,6 +161,11 @@ struct Persist {
 }
 
 impl Session {
+    /// Number of compactions of the stored session; 0 if not stored.
+    pub(crate) fn epoch(&self) -> i64 {
+        self.persist.as_ref().map_or(0, |p| p.epoch)
+    }
+
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
             model: self.model_spec.clone(),
