@@ -6,6 +6,7 @@ mod fetch_url;
 mod git_gate;
 mod go_check;
 mod go_doc;
+mod mcp;
 mod memory;
 mod plan_mode;
 mod ponytail;
@@ -28,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(ripgrep_find::RipgrepFind),
             Arc::new(go_doc::GoDoc),
             Arc::new(fetch_url::FetchUrl),
+            Arc::new(mcp::Mcp::from_config()),
             Arc::new(memory::Memory::default()),
             Arc::new(session_title::SessionTitle::default()),
             Arc::new(background_task::BackgroundTasks::default()),

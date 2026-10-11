@@ -233,6 +233,9 @@ Ports of the other pi extensions:
   embedded locally with fastembed (all-MiniLM-L6-v2, downloaded on first use
   to `~/.cache/rho/fastembed`) and ranked with sqlite-vec (ADR 0030).
   onnxruntime comes from nixpkgs, so build inside `nix develop`.
+- `Mcp` adds the tools of MCP servers over Streamable HTTP from `mcp.json`
+  in the config dir (Claude's `mcpServers` format, `type: "http"`, headers
+  with `${VAR}` from the environment) as `mcp__<server>__<tool>` (ADR 0031).
 
 `Ponytail` adds the [ponytail](https://github.com/DietrichGebert/ponytail)
 skill ("full" level, vendored in `agent/src/ponytail.md`) to the system prompt.

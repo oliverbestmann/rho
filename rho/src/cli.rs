@@ -25,7 +25,7 @@ env:
   RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
 
 files in ~/.config/rho: PREAMBLE_SYSTEM.md (replaces the preamble), APPEND_SYSTEM.md, AGENTS.md,
-project_context.json (approved project AGENTS.md dirs);
+project_context.json (approved project AGENTS.md dirs), mcp.json (MCP servers over HTTP);
 the first two are created on startup if missing (the preamble written out),
 and empty files are ignored";
 
