@@ -17,6 +17,9 @@ outside the project.
   tool only if a directory at or above the cwd has a `.rho-project-root`
   file. The nearest such directory is the project root. Sessions whose cwd
   is the root or below it (compared by path components) are searched.
+  The tool description names the root. Without a marker there is no
+  fallback to the cwd: a cwd alone doesn't say where a project starts,
+  and a guess could mix in other projects' sessions.
 - The store gets one read method, `Store::messages`, which returns all
   messages with their epoch.
 - The index is `history.db` in `$XDG_CACHE_HOME/rho`. It's derived data:
@@ -44,12 +47,15 @@ outside the project.
 - `read` shows ten messages of a session from a given `seq` on, with tool
   outputs cut, only for sessions in the project.
 - Sessions whose `updated_at` or title changed are indexed after every run
-  (`run_end`, in the background) and before every search.
+  (`run_end`, in the background) and before every search. An indexing
+  error after a run is shown as a notice.
 
 ## Consequences
 
 - The first search in a project with many sessions waits for the index to
   be built.
+- Offline, before the embedding model has been downloaded, every run ends
+  with a "History not indexed" notice.
 - The vector search is a full scan of the project's chunks. That is fine
   for tens of thousands of chunks. Beyond that, use a `vec0` table.
 - MiniLM is weak on code and identifiers; the keyword ranking makes up for

@@ -2,12 +2,61 @@
 
 A small ACP-native coding agent in Rust. Prototype.
 
+## Features
+
+- ACP agent for Zed and other clients, plus a one-shot CLI. No TUI.
+- Claude through a Pro/Max subscription (OAuth), with adaptive thinking and
+  prompt caching.
+- Built-in tools: `Read`, `ReadImage`, `Write`, `Edit` (exact replacements),
+  `Bash`, `RequestAccess`.
+- Deny-by-default Landlock sandbox per session. The user approves more
+  access.
+- Sessions in SQLite: list, load, resume, close. Compaction keeps the old
+  messages.
+- Profiles and a plan mode with a read-only sandbox.
+- Extensions with pi-style hooks, compiled into the binary. The `rho`
+  binary brings a git commit/push gate, Go checks and docs, `Grep`, URL
+  fetching, local memories, search over a project's past sessions, MCP
+  tools over HTTP, background tasks, a web view and image input.
+
+## Limitations
+
+- Only Anthropic, and only models with adaptive thinking (Claude 4.6+).
+  Subscription billing depends on undocumented request shaping that follows
+  pi-ai.
+- The sandbox is Linux only; elsewhere it must be disabled. Background tasks
+  are Unix only. The network is not sandboxed, and extension code (`Memory`,
+  `History`, `Mcp`) runs outside the sandbox. `GitGate` matches command
+  text, so it is a guardrail, not a boundary.
+- Without a UI (the CLI) git mutations, access requests and plans are always
+  denied. One-shot runs are not saved and don't wait for background tasks.
+- Changing the set of extensions needs a rebuild. Hooks see whole turns, not
+  streamed text.
+- Compaction is manual (`/compact`). A run stops after 50 model requests.
+- Prompt files apply to new sessions only. A session is bound to its cwd;
+  sandbox grants and edit diffs are not saved. The session database only
+  grows.
+- Builds need `nix develop` (onnxruntime). The first `Memory` or `History`
+  use downloads the embedding model.
+- `Mcp`: Streamable HTTP only. No stdio servers, OAuth, SSE transport,
+  resources or prompts. A changed tool list needs a restart.
+- `History`: needs a `.rho-project-root` file. The first search in a large
+  project waits for the index. Vector search is a full scan, and the model
+  is weak on code. Only one session database is searched.
+- Web view: no streamed text, no TLS, a shared password.
+- Images: JPEG, PNG, GIF and WebP up to 5 MB.
+
+The reasons behind these are in [docs/adr](docs/adr/README.md).
+
+## Layout
+
 Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
-  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Memory`, `History`, `SessionTitle`,
-  `BackgroundTasks`, `AskUser`, `PlanMode`, `Ponytail`, `WebUi`) and a `main` that calls
+  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
+  `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
+  `ProjectContext`, `WebUi`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -32,6 +81,8 @@ rho -m anthropic/claude-opus-4-8 "..."     # pick a model
 rho -t low "..."                           # thinking: off|low|medium|high|xhigh|max (default high)
 rho acp                                    # ACP on stdio
 ```
+
+`RHO_MODEL` and `RHO_THINKING` set the defaults for `-m` and `-t`.
 
 The one-shot mode prints the answer to stdout, and thinking (dimmed), tool calls
 and a token usage line to stderr. In ACP mode, thinking goes out as
@@ -199,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
   streams `session/update`s without an open prompt, as pi-acp does.
 - `notify(title, text, is_error)` - shown to the user only (ACP: a finished tool call).
 - `confirm(tool_call_id, title)` - ACP `session/request_permission`; `false` without a UI (CLI).
+- `ask(form)` - a form for the user (ACP elicitation), if the client supports it.
 - `complete("provider/model", system, prompt)` - one-off LLM call, e.g. session titles.
 - `set_title(title)` - ACP `session_info_update`.
 - `session_info()` - model, context window, thinking, profile, usage, cost and
@@ -217,6 +269,10 @@ profiles.
 
 `ContextNotice` tells the user once when a run takes the context past 25% of
 the window.
+
+`AskUser` adds `AskUserQuestion` (pi's ask-user-question): up to four
+questions in one form, each a pick list with a text field for an answer of
+the user's own.
 
 `SessionTitle` names the session from the first prompt with haiku, in the
 background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and

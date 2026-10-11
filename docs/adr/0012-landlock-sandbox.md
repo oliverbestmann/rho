@@ -41,13 +41,13 @@ without root, and the `nono` crate wraps it.
 
 - Linux only; elsewhere the sandbox must be disabled explicitly
   (`apply`/`run` fail with a hint). macOS would need nono's Seatbelt backend.
-- The network is not sandboxed (`FetchUrl`, `Memory`'s model download, and anything `Bash`
-  runs can reach it).
+- The network is not sandboxed (`FetchUrl`, `Mcp`, the embedding model
+  download, and anything `Bash` runs can reach it).
 - Programs need their caches and config granted (`~/go`, `~/.cache`,
   `GOCACHE`, git config).
 - Code that extensions run without `run_sandboxed` / `sandbox_command` is
-  not restricted: `Memory` writes `memory.db` and the model cache from
-  rho's process (ADR 0030). (`GoCheck` ran `go test` / `go vet` unsandboxed until
+  not restricted: `Memory` writes `memory.db` and the model cache, and
+  `History` writes `history.db`, from rho's process (ADR 0030, 0032). (`GoCheck` ran `go test` / `go vet` unsandboxed until
   ADR 0024.)
 - Rules for paths that do not exist when a command or thread starts are
   skipped, so a granted path that is created later only applies to the

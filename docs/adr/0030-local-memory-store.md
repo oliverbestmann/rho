@@ -17,7 +17,8 @@ to run separately, and the tool fails when it is down.
 - Content is embedded locally with fastembed (all-MiniLM-L6-v2, 384
   dimensions, the same model mcp-memory-service uses). The model is
   downloaded on first use to `$XDG_CACHE_HOME/rho/fastembed`
-  (`~/.cache/rho/fastembed`) and stays loaded.
+  (`~/.cache/rho/fastembed`) and stays loaded. `memory::embed` holds one
+  instance per process, shared with `History` (ADR 0032).
 - sqlite-vec (the `sqlite-vec` crate, compiled in and registered with
   `sqlite3_auto_extension`) ranks memories with `vec_distance_cosine` over
   an ordinary table with a BLOB column. It does a full scan, which is
