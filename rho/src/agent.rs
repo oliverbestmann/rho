@@ -90,7 +90,6 @@ pub struct Agent {
     /// Available to extensions through `Context::complete`.
     pub registry: Registry,
     pub max_tokens: u32,
-    pub max_turns: usize,
     /// Reasoning effort new sessions start with.
     pub thinking: Thinking,
     /// Starting sandbox for each session, from `sandbox.json`.
@@ -544,7 +543,6 @@ impl Agent {
             extensions: vec![],
             registry: Registry::default(),
             max_tokens: 32_000,
-            max_turns: 50,
             thinking: Thinking::default(),
             sandbox: Default::default(),
             sessions_db: None,
@@ -847,7 +845,8 @@ impl Agent {
         session.save().await;
 
         let mut tools_called = Vec::new();
-        for _ in 0..self.max_turns {
+        // No turn limit, like Claude Code and pi; the user cancels runaway runs.
+        loop {
             // The history ends with a user message here (prompt or tool results).
             if let Some(note) = session.profile_note() {
                 push_user(&mut session.history, vec![Content::text(note)]);
@@ -951,7 +950,6 @@ impl Agent {
             push_user(&mut session.history, more);
             session.save().await;
         }
-        Ok(StopReason::MaxTurns)
     }
 
     async fn call_tool(&self, session: &Session, call: &mut ToolCall) -> ToolOutput {

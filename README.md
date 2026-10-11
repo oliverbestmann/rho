@@ -262,7 +262,7 @@ async fn main() -> anyhow::Result<()> {
   and before continuing. The run returns `StopReason::Stopped` (ACP: `cancelled`).
 
 `GoCheck` continues the run at most 3 times in a row per prompt; pi's
-go-check has no limit (pi itself has no turn limit, rho stops at 50).
+go-check has no limit (neither pi nor rho limits the turns of a run).
 `go test` / `go vet` run sandboxed like `Bash`, so the module cache,
 `GOCACHE` and the temp dir must be writable; they are skipped in read-only
 profiles.

@@ -270,8 +270,6 @@ pub enum StopReason {
     ToolUse,
     MaxTokens,
     Refusal,
-    /// The agent loop hit its turn limit.
-    MaxTurns,
     /// An extension called `Context::stop`.
     Stopped,
 }

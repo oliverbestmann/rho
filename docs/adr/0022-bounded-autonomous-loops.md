@@ -12,8 +12,9 @@ then burn quota indefinitely.
 
 ## Decision
 
-- `Agent::max_turns` (default 50) caps the model requests per run; the run
-  then ends with `StopReason::MaxTurns` (ACP: `max_turn_requests`).
+- No limit on model requests per run, like pi and Claude Code; the user
+  cancels a runaway run. (There used to be `Agent::max_turns`, default 50,
+  ending the run with `StopReason::MaxTurns`; long legitimate runs hit it.)
 - `GoCheck` (runs `go test ./...` and `go vet ./...` after a run in a Go
   module that used a tool other than `Read`) continues the run with the
   failures at most `MAX_FAILURES = 3` times in a row per session. Then it
@@ -32,8 +33,7 @@ then burn quota indefinitely.
 
 ## Consequences
 
-- Long legitimate runs can hit 50 turns; the user continues with a new
-  prompt.
+- A model stuck in a tool loop runs until the user cancels it.
 - Extensions that continue runs should bring their own limits, like
   `GoCheck`.
 

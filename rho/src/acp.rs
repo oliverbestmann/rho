@@ -1294,7 +1294,6 @@ fn to_stop(stop: provider::StopReason) -> StopReason {
     match stop {
         provider::StopReason::MaxTokens => StopReason::MaxTokens,
         provider::StopReason::Refusal => StopReason::Refusal,
-        provider::StopReason::MaxTurns => StopReason::MaxTurnRequests,
         provider::StopReason::Stopped => StopReason::Cancelled,
         provider::StopReason::EndTurn | provider::StopReason::ToolUse => StopReason::EndTurn,
     }

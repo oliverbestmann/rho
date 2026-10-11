@@ -30,8 +30,8 @@ Where there is no reason to differ, do what pi does and use its formats:
   runs without a prompt).
 
 Deviations are deliberate and documented where they happen, for example:
-no fuzzy matching in `Edit`, `GoCheck` stops after 3 failures, a turn limit
-of 50 (pi has none), tool names in Claude Code casing.
+no fuzzy matching in `Edit`, `GoCheck` stops after 3 failures, tool names in
+Claude Code casing.
 
 ## Consequences
 
