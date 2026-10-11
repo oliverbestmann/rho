@@ -14,6 +14,28 @@
       ];
     in
     {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.rustPlatform.buildRustPackage {
+            pname = "rho";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "rho-agent" ];
+            # Memory/History embeddings: link onnxruntime from nixpkgs; the ld wrapper adds it to the rpath.
+            buildInputs = [ pkgs.onnxruntime ];
+            ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+            ORT_PREFER_DYNAMIC_LINK = "1";
+            # Tests run in the dev shell; some need the network or a writable home.
+            doCheck = false;
+          };
+        }
+      );
+
       devShells = forAllSystems (
         system:
         let
@@ -30,7 +52,6 @@
               onnxruntime
             ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-            # Memory's embeddings: ort links onnxruntime from nixpkgs instead of downloading it.
             ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
             ORT_PREFER_DYNAMIC_LINK = "1";
           };
