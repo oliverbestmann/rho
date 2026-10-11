@@ -9,13 +9,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use rho::extension::{Choice, Context, Extension, Field, FieldKind, Form, FormReply, PromptSetup};
+use rho::extension::{
+    Choice, ChoiceValue, Context, Extension, Field, FieldKey, FieldKind, Form, FormReply,
+    PromptSetup,
+};
+use rho::store::SessionId;
 
 pub struct ProjectContext {
     /// Directory -> read its context file.
     prefs: PathBuf,
     /// Session id -> what to append to the system prompt.
-    sessions: Mutex<HashMap<String, String>>,
+    sessions: Mutex<HashMap<SessionId, String>>,
 }
 
 impl Default for ProjectContext {
@@ -28,6 +32,9 @@ impl Default for ProjectContext {
 }
 
 type Prefs = BTreeMap<String, bool>;
+
+const ALWAYS: ChoiceValue = ChoiceValue::from_static("always");
+const NEVER: ChoiceValue = ChoiceValue::from_static("never");
 
 impl ProjectContext {
     fn load(&self) -> Prefs {
@@ -59,13 +66,13 @@ impl ProjectContext {
                 fields: unknown
                     .iter()
                     .map(|path| Field {
-                        key: path.display().to_string(),
+                        key: FieldKey::new(path.display().to_string()),
                         title: path.display().to_string(),
                         description: None,
                         kind: FieldKind::Choice {
                             options: vec![
-                                choice("always", "Always read"),
-                                choice("never", "Never read"),
+                                choice(ALWAYS, "Always read"),
+                                choice(NEVER, "Never read"),
                             ],
                             multiple: false,
                         },
@@ -76,10 +83,10 @@ impl ProjectContext {
             match ctx.ask(&form).await {
                 FormReply::Answers(a) => {
                     for path in &unknown {
-                        let key = path.display().to_string();
+                        let key = FieldKey::new(path.display().to_string());
                         if let Some(v) = a.get(&key).and_then(|v| v.first()) {
                             let dir = path.parent().unwrap().display().to_string();
-                            answers.insert(dir, v == "always");
+                            answers.insert(dir, *v == ALWAYS.as_str());
                         }
                     }
                     self.save(&answers);
@@ -116,9 +123,9 @@ impl ProjectContext {
     }
 }
 
-fn choice(value: &str, title: &str) -> Choice {
+fn choice(value: ChoiceValue, title: &str) -> Choice {
     Choice {
-        value: value.into(),
+        value,
         title: title.into(),
         description: None,
     }
@@ -142,7 +149,7 @@ impl Extension for ProjectContext {
                 self.sessions
                     .lock()
                     .unwrap()
-                    .insert(ctx.session_id().into(), section.clone());
+                    .insert(ctx.session_id().clone(), section.clone());
                 section
             }
         };
@@ -185,7 +192,12 @@ mod tests {
             sessions: Default::default(),
         };
         // NoFrontend has no forms and denies confirmations.
-        let ctx = Context::new("s", &asked, Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            &asked,
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
         let mut setup = PromptSetup {
             content: vec![],
             system: "base".into(),

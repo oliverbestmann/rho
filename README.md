@@ -251,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
 - `notify(title, text, is_error)` - shown to the user only (ACP: a finished tool call).
 - `confirm(tool_call_id, title)` - ACP `session/request_permission`; `false` without a UI (CLI).
 - `ask(form)` - a form for the user (ACP elicitation), if the client supports it.
-- `complete("provider/model", system, prompt)` - one-off LLM call, e.g. session titles.
+- `complete(&ModelSpec, system, prompt)` - one-off LLM call, e.g. session titles.
 - `set_title(title)` - ACP `session_info_update`.
 - `session_info()` - model, context window, thinking, profile, usage, cost and
   request count right now.
@@ -319,19 +319,22 @@ A profile decides what the model may do. rho itself has one, `write`:
 every tool, the full sandbox. Extensions add more in `session_start`
 (`SessionSetup::profiles`):
 
+Ids are newtypes (`SessionId`, `ToolName`, `ProfileId`, `ModelSpec`, ...); extensions declare
+their own with `rho::id_type!`.
+
 ```rust
 session.profiles.push(Profile {
-    id: "plan".into(),
+    id: ProfileId::from_static("plan"),
     name: "Plan".into(),
     description: "Read-only: explore and plan, no changes".into(),
-    hidden_tools: vec!["Write".into(), "Edit".into()],
+    hidden_tools: vec![rho::tools::WRITE, rho::edit::EDIT],
     read_only: true,                  // sandboxed tools can only read
     instructions: Some("...".into()), // told to the model on switching here
 });
 ```
 
 With more than one profile, ACP clients get a `mode` config option (category
-`mode`) to switch. Extensions and tools switch with `ctx.set_profile(id)`;
+`mode`) to switch. Extensions and tools switch with `ctx.set_profile(&id)`;
 the client then gets a `config_option_update`. A switch applies from the
 next model request, also in the middle of a run, and does not wait for a
 running turn. Every request carries all tools, whatever the profile, so

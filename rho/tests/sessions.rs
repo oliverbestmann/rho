@@ -14,14 +14,17 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Client, ConnectionTo};
 use rho::agent::Agent;
 use rho::extension::NoFrontend;
-use rho::provider::{Content, Event, Message, Role, StopReason, Usage};
+use rho::provider::{
+    Content, Event, Message, ModelSpec, Role, StopReason, ToolCallId, ToolName, Usage,
+};
+use rho::store::SessionId;
 use serde_json::json;
 
 mod common;
 use common::{Scripted, text};
 
 fn agent(provider: Arc<Scripted>, db: &Path) -> Agent {
-    let mut agent = Agent::new(provider, "m", rho::tools::builtin());
+    let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), rho::tools::builtin());
     let db = db.to_path_buf();
     agent.sessions_db = Some(Arc::new(move |_| db.clone()));
     agent
@@ -32,8 +35,8 @@ fn tool_then_answer() -> Vec<Vec<Event>> {
         vec![
             text("Let me look."),
             Event::Block(Content::ToolUse {
-                id: "t1".into(),
-                name: "Bash".into(),
+                id: ToolCallId::new("t1"),
+                name: ToolName::new("Bash"),
                 input: json!({"command": "echo from-tool"}),
             }),
             Event::Usage(Usage {
@@ -58,21 +61,27 @@ async fn sessions_are_saved_and_resumed() {
 
     // Stored right away, so it can be resumed before the first prompt.
     let empty = agent
-        .start_session("empty", &cwd, vec![], Arc::new(NoFrontend))
+        .start_session(SessionId::new("empty"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     let store = empty.ctx.store().unwrap().clone();
-    assert!(store.session("empty").await.unwrap().is_some());
+    assert!(
+        store
+            .session(&SessionId::new("empty"))
+            .await
+            .unwrap()
+            .is_some()
+    );
     drop(empty);
     let resumed = agent
-        .resume_session("empty", &cwd, vec![], Arc::new(NoFrontend))
+        .resume_session(&SessionId::new("empty"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     assert!(resumed.history.is_empty());
     drop(resumed);
 
     let mut session = agent
-        .start_session("s1", &cwd, vec![], Arc::new(NoFrontend))
+        .start_session(SessionId::new("s1"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     agent
@@ -87,7 +96,7 @@ async fn sessions_are_saved_and_resumed() {
     drop(session);
 
     let mut resumed = agent
-        .resume_session("s1", &cwd, vec![], Arc::new(NoFrontend))
+        .resume_session(&SessionId::new("s1"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     assert_eq!(resumed.history, history);
@@ -110,7 +119,7 @@ async fn sessions_are_saved_and_resumed() {
         .clone();
     assert_eq!(sent[..4], history[..]);
 
-    let stored = store.history("s1").await.unwrap();
+    let stored = store.history(&SessionId::new("s1")).await.unwrap();
     assert_eq!(stored, resumed.history);
     assert_eq!(stored.len(), 6);
     let page = store.list(Some(&cwd), None, 10).await.unwrap();
@@ -121,13 +130,13 @@ async fn sessions_are_saved_and_resumed() {
     let other = dir.path().join("other");
     assert!(
         agent
-            .resume_session("s1", &other, vec![], Arc::new(NoFrontend))
+            .resume_session(&SessionId::new("s1"), &other, vec![], Arc::new(NoFrontend))
             .await
             .is_err()
     );
     assert!(
         agent
-            .resume_session("nope", &cwd, vec![], Arc::new(NoFrontend))
+            .resume_session(&SessionId::new("nope"), &cwd, vec![], Arc::new(NoFrontend))
             .await
             .is_err()
     );
@@ -142,7 +151,12 @@ async fn changed_additional_directories_are_announced() {
     let (a, b) = (PathBuf::from("/extra/a"), PathBuf::from("/extra/b"));
 
     let mut session = agent
-        .start_session("s1", &cwd, vec![a.clone()], Arc::new(NoFrontend))
+        .start_session(
+            SessionId::new("s1"),
+            &cwd,
+            vec![a.clone()],
+            Arc::new(NoFrontend),
+        )
         .await
         .unwrap();
     assert_eq!(session.dirs_notice().as_deref(), Some("- /extra/a"));
@@ -156,7 +170,7 @@ async fn changed_additional_directories_are_announced() {
     let notices = async |dirs: Vec<PathBuf>| {
         let log = Arc::new(common::Log::default());
         agent
-            .resume_session("s1", &cwd, dirs, log.clone())
+            .resume_session(&SessionId::new("s1"), &cwd, dirs, log.clone())
             .await
             .unwrap()
             .save()
@@ -180,7 +194,7 @@ async fn changed_additional_directories_are_announced() {
     // An open session: sandbox, prompt and store follow; grants stay.
     let log = Arc::new(common::Log::default());
     let mut open = agent
-        .resume_session("s1", &cwd, vec![a.clone()], log.clone())
+        .resume_session(&SessionId::new("s1"), &cwd, vec![a.clone()], log.clone())
         .await
         .unwrap();
     let granted = PathBuf::from("/granted");
@@ -210,7 +224,7 @@ async fn changed_additional_directories_are_announced() {
     assert!(log.lines().iter().any(|l| l.contains("- /extra/b")));
     open.save().await;
     let store = open.ctx.store().unwrap().clone();
-    let info = store.session("s1").await.unwrap().unwrap();
+    let info = store.session(&SessionId::new("s1")).await.unwrap().unwrap();
     assert_eq!(info.additional_dirs, [b]);
 }
 
@@ -223,7 +237,12 @@ async fn compaction_starts_a_new_epoch() {
     let agent = agent(Scripted::new(responses), &db);
 
     let mut session = agent
-        .start_session("s", dir.path(), vec![], Arc::new(NoFrontend))
+        .start_session(
+            SessionId::new("s"),
+            dir.path(),
+            vec![],
+            Arc::new(NoFrontend),
+        )
         .await
         .unwrap();
     agent
@@ -235,7 +254,12 @@ async fn compaction_starts_a_new_epoch() {
     drop(session);
 
     let resumed = agent
-        .resume_session("s", dir.path(), vec![], Arc::new(NoFrontend))
+        .resume_session(
+            &SessionId::new("s"),
+            dir.path(),
+            vec![],
+            Arc::new(NoFrontend),
+        )
         .await
         .unwrap();
     assert_eq!(resumed.history, summary);
@@ -263,7 +287,7 @@ async fn acp_load_replays_all_epochs() {
     let agent = Arc::new(agent(Scripted::new(responses), &db));
 
     let mut session = agent
-        .start_session("s", &cwd, vec![], Arc::new(NoFrontend))
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     agent

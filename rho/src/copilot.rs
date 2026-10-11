@@ -22,14 +22,14 @@ use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
 use serde::Deserialize;
 
-use crate::auth::{AuthStore, CredentialKind, Credentials};
-use crate::provider::{Content, Event, ModelInfo, Provider, Request, Role};
+use crate::auth::{AuthStore, ClientId, CredentialKind, Credentials, Secret};
+use crate::provider::{Content, Event, ModelId, ModelInfo, Provider, ProviderName, Request, Role};
 use crate::{anthropic, openai};
 
 /// Key in the credential file and `rho login` argument.
-pub const KEY: &str = "github-copilot";
+pub const KEY: ProviderName = ProviderName::from_static("github-copilot");
 /// VS Code Copilot Chat's OAuth app, like pi.
-const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+const CLIENT_ID: ClientId = ClientId::from_static("Iv1.b507a08c87ecfe98");
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
@@ -232,7 +232,7 @@ impl Copilot {
             .auth
             .fresh(async |http, creds| copilot_token(http, &creds.refresh).await)
             .await?;
-        let base = base_url(&creds.access);
+        let base = base_url(creds.access.expose());
         let req = if is_claude(&request.model) {
             self.http
                 .post(format!("{base}/v1/messages"))
@@ -244,7 +244,7 @@ impl Copilot {
                 .json(&openai::build_body(&request))
         };
         let mut req = req
-            .bearer_auth(&creds.access)
+            .bearer_auth(creds.access.expose())
             .header("accept", "text/event-stream")
             .header("openai-intent", "conversation-edits")
             .header("x-initiator", initiator(&request));
@@ -281,7 +281,7 @@ impl Provider for Copilot {
         MODELS
             .iter()
             .map(|&(id, name, context_window, prices, above)| ModelInfo {
-                id: id.into(),
+                id: ModelId::from_static(id),
                 name: name.into(),
                 context_window,
                 price: Some(anthropic::price(prices)),
@@ -292,8 +292,8 @@ impl Provider for Copilot {
 }
 
 /// Claude models use the Messages API, everything else the Responses API.
-fn is_claude(model: &str) -> bool {
-    model.starts_with("claude")
+fn is_claude(model: &ModelId) -> bool {
+    model.as_str().starts_with("claude")
 }
 
 /// API host from the token's `proxy-ep=proxy.<host>` field, like pi.
@@ -327,16 +327,16 @@ fn has_images(request: &Request) -> bool {
 }
 
 /// Exchanges the GitHub OAuth token for a Copilot API token.
-pub async fn copilot_token(http: &reqwest::Client, github_token: &str) -> Result<Credentials> {
+pub async fn copilot_token(http: &reqwest::Client, github_token: &Secret) -> Result<Credentials> {
     #[derive(Deserialize)]
     struct TokenResponse {
-        token: String,
+        token: Secret,
         /// Unix seconds.
         expires_at: i64,
     }
     let mut req = http
         .get(COPILOT_TOKEN_URL)
-        .bearer_auth(github_token)
+        .bearer_auth(github_token.expose())
         .header("accept", "application/json");
     for (name, value) in HEADERS {
         req = req.header(name, value);
@@ -351,7 +351,7 @@ pub async fn copilot_token(http: &reqwest::Client, github_token: &str) -> Result
     Ok(Credentials {
         kind: CredentialKind::OAuth,
         access: t.token,
-        refresh: github_token.into(),
+        refresh: github_token.clone(),
         expires: t.expires_at * 1000 - 5 * 60 * 1000,
     })
 }
@@ -359,7 +359,7 @@ pub async fn copilot_token(http: &reqwest::Client, github_token: &str) -> Result
 /// A started device flow: the user enters `user_code` at `verification_uri`.
 #[derive(Deserialize)]
 pub struct Device {
-    device_code: String,
+    device_code: Secret,
     pub user_code: String,
     pub verification_uri: String,
     #[serde(default = "default_interval")]
@@ -375,7 +375,7 @@ pub async fn start_login(http: &reqwest::Client) -> Result<Device> {
     let resp = http
         .post(DEVICE_CODE_URL)
         .header("accept", "application/json")
-        .form(&[("client_id", CLIENT_ID), ("scope", "read:user")])
+        .form(&[("client_id", CLIENT_ID.as_str()), ("scope", "read:user")])
         .send()
         .await?;
     let status = resp.status();
@@ -390,7 +390,7 @@ pub async fn start_login(http: &reqwest::Client) -> Result<Device> {
 pub async fn finish_login(http: &reqwest::Client, device: &Device) -> Result<Credentials> {
     #[derive(Deserialize)]
     struct Poll {
-        access_token: Option<String>,
+        access_token: Option<Secret>,
         error: Option<String>,
         error_description: Option<String>,
         interval: Option<u64>,
@@ -406,8 +406,8 @@ pub async fn finish_login(http: &reqwest::Client, device: &Device) -> Result<Cre
             .post(ACCESS_TOKEN_URL)
             .header("accept", "application/json")
             .form(&[
-                ("client_id", CLIENT_ID),
-                ("device_code", &device.device_code),
+                ("client_id", CLIENT_ID.as_str()),
+                ("device_code", device.device_code.expose()),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
             .send()
@@ -435,7 +435,7 @@ pub async fn finish_login(http: &reqwest::Client, device: &Device) -> Result<Cre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Message, Thinking};
+    use crate::provider::{Message, Thinking, ToolCallId};
 
     #[test]
     fn base_url_from_proxy_endpoint() {
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn tool_results_are_agent_initiated() {
         let request = |content| Request {
-            model: "claude-sonnet-5.5".into(),
+            model: ModelId::new("claude-sonnet-5.5"),
             system: String::new(),
             messages: vec![Message {
                 role: Role::User,
@@ -461,7 +461,7 @@ mod tests {
         };
         assert_eq!(initiator(&request(Content::text("hi"))), "user");
         let result = Content::ToolResult {
-            tool_use_id: "t".into(),
+            tool_use_id: ToolCallId::new("t"),
             content: "ok".into(),
             is_error: false,
             images: vec![],

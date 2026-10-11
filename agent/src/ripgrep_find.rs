@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
-use rho::provider::ToolSpec;
+use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -48,7 +48,7 @@ impl Tool for Grep {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Grep".into(),
+            name: ToolName::from_static("Grep"),
             description: "Find files by name (ripgrep --files) or search file contents (ripgrep pattern match). \
                 Respects .gitignore. Provide `pattern` to search contents, or `glob` to just list matching filenames."
                 .into(),
@@ -120,6 +120,7 @@ fn limit(stdout: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use rho::extension::NoFrontend;
+    use rho::store::SessionId;
     use serde_json::json;
 
     fn args_of(input: Value) -> Vec<String> {
@@ -172,7 +173,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello\nworld\n").unwrap();
         std::fs::write(dir.path().join("b.md"), "nothing\n").unwrap();
-        let ctx = Context::new("s", dir.path(), Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            dir.path(),
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
 
         let out = Grep.run(json!({"pattern": "wor"}), &ctx).await.unwrap();
         assert_eq!(out.output, "./a.txt:world");

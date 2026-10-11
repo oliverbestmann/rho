@@ -11,16 +11,21 @@ use rho::agent::{Agent, AgentEvent, Session};
 use rho::anthropic::Anthropic;
 use rho::auth::AuthStore;
 use rho::extension::Frontend;
-use rho::provider::{Content, StopReason, Thinking, Usage};
+use rho::provider::{Content, ModelSpec, ProviderName, StopReason, Thinking, Usage};
+use rho::store::SessionId;
 
 fn agent() -> Agent {
     let path = std::env::var("RHO_AUTH_FILE").expect("set RHO_AUTH_FILE");
     let http = reqwest::Client::new();
-    let store = Arc::new(AuthStore::new(path.into(), http.clone(), "anthropic"));
+    let store = Arc::new(AuthStore::new(
+        path.into(),
+        http.clone(),
+        rho::anthropic::NAME,
+    ));
     let model = std::env::var("RHO_MODEL").unwrap_or_else(|_| "claude-sonnet-5-5".into());
     let mut agent = Agent::new(
         Arc::new(Anthropic::new(http, store)),
-        model,
+        ModelSpec::new("anthropic", model),
         rho::tools::builtin(),
     );
     agent.thinking = Thinking::Low;
@@ -48,7 +53,7 @@ async fn session(agent: &Agent) -> (Session, Arc<Collect>) {
     let collect = Arc::new(Collect::default());
     (
         agent
-            .start_session("live", ".", vec![], collect.clone())
+            .start_session(SessionId::new("live"), ".", vec![], collect.clone())
             .await
             .unwrap(),
         collect,
@@ -89,8 +94,10 @@ fn big_prompt_agent() -> Agent {
 #[ignore]
 async fn compaction_uses_cache_when_warm() {
     let mut agent = big_prompt_agent();
-    agent.registry.register("anthropic", agent.provider.clone());
-    agent.compact_model = Some("anthropic/claude-haiku-5-5".into());
+    agent
+        .registry
+        .register(ProviderName::new("anthropic"), agent.provider.clone());
+    agent.compact_model = Some(ModelSpec::from_static("anthropic", "claude-haiku-5-5"));
     let mut s = session(&agent).await;
     let (usages, ..) = prompt(
         &agent,
@@ -105,7 +112,7 @@ async fn compaction_uses_cache_when_warm() {
     eprintln!("{notice}");
     let first_line = notice.lines().next().unwrap();
     assert!(
-        first_line.contains(&agent.model) && first_line.contains("cache warm"),
+        first_line.contains(&agent.model.to_string()) && first_line.contains("cache warm"),
         "{notice}"
     );
     let read: u64 = notice

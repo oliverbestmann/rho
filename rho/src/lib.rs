@@ -7,6 +7,7 @@ pub mod compact;
 pub mod copilot;
 pub mod edit;
 pub mod extension;
+pub mod id;
 pub mod openai;
 pub mod prompt;
 pub mod provider;

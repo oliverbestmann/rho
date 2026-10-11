@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::extension::{Context, Diff, ToolOutput};
-use crate::provider::ToolSpec;
+use crate::provider::{ToolName, ToolSpec};
 use crate::tools::{Tool, input_schema, parse, resolve};
 
 #[derive(Deserialize, JsonSchema)]
@@ -28,6 +28,8 @@ struct Replace {
     new_text: String,
 }
 
+pub const EDIT: ToolName = ToolName::from_static("Edit");
+
 pub struct Edit;
 
 impl Tool for Edit {
@@ -42,7 +44,7 @@ impl Tool for Edit {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Edit".into(),
+            name: EDIT,
             description: "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes. Sandboxed like Bash.".into(),
             input_schema: input_schema::<EditInput>(),
         }
@@ -166,6 +168,7 @@ fn apply(content: &str, edits: &[Replace], path: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::SessionId;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -219,7 +222,7 @@ mod tests {
         let file = dir.path().join("f.txt");
         std::fs::write(&file, "\u{feff}one\r\ntwo\r\n").unwrap();
         let ctx = Context::new(
-            "t",
+            SessionId::new("t"),
             dir.path(),
             Arc::new(crate::extension::NoFrontend),
             Default::default(),
@@ -244,7 +247,7 @@ mod tests {
         let file = other.path().join("f");
         std::fs::write(&file, "a").unwrap();
         let ctx = Context::new(
-            "t",
+            SessionId::new("t"),
             cwd.path(),
             Arc::new(crate::extension::NoFrontend),
             Default::default(),

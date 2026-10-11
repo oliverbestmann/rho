@@ -2,11 +2,11 @@ use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crate::agent::{Agent, AgentEvent, SessionsDb};
-use crate::anthropic::Anthropic;
+use crate::anthropic::{self, Anthropic};
 use crate::auth::{self, AuthStore, Pkce};
 use crate::copilot::{self, Copilot};
 use crate::extension::{DynExtension, Frontend};
-use crate::provider::{Content, Registry, Thinking, Usage};
+use crate::provider::{Content, ModelSpec, ProviderName, Registry, Thinking, Usage};
 use crate::tools::DynTool;
 use anyhow::{Context, Result, bail};
 
@@ -53,11 +53,10 @@ pub struct Options {
     pub tools: Vec<Arc<dyn DynTool>>,
     /// Default: none.
     pub extensions: Vec<Arc<dyn DynExtension>>,
-    /// "provider/model" unless `-m` or `RHO_MODEL` is set.
-    pub model: String,
-    /// "provider/model" for `/compact` with an expired cache, unless
-    /// `RHO_COMPACT_MODEL` is set.
-    pub compact_model: String,
+    /// Unless `-m` or `RHO_MODEL` is set.
+    pub model: ModelSpec,
+    /// For `/compact` with an expired cache, unless `RHO_COMPACT_MODEL` is set.
+    pub compact_model: ModelSpec,
     /// Database for ACP sessions, by cwd; `None` does not save them.
     /// Default: `store::default_path()` (`RHO_SESSIONS_DB` or
     /// `~/.config/rho/sessions.db`) for every cwd. One-shot runs are not saved.
@@ -70,8 +69,8 @@ impl Default for Options {
         let store = |key| Arc::new(AuthStore::new(AuthStore::default_path(), http.clone(), key));
         let mut providers = Registry::default();
         providers.register(
-            "anthropic",
-            Arc::new(Anthropic::new(http.clone(), store("anthropic"))),
+            anthropic::NAME,
+            Arc::new(Anthropic::new(http.clone(), store(anthropic::NAME))),
         );
         providers.register(
             copilot::KEY,
@@ -81,8 +80,8 @@ impl Default for Options {
             providers,
             tools: crate::tools::builtin(),
             extensions: vec![],
-            model: "anthropic/claude-sonnet-5-5".into(),
-            compact_model: "anthropic/claude-haiku-5-5".into(),
+            model: ModelSpec::from_static("anthropic", "claude-sonnet-5-5"),
+            compact_model: ModelSpec::from_static("anthropic", "claude-haiku-5-5"),
             sessions_db: Some(Arc::new(|_| crate::store::default_path())),
         }
     }
@@ -93,6 +92,8 @@ pub async fn run(options: Options) -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let model = take_flag(&mut args, "-m", "--model")?
         .or_else(|| std::env::var("RHO_MODEL").ok())
+        .map(|m| m.parse())
+        .transpose()?
         .unwrap_or_else(|| options.model.clone());
     let thinking: Thinking = take_flag(&mut args, "-t", "--thinking")?
         .or_else(|| std::env::var("RHO_THINKING").ok())
@@ -105,10 +106,11 @@ pub async fn run(options: Options) -> Result<()> {
             eprintln!("{USAGE}");
             Ok(())
         }
-        Some("login") => match args.get(1).map(String::as_str) {
-            None | Some("anthropic") => login().await,
-            Some(copilot::KEY) => login_copilot().await,
-            Some(other) => bail!("unknown provider {other:?}\n{USAGE}"),
+        Some("login") => match args.get(1).map(ProviderName::new) {
+            None => login().await,
+            Some(p) if p == anthropic::NAME => login().await,
+            Some(p) if p == copilot::KEY => login_copilot().await,
+            Some(other) => bail!("unknown provider {:?}\n{USAGE}", other.as_str()),
         },
         Some("acp") => {
             let sessions_db = options.sessions_db.clone();
@@ -136,17 +138,19 @@ fn take_flag(args: &mut Vec<String>, short: &str, long: &str) -> Result<Option<S
     Ok(Some(args.remove(i)))
 }
 
-fn make_agent(options: Options, spec: &str, thinking: Thinking) -> Result<Agent> {
-    let (provider, model) = options.providers.resolve(spec)?;
-    let mut agent = Agent::new(provider, model, options.tools);
-    agent.model_spec = Some(spec.to_string());
+fn make_agent(options: Options, model: &ModelSpec, thinking: Thinking) -> Result<Agent> {
+    let provider = options.providers.resolve(model)?;
+    let mut agent = Agent::new(provider, model.clone(), options.tools);
     agent.thinking = thinking;
     agent.registry = options.providers;
     let config_dir = crate::prompt::config_dir();
     crate::prompt::ensure_files(&config_dir);
     agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
     agent.config_dir = Some(config_dir);
-    agent.compact_model = Some(std::env::var("RHO_COMPACT_MODEL").unwrap_or(options.compact_model));
+    agent.compact_model = Some(match std::env::var("RHO_COMPACT_MODEL") {
+        Ok(m) => m.parse().context("RHO_COMPACT_MODEL")?,
+        Err(_) => options.compact_model,
+    });
     agent.extensions = options.extensions;
     Ok(agent)
 }
@@ -210,7 +214,12 @@ impl Frontend for Cli {
 async fn one_shot(agent: Agent, prompt: String) -> Result<()> {
     let cli = Arc::new(Cli::default());
     let mut session = agent
-        .start_session("cli", std::env::current_dir()?, vec![], cli.clone())
+        .start_session(
+            crate::store::SessionId::new("cli"),
+            std::env::current_dir()?,
+            vec![],
+            cli.clone(),
+        )
         .await?;
     let mut stop = agent.run(&mut session, vec![Content::text(prompt)]).await?;
     // ponytail: only handles messages already triggered when the run ends; a
@@ -232,7 +241,7 @@ async fn one_shot(agent: Agent, prompt: String) -> Result<()> {
 
 async fn login() -> Result<()> {
     let http = &reqwest::Client::new();
-    let store = AuthStore::new(AuthStore::default_path(), http.clone(), "anthropic");
+    let store = AuthStore::new(AuthStore::default_path(), http.clone(), anthropic::NAME);
     let pkce = Pkce::generate()?;
     eprintln!(
         "Open this URL, sign in, then paste the code shown by Anthropic:\n\n{}\n",

@@ -11,14 +11,14 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::extension::{
-    Context, Decision, Diff, DynExtension, Frontend, PromptSetup, RunEnd, SessionInfo,
-    SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
+    CommandName, Context, Decision, Diff, DynExtension, Frontend, ProfileId, PromptSetup, RunEnd,
+    SessionInfo, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
 use crate::provider::{
-    Content, Event, Message, Provider, Registry, Request, Role, StopReason, Thinking, ToolSpec,
-    Usage,
+    Content, Event, Message, ModelSpec, Provider, Registry, Request, Role, StopReason, Thinking,
+    ToolCallId, ToolName, ToolSpec, Usage,
 };
-use crate::store::{State, Store};
+use crate::store::{SessionId, State, Store};
 use crate::tools::DynTool;
 
 /// Picks the database for a session from its cwd, see `Agent::sessions_db`.
@@ -31,8 +31,8 @@ pub enum AgentEvent<'a> {
     Thinking(&'a str),
     /// Token usage of one model request.
     Usage {
-        /// "provider/model" the request went to.
-        model: &'a str,
+        /// The model the request went to.
+        model: &'a ModelSpec,
         usage: Usage,
         context_window: u64,
         /// Everything the session has used so far, including this request.
@@ -42,14 +42,14 @@ pub enum AgentEvent<'a> {
         cost: f64,
     },
     ToolStart {
-        id: &'a str,
-        name: &'a str,
+        id: &'a ToolCallId,
+        name: &'a ToolName,
         input: &'a Value,
         /// The call as markdown, from `Tool::describe`.
         description: Option<&'a str>,
     },
     ToolEnd {
-        id: &'a str,
+        id: &'a ToolCallId,
         output: &'a str,
         is_error: bool,
         diff: Option<&'a Diff>,
@@ -65,26 +65,24 @@ pub enum AgentEvent<'a> {
     Title(&'a str),
     /// The session switched model; the context window may differ.
     Model {
-        spec: &'a str,
+        spec: &'a ModelSpec,
         context_window: u64,
     },
     /// The session switched to this profile (`Context::set_profile`).
-    Profile(&'a str),
+    Profile(&'a ProfileId),
 }
 
 pub struct Agent {
     /// The provider and model new sessions start with; a session can switch
     /// with `Agent::set_model`.
     pub provider: Arc<dyn Provider>,
-    pub model: String,
-    /// `model` as "provider/model", if it came from the registry.
-    pub model_spec: Option<String>,
+    pub model: ModelSpec,
     /// Preamble of the system prompt, see `prompt::build`.
     pub system: String,
     /// Where `PREAMBLE_SYSTEM.md`, `APPEND_SYSTEM.md` and a global `AGENTS.md` are read from.
     pub config_dir: Option<PathBuf>,
-    /// Cheaper "provider/model" for compacting when the prompt cache expired.
-    pub compact_model: Option<String>,
+    /// Cheaper model for compacting when the prompt cache expired.
+    pub compact_model: Option<ModelSpec>,
     pub tools: Vec<Arc<dyn DynTool>>,
     pub extensions: Vec<Arc<dyn DynExtension>>,
     /// Available to extensions through `Context::complete`.
@@ -103,10 +101,7 @@ pub struct Agent {
 pub struct Session {
     pub ctx: Context,
     pub provider: Arc<dyn Provider>,
-    /// As in `Request::model`.
-    pub model: String,
-    /// "provider/model" if known, else the same as `model`.
-    pub model_spec: String,
+    pub model: ModelSpec,
     pub thinking: Thinking,
     /// Usage of all requests so far, see `AgentEvent::Usage`.
     pub usage: Usage,
@@ -127,7 +122,7 @@ pub struct Session {
     pub last_request: Option<Instant>,
     /// The profile the model was last told about; `None` before the first
     /// request.
-    profile_seen: Option<String>,
+    profile_seen: Option<ProfileId>,
     /// The cwd, then the additional directories.
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
@@ -167,8 +162,8 @@ impl Session {
 
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
-            model: self.model_spec.clone(),
-            context_window: self.provider.context_window(&self.model),
+            model: Some(self.model.clone()),
+            context_window: self.provider.context_window(self.model.id()),
             thinking: self.thinking,
             profile: self.ctx.profile().id,
             last_usage: self.last_usage,
@@ -190,9 +185,9 @@ impl Session {
             return;
         }
         self.ctx.emit(AgentEvent::Usage {
-            model: &self.model_spec,
+            model: &self.model,
             usage: self.last_usage,
-            context_window: self.provider.context_window(&self.model),
+            context_window: self.provider.context_window(self.model.id()),
             total: self.usage,
             cost: self.cost,
         });
@@ -206,8 +201,8 @@ impl Session {
     }
 
     /// The tool called `name`.
-    pub fn tool(&self, name: &str) -> Option<&Arc<dyn DynTool>> {
-        let i = self.specs.iter().position(|s| s.name == name)?;
+    pub fn tool(&self, name: &ToolName) -> Option<&Arc<dyn DynTool>> {
+        let i = self.specs.iter().position(|s| s.name == *name)?;
         Some(&self.tools[i])
     }
 
@@ -237,7 +232,7 @@ impl Session {
                         !was && profile.shows(n)
                     }
                 })
-                .map(String::as_str)
+                .map(ToolName::as_str)
                 .collect()
         };
         let (removed, added) = (changed(true), changed(false));
@@ -315,7 +310,7 @@ impl Session {
         let Some(p) = &mut self.persist else {
             return Ok(());
         };
-        let id = self.ctx.session_id().to_string();
+        let id = self.ctx.session_id().clone();
         // Rewrite the last saved message if it grew, and drop rows past the
         // end if the history shrank.
         let from = match p.saved.checked_sub(1) {
@@ -330,7 +325,7 @@ impl Session {
             cwd: self.roots[0].clone(),
             additional_dirs: self.roots[1..].to_vec(),
             title: self.ctx.title(),
-            model: self.model_spec.clone(),
+            model: self.model.clone(),
             thinking: self.thinking,
             usage: self.usage,
             last_usage: self.last_usage,
@@ -375,7 +370,7 @@ impl Session {
     /// Markdown summary of token, cache and cost usage, for `/usage`.
     pub fn usage_report(&self) -> String {
         let (last, total) = (&self.last_usage, &self.usage);
-        let mut out = format!("**Usage** · `{}`\n\n", self.model_spec);
+        let mut out = format!("**Usage** · `{}`\n\n", self.model);
         if total.prompt() + total.output == 0 {
             out += "No requests yet.";
             return out;
@@ -458,9 +453,9 @@ impl Session {
                     self.last_usage = u;
                     self.publish_info();
                     ctx.emit(AgentEvent::Usage {
-                        model: &self.model_spec,
+                        model: &self.model,
                         usage,
-                        context_window: self.provider.context_window(&self.model),
+                        context_window: self.provider.context_window(self.model.id()),
                         total: self.usage,
                         cost: self.cost,
                     });
@@ -474,7 +469,7 @@ impl Session {
     /// USD for one request to the session's model, 0 if the price is unknown.
     fn price(&self, usage: &Usage) -> f64 {
         self.provider
-            .model_info(&self.model)
+            .model_info(self.model.id())
             .and_then(|m| m.cost(usage))
             .unwrap_or(0.0)
     }
@@ -529,13 +524,12 @@ impl Drop for Session {
 impl Agent {
     pub fn new(
         provider: Arc<dyn Provider>,
-        model: impl Into<String>,
+        model: ModelSpec,
         tools: Vec<Arc<dyn DynTool>>,
     ) -> Self {
         Self {
             provider,
-            model: model.into(),
-            model_spec: None,
+            model,
             system: crate::prompt::PREAMBLE.into(),
             config_dir: None,
             compact_model: None,
@@ -564,7 +558,7 @@ impl Agent {
     /// client can load it even before the first prompt.
     pub async fn start_session(
         &self,
-        id: impl Into<String>,
+        id: SessionId,
         cwd: impl Into<PathBuf>,
         additional_dirs: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
@@ -572,7 +566,7 @@ impl Agent {
         let mut roots = vec![cwd.into()];
         roots.extend(additional_dirs);
         let store = self.open_store(&roots[0]).await?;
-        let mut session = self.setup(id.into(), roots, frontend, store, false).await;
+        let mut session = self.setup(id, roots, frontend, store, false).await;
         session.try_save().await.context("saving the new session")?;
         Ok(session)
     }
@@ -581,7 +575,7 @@ impl Agent {
     /// `additional_dirs` replace the stored ones.
     pub async fn resume_session(
         &self,
-        id: &str,
+        id: &SessionId,
         cwd: impl Into<PathBuf>,
         additional_dirs: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
@@ -602,18 +596,18 @@ impl Agent {
         }
         let dirs_changed = info.additional_dirs != roots[1..];
         let mut session = self
-            .setup(id.into(), roots, frontend, Some(store), true)
+            .setup(id.clone(), roots, frontend, Some(store), true)
             .await;
         if dirs_changed {
             notify_dirs_changed(&session);
         }
         session.ctx.restore_title(info.title);
-        if info.model != session.model_spec
+        if info.model != session.model
             && let Err(e) = self.set_model(&mut session, &info.model)
         {
             session.ctx.notify(
                 "Model unavailable",
-                &format!("{e:#}; using {}", session.model_spec),
+                &format!("{e:#}; using {}", session.model),
                 true,
             );
         }
@@ -640,7 +634,7 @@ impl Agent {
 
     async fn setup(
         &self,
-        id: String,
+        id: SessionId,
         roots: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
         store: Option<Store>,
@@ -674,10 +668,6 @@ impl Agent {
             ctx,
             provider: self.provider.clone(),
             model: self.model.clone(),
-            model_spec: self
-                .model_spec
-                .clone()
-                .unwrap_or_else(|| self.model.clone()),
             thinking: self.thinking,
             usage: Usage::default(),
             last_usage: Usage::default(),
@@ -747,25 +737,23 @@ impl Agent {
         true
     }
 
-    /// Switches the session to `spec` ("provider/model"), for the next run.
-    /// The new model starts with a cold prompt cache.
-    pub fn set_model(&self, session: &mut Session, spec: &str) -> Result<()> {
-        let (provider, model) = self.registry.resolve(spec)?;
-        session.provider = provider;
-        session.model = model;
-        session.model_spec = spec.to_string();
+    /// Switches the session to `spec`, for the next run. The new model
+    /// starts with a cold prompt cache.
+    pub fn set_model(&self, session: &mut Session, spec: &ModelSpec) -> Result<()> {
+        session.provider = self.registry.resolve(spec)?;
+        session.model = spec.clone();
         session.last_request = None;
         session.publish_info();
         session.ctx.emit(AgentEvent::Model {
             spec,
-            context_window: session.provider.context_window(&session.model),
+            context_window: session.provider.context_window(spec.id()),
         });
         Ok(())
     }
 
     /// Runs an extension's slash command and shows its reply. Returns `false`
     /// if no extension handled it.
-    pub async fn command(&self, session: &Session, name: &str, args: &str) -> bool {
+    pub async fn command(&self, session: &Session, name: &CommandName, args: &str) -> bool {
         for ext in &self.extensions {
             if let Some(reply) = ext.command(&session.ctx, name, args).await {
                 session.ctx.emit(AgentEvent::Text(&reply));
@@ -852,7 +840,7 @@ impl Agent {
                 push_user(&mut session.history, vec![Content::text(note)]);
             }
             let mut request = Request {
-                model: session.model.clone(),
+                model: session.model.id().clone(),
                 system: setup.system.clone(),
                 messages: session.history.clone(),
                 tools: session.tool_specs(),
@@ -1035,7 +1023,7 @@ impl Agent {
 /// future dropped) before the call finished; `id` is cleared once it did.
 struct Pending<'a> {
     ctx: &'a Context,
-    id: Option<String>,
+    id: Option<ToolCallId>,
 }
 
 impl Drop for Pending<'_> {

@@ -13,12 +13,14 @@ use agent_client_protocol::{Client, Responder, SessionMessage};
 use anyhow::Result;
 use rho::agent::Agent;
 use rho::extension::{
-    Context, Decision, Extension, PromptSetup, RunEnd, SessionSetup, Settle, ToolCall, ToolOutput,
-    TurnEnd,
+    CommandName, Context, Decision, Extension, Profile, PromptSetup, RunEnd, SessionSetup, Settle,
+    ToolCall, ToolOutput, TurnEnd,
 };
 use rho::provider::{
-    Content, Event, Message, Registry, Request, Role, StopReason, ToolSpec, Usage,
+    Content, Event, Message, ModelSpec, ProviderName, Registry, Request, Role, StopReason,
+    ToolCallId, ToolName, ToolSpec, Usage,
 };
+use rho::store::SessionId;
 use rho::tools::Tool;
 use serde_json::{Value, json};
 
@@ -27,8 +29,8 @@ use common::{Scripted, text};
 
 fn tool_use(id: &str, name: &str, input: Value) -> Event {
     Event::Block(Content::ToolUse {
-        id: id.into(),
-        name: name.into(),
+        id: ToolCallId::new(id),
+        name: ToolName::new(name),
         input,
     })
 }
@@ -45,7 +47,7 @@ struct Echo;
 impl Tool for Echo {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Echo".into(),
+            name: ToolName::new("Echo"),
             description: "echo".into(),
             input_schema: json!({"type": "object"}),
         }
@@ -98,7 +100,7 @@ impl Extension for Recorder {
     }
 
     async fn tool_result(&self, _ctx: &Context, call: &ToolCall, out: &mut ToolOutput) {
-        if call.name == "Echo" {
+        if call.name.as_str() == "Echo" {
             out.output.push_str(" (checked)");
         }
     }
@@ -108,7 +110,8 @@ impl Extension for Recorder {
     }
 
     async fn before_settle(&self, _ctx: &Context, s: &Settle<'_>) -> Option<String> {
-        *self.tools_called.lock().unwrap() = s.tools_called.to_vec();
+        *self.tools_called.lock().unwrap() =
+            s.tools_called.iter().map(ToolName::to_string).collect();
         (self.settles.fetch_add(1, Ordering::SeqCst) == 0).then(|| "please continue".into())
     }
 }
@@ -125,7 +128,11 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
     ]);
     let recorder = Arc::new(Recorder::default());
     let ended = recorder.ended.clone();
-    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    let mut agent = Agent::new(
+        provider.clone(),
+        ModelSpec::new("test", "m"),
+        rho::tools::builtin(),
+    );
     agent.extensions = vec![recorder.clone()];
 
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
@@ -138,7 +145,7 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
     // session_start: extra tool and system prompt; before_request: max_tokens.
-    assert!(requests[0].tools.iter().any(|t| t.name == "Echo"));
+    assert!(requests[0].tools.iter().any(|t| t.name.as_str() == "Echo"));
     assert!(requests[0].system.ends_with(" +ext"));
     // The prompt is built after session_start: it lists the tool and its rule.
     assert!(requests[0].system.contains("- Echo: echo\n"));
@@ -158,13 +165,13 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
         last_user(&requests[1]).content,
         vec![
             Content::ToolResult {
-                tool_use_id: "b".into(),
+                tool_use_id: ToolCallId::new("b"),
                 content: "no bash".into(),
                 is_error: true,
                 images: vec![],
             },
             Content::ToolResult {
-                tool_use_id: "e".into(),
+                tool_use_id: ToolCallId::new("e"),
                 content: "changed (checked)".into(),
                 is_error: false,
                 images: vec![],
@@ -216,12 +223,15 @@ async fn run_end_sees_the_session_info_before_and_after() {
         vec![text("again"), usage(30)],
     ]);
     let runs = Arc::new(Runs::default());
-    let mut agent = Agent::new(provider, "m", vec![Arc::new(Echo)]);
+    let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![Arc::new(Echo)]);
     agent.extensions = vec![runs.clone()];
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     let info = session.ctx.session_info();
-    assert_eq!((info.model.as_str(), info.context_window), ("m", 200_000));
-    assert_eq!(info.profile, "write");
+    assert_eq!(
+        (info.model, info.context_window),
+        (Some(ModelSpec::new("test", "m")), 200_000)
+    );
+    assert_eq!(info.profile, Profile::WRITE);
 
     for prompt in ["a", "b"] {
         agent
@@ -246,7 +256,7 @@ struct Later;
 impl Tool for Later {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Later".into(),
+            name: ToolName::new("Later"),
             description: "finishes in the background".into(),
             input_schema: json!({"type": "object"}),
         }
@@ -272,7 +282,11 @@ async fn async_messages_steer_queue_and_trigger_turns() {
         vec![text("got it")],
         vec![text("second prompt")],
     ]);
-    let agent = Agent::new(provider.clone(), "m", vec![Arc::new(Later)]);
+    let agent = Agent::new(
+        provider.clone(),
+        ModelSpec::new("test", "m"),
+        vec![Arc::new(Later)],
+    );
     let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
 
     agent
@@ -328,16 +342,25 @@ async fn async_messages_steer_queue_and_trigger_turns() {
 async fn ctx_complete_calls_any_registered_model() {
     let provider = Scripted::new(vec![vec![text("Fix "), text("the build")]]);
     let mut registry = Registry::default();
-    registry.register("fake", provider.clone());
-    let ctx = Context::new("s", ".", Arc::new(rho::extension::NoFrontend), registry);
+    registry.register(ProviderName::new("fake"), provider.clone());
+    let ctx = Context::new(
+        SessionId::new("s"),
+        ".",
+        Arc::new(rho::extension::NoFrontend),
+        registry,
+    );
 
     let title = ctx
-        .complete("fake/small", "Write a title.", "the build is broken")
+        .complete(
+            &ModelSpec::new("fake", "small"),
+            "Write a title.",
+            "the build is broken",
+        )
         .await
         .unwrap();
     assert_eq!(title, "Fix the build");
     let req = &provider.requests.lock().unwrap()[0];
-    assert_eq!(req.model, "small");
+    assert_eq!(req.model.as_str(), "small");
     assert_eq!(req.system, "Write a title.");
     assert!(req.tools.is_empty());
 }
@@ -360,7 +383,11 @@ fn confirm_agent() -> (Arc<Scripted>, Agent) {
         vec![tool_use("t1", "Bash", json!({"command": "echo hi"}))],
         vec![text("ok")],
     ]);
-    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    let mut agent = Agent::new(
+        provider.clone(),
+        ModelSpec::new("test", "m"),
+        rho::tools::builtin(),
+    );
     agent.extensions = vec![Arc::new(Confirmer)];
     (provider, agent)
 }
@@ -459,7 +486,7 @@ async fn acp_background_message_starts_a_turn_without_prompt() {
         vec![text("waiting")],
         vec![text("got it")],
     ]);
-    let agent = Agent::new(provider, "m", vec![Arc::new(Later)]);
+    let agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![Arc::new(Later)]);
 
     let client = Client
         .builder()
@@ -528,7 +555,11 @@ async fn run_with_stopper(
     Arc<common::Log>,
 ) {
     let provider = Scripted::new(responses);
-    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    let mut agent = Agent::new(
+        provider.clone(),
+        ModelSpec::new("test", "m"),
+        rho::tools::builtin(),
+    );
     agent.extensions = vec![Arc::new(Stopper(at))];
     let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
     let stop = agent
@@ -580,13 +611,13 @@ async fn stop_in_tool_call_skips_the_rest_and_keeps_history_valid() {
         last.content,
         vec![
             Content::ToolResult {
-                tool_use_id: "a".into(),
+                tool_use_id: ToolCallId::new("a"),
                 content: "blocked".into(),
                 is_error: true,
                 images: vec![],
             },
             Content::ToolResult {
-                tool_use_id: "b".into(),
+                tool_use_id: ToolCallId::new("b"),
                 content: "skipped: run stopped".into(),
                 is_error: true,
                 images: vec![],
@@ -606,7 +637,7 @@ async fn stop_in_before_settle_prevents_continuation() {
 #[tokio::test]
 async fn stop_while_idle_does_not_affect_the_next_run() {
     let provider = Scripted::new(vec![vec![text("ok")]]);
-    let agent = Agent::new(provider, "m", vec![]);
+    let agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![]);
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     session.ctx.stop("stale");
     let stop = agent
@@ -621,7 +652,11 @@ async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
     let cwd = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let provider = Scripted::new(vec![vec![text("ok")]]);
-    let mut agent = Agent::new(provider.clone(), "m", rho::tools::builtin());
+    let mut agent = Agent::new(
+        provider.clone(),
+        ModelSpec::new("test", "m"),
+        rho::tools::builtin(),
+    );
     agent.extensions = vec![Arc::new(rho::sandbox::GrantCommands)];
     let (mut session, log) = common::session(&agent, cwd.path()).await;
     let names: Vec<_> = session.commands.iter().map(|c| c.name.as_str()).collect();
@@ -630,10 +665,14 @@ async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
     let path = other.path().canonicalize().unwrap();
     assert!(
         agent
-            .command(&session, "grant-write", path.to_str().unwrap())
+            .command(
+                &session,
+                &CommandName::new("grant-write"),
+                path.to_str().unwrap()
+            )
             .await
     );
-    assert!(!agent.command(&session, "nope", "").await);
+    assert!(!agent.command(&session, &CommandName::new("nope"), "").await);
     let rule = rho::sandbox::Rule {
         path: path.clone(),
         access: rho::sandbox::Access::ReadWrite,

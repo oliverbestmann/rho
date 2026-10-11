@@ -14,17 +14,20 @@ pub use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::agent::AgentEvent;
-use crate::provider::{Content, Event, Message, Registry, Request, StopReason, Thinking, Usage};
+use crate::provider::{
+    Content, Event, Message, ModelSpec, Registry, Request, StopReason, Thinking, ToolCallId,
+    ToolName, Usage,
+};
 
 /// What a session runs with and has used so far, see `Context::session_info`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionInfo {
-    /// "provider/model" if known.
-    pub model: String,
+    /// `None` for a `Context` outside an agent session.
+    pub model: Option<ModelSpec>,
     pub context_window: u64,
     pub thinking: Thinking,
     /// The current profile's id.
-    pub profile: String,
+    pub profile: ProfileId,
     /// Usage of the latest request.
     pub last_usage: Usage,
     /// Usage of all requests so far.
@@ -42,7 +45,7 @@ impl SessionInfo {
     }
 }
 use crate::sandbox::{Access, Policy};
-use crate::store::Store;
+use crate::store::{SessionId, Store};
 use crate::tools::DynTool;
 
 /// Hooks into the agent loop. Every method is optional; implement them with
@@ -124,7 +127,7 @@ pub trait Extension: Send + Sync {
     fn command(
         &self,
         _ctx: &Context,
-        _name: &str,
+        _name: &CommandName,
         _args: &str,
     ) -> impl Future<Output = Option<String>> + Send {
         async { None }
@@ -165,7 +168,7 @@ pub trait DynExtension: Send + Sync {
     fn command<'a>(
         &'a self,
         ctx: &'a Context,
-        name: &'a str,
+        name: &'a CommandName,
         args: &'a str,
     ) -> BoxFuture<'a, Option<String>>;
 }
@@ -222,7 +225,7 @@ impl<T: Extension> DynExtension for T {
     fn command<'a>(
         &'a self,
         ctx: &'a Context,
-        name: &'a str,
+        name: &'a CommandName,
         args: &'a str,
     ) -> BoxFuture<'a, Option<String>> {
         Box::pin(Extension::command(self, ctx, name, args))
@@ -246,17 +249,29 @@ pub struct SessionSetup {
     pub profiles: Vec<Profile>,
 }
 
+crate::id_type! {
+    /// A `Profile`'s id, e.g. `write` or `plan`; stored with the session.
+    pub ProfileId
+}
+
+/// `Profile::WRITE`, the profile every session has.
+impl Default for ProfileId {
+    fn default() -> Self {
+        Profile::WRITE
+    }
+}
+
 /// A way of working the user (or an extension, `Context::set_profile`) can
 /// switch to during a session, e.g. a read-only "plan" profile. Switching
 /// tells the model which tools appeared or disappeared, and the profile's
 /// instructions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
-    pub id: String,
+    pub id: ProfileId,
     pub name: String,
     pub description: String,
     /// Tools the model does not get in this profile; calls to them fail.
-    pub hidden_tools: Vec<String>,
+    pub hidden_tools: Vec<ToolName>,
     /// Sandboxed tools can only read: read-write rules apply as read-only.
     pub read_only: bool,
     /// Told to the model when the session switches to this profile.
@@ -264,12 +279,12 @@ pub struct Profile {
 }
 
 impl Profile {
-    pub const WRITE: &str = "write";
+    pub const WRITE: ProfileId = ProfileId::from_static("write");
 
     /// The default: every tool, the full sandbox.
     pub fn write() -> Self {
         Self {
-            id: Self::WRITE.into(),
+            id: Self::WRITE,
             name: "Write".into(),
             description: "Read and change files".into(),
             hidden_tools: vec![],
@@ -278,15 +293,29 @@ impl Profile {
         }
     }
 
-    pub fn shows(&self, tool: &str) -> bool {
-        !self.hidden_tools.iter().any(|t| t == tool)
+    pub fn shows(&self, tool: &ToolName) -> bool {
+        !self.hidden_tools.contains(tool)
     }
+}
+
+crate::id_type! {
+    /// A slash command's name without the slash, e.g. `grant-read`.
+    pub CommandName
+}
+
+crate::id_type! {
+    /// Names a `Field` in `Answers`.
+    pub FieldKey
+}
+
+crate::id_type! {
+    /// A `Choice` as returned in `Answers`.
+    pub ChoiceValue
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlashCommand {
-    /// Without the slash, e.g. `grant-read`.
-    pub name: String,
+    pub name: CommandName,
     pub description: String,
     /// Shown as a placeholder for the arguments; `None` takes no arguments.
     pub hint: Option<String>,
@@ -300,8 +329,8 @@ pub struct PromptSetup {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolCall {
-    pub id: String,
-    pub name: String,
+    pub id: ToolCallId,
+    pub name: ToolName,
     pub input: Value,
 }
 
@@ -363,7 +392,7 @@ pub struct Settle<'a> {
     pub stop: StopReason,
     pub history: &'a [Message],
     /// Names of the tools that ran during this run.
-    pub tools_called: &'a [String],
+    pub tools_called: &'a [ToolName],
 }
 
 /// Questions to show the user in one dialog.
@@ -377,7 +406,7 @@ pub struct Form {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     /// Names the field in `Answers`.
-    pub key: String,
+    pub key: FieldKey,
     pub title: String,
     pub description: Option<String>,
     pub kind: FieldKind,
@@ -398,14 +427,14 @@ pub enum FieldKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
     /// What is returned in `Answers`.
-    pub value: String,
+    pub value: ChoiceValue,
     pub title: String,
     pub description: Option<String>,
 }
 
 /// Field key -> answer. One value for text and single choices; fields the
 /// user left empty are missing.
-pub type Answers = BTreeMap<String, Vec<String>>;
+pub type Answers = BTreeMap<FieldKey, Vec<String>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FormReply {
@@ -423,7 +452,7 @@ pub trait Frontend: Send + Sync {
     /// Ask the user to approve something. Without a UI this is `false`.
     fn confirm<'a>(
         &'a self,
-        _tool_call_id: Option<&'a str>,
+        _tool_call_id: Option<&'a ToolCallId>,
         _title: &'a str,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async { false })
@@ -448,7 +477,7 @@ impl Frontend for NoFrontend {
 pub struct Context(Arc<Inner>);
 
 struct Inner {
-    session_id: String,
+    session_id: SessionId,
     cwd: PathBuf,
     frontend: Arc<dyn Frontend>,
     registry: Registry,
@@ -470,14 +499,14 @@ struct Inner {
 
 impl Context {
     pub fn new(
-        session_id: impl Into<String>,
+        session_id: SessionId,
         cwd: impl Into<PathBuf>,
         frontend: Arc<dyn Frontend>,
         registry: Registry,
     ) -> Self {
         let cwd = cwd.into();
         Self(Arc::new(Inner {
-            session_id: session_id.into(),
+            session_id,
             sandbox: Mutex::new(Some(Policy::base(std::slice::from_ref(&cwd)))),
             cwd,
             frontend,
@@ -524,7 +553,7 @@ impl Context {
     /// Switches to profile `id`, from the next model request on (also in
     /// the middle of a run), and tells the frontend. The model is told
     /// with that request.
-    pub fn set_profile(&self, id: &str) -> Result<()> {
+    pub fn set_profile(&self, id: &ProfileId) -> Result<()> {
         if self.restore_profile(id)? {
             self.emit(AgentEvent::Profile(id));
         }
@@ -532,10 +561,10 @@ impl Context {
     }
 
     /// `set_profile` without telling the frontend. Returns whether it changed.
-    pub(crate) fn restore_profile(&self, id: &str) -> Result<bool> {
+    pub(crate) fn restore_profile(&self, id: &ProfileId) -> Result<bool> {
         let (profiles, current) = &mut *self.0.profiles.lock().unwrap();
-        let Some(i) = profiles.iter().position(|p| p.id == id) else {
-            anyhow::bail!("unknown profile {id:?}");
+        let Some(i) = profiles.iter().position(|p| p.id == *id) else {
+            anyhow::bail!("unknown profile {:?}", id.as_str());
         };
         Ok(std::mem::replace(current, i) != i)
     }
@@ -559,7 +588,7 @@ impl Context {
         *self.0.title.lock().unwrap() = title;
     }
 
-    pub fn session_id(&self) -> &str {
+    pub fn session_id(&self) -> &SessionId {
         &self.0.session_id
     }
 
@@ -643,7 +672,7 @@ impl Context {
         if let Some(store) = self.store().cloned()
             && let Ok(rt) = tokio::runtime::Handle::try_current()
         {
-            let (id, title) = (self.session_id().to_string(), title.to_string());
+            let (id, title) = (self.session_id().clone(), title.to_string());
             rt.spawn(async move { store.set_title(&id, &title).await });
         }
         self.emit(AgentEvent::Title(title));
@@ -678,7 +707,7 @@ impl Context {
         self.0.stop.lock().unwrap().take()
     }
 
-    pub async fn confirm(&self, tool_call_id: Option<&str>, title: &str) -> bool {
+    pub async fn confirm(&self, tool_call_id: Option<&ToolCallId>, title: &str) -> bool {
         self.0.frontend.confirm(tool_call_id, title).await
     }
 
@@ -688,10 +717,10 @@ impl Context {
     }
 
     /// One-off completion outside the conversation, e.g. to name the session.
-    pub async fn complete(&self, model: &str, system: &str, prompt: &str) -> Result<String> {
-        let (provider, model) = self.0.registry.resolve(model)?;
+    pub async fn complete(&self, model: &ModelSpec, system: &str, prompt: &str) -> Result<String> {
+        let provider = self.0.registry.resolve(model)?;
         let mut stream = provider.stream(Request {
-            model,
+            model: model.id().clone(),
             system: system.into(),
             messages: vec![Message {
                 role: crate::provider::Role::User,

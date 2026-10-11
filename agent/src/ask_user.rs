@@ -8,15 +8,16 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use rho::extension::{
-    Choice, Context, Extension, Field, FieldKind, Form, FormReply, SessionSetup, ToolOutput,
+    Choice, ChoiceValue, Context, Extension, Field, FieldKey, FieldKind, Form, FormReply,
+    SessionSetup, ToolOutput,
 };
-use rho::provider::ToolSpec;
+use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-const NAME: &str = "AskUserQuestion";
+const NAME: ToolName = ToolName::from_static("AskUserQuestion");
 const MAX_PREVIEW: usize = 600;
 
 pub struct AskUser;
@@ -68,7 +69,7 @@ struct AskUserQuestion;
 impl Tool for AskUserQuestion {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: NAME.into(),
+            name: NAME,
             description: "Ask the user 1-4 structured multiple-choice questions when requirements are ambiguous or a decision is needed. \
                 Each question has 2-4 options; the user can always type their own answer or add a note to their pick. \
                 Use multiSelect when several answers are valid. \
@@ -135,12 +136,12 @@ fn validate(questions: &[Question]) -> Result<()> {
     Ok(())
 }
 
-fn pick_key(i: usize) -> String {
-    format!("q{i}")
+fn pick_key(i: usize) -> FieldKey {
+    FieldKey::new(format!("q{i}"))
 }
 
-fn text_key(i: usize) -> String {
-    format!("q{i}_text")
+fn text_key(i: usize) -> FieldKey {
+    FieldKey::new(format!("q{i}_text"))
 }
 
 fn form(questions: &[Question]) -> Form {
@@ -171,7 +172,7 @@ fn form(questions: &[Question]) -> Form {
                     .options
                     .iter()
                     .map(|o| Choice {
-                        value: o.label.clone(),
+                        value: ChoiceValue::new(&o.label),
                         title: o.label.clone(),
                         description: Some(o.description.clone()).filter(|d| !d.is_empty()),
                     })
@@ -267,6 +268,7 @@ mod tests {
     use super::*;
     use rho::agent::AgentEvent;
     use rho::extension::{Answers, BoxFuture, Frontend};
+    use rho::store::SessionId;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -291,7 +293,12 @@ mod tests {
             reply,
             asked: Mutex::default(),
         });
-        let ctx = Context::new("s", "/tmp", frontend.clone(), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            frontend.clone(),
+            Default::default(),
+        );
         (frontend, ctx)
     }
 
@@ -318,11 +325,9 @@ mod tests {
     }
 
     fn answers(pairs: &[(&str, &[&str])]) -> FormReply {
-        FormReply::Answers(Answers::from_iter(
-            pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())),
-        ))
+        FormReply::Answers(Answers::from_iter(pairs.iter().map(|(k, v)| {
+            (FieldKey::new(*k), v.iter().map(|s| s.to_string()).collect())
+        })))
     }
 
     #[tokio::test]

@@ -15,8 +15,14 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::extension::{BoxFuture, Context, ToolOutput};
-use crate::provider::{ImageSource, ToolSpec};
+use crate::provider::{ImageSource, ToolName, ToolSpec};
 use crate::sandbox::Access;
+
+pub const READ: ToolName = ToolName::from_static("Read");
+pub const READ_IMAGE: ToolName = ToolName::from_static("ReadImage");
+pub const WRITE: ToolName = ToolName::from_static("Write");
+pub const BASH: ToolName = ToolName::from_static("Bash");
+pub const REQUEST_ACCESS: ToolName = ToolName::from_static("RequestAccess");
 
 /// Output larger than this is cut off so it does not flood the context.
 pub const MAX_OUTPUT: usize = 50 * 1024;
@@ -129,7 +135,7 @@ impl Tool for Read {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Read".into(),
+            name: READ,
             description:
                 "Read a text file. Relative paths are resolved against the working directory. Sandboxed like Bash. For images use ReadImage."
                     .into(),
@@ -153,7 +159,7 @@ pub struct ReadImage;
 impl Tool for ReadImage {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "ReadImage".into(),
+            name: READ_IMAGE,
             description:
                 "Look at an image file (PNG, JPEG, GIF or WebP, at most 5 MB). Relative paths are resolved against the working directory. Sandboxed like Read."
                     .into(),
@@ -233,7 +239,7 @@ impl Tool for Write {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Write".into(),
+            name: WRITE,
             description:
                 "Create or overwrite a file with the given content. Creates parent directories. Sandboxed like Bash."
                     .into(),
@@ -266,7 +272,7 @@ impl Tool for Bash {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Bash".into(),
+            name: BASH,
             description: "Run a shell command in the working directory. Returns stdout, stderr and the exit code. \
                 Commands run in a sandbox: they can read system directories and read/write the workspace directories, \
                 nothing else unless granted. If something fails with 'Permission denied' on a path outside these, \
@@ -341,7 +347,7 @@ pub struct RequestAccess;
 impl Tool for RequestAccess {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "RequestAccess".into(),
+            name: REQUEST_ACCESS,
             description: "Ask the user to allow Bash, Read, ReadImage and Write to access a file or directory (and everything below it) for the rest of the session.".into(),
             input_schema: input_schema::<RequestAccessInput>(),
         }
@@ -375,6 +381,7 @@ mod tests {
         Access, Bash, Context, MAX_OUTPUT, Read, ReadImage, RequestAccess, Tool, Write, truncate,
     };
     use crate::provider::ImageSource;
+    use crate::store::SessionId;
     use serde_json::json;
     use std::path::Path;
     use std::sync::Arc;
@@ -382,7 +389,7 @@ mod tests {
 
     fn ctx(dir: &Path) -> Context {
         Context::new(
-            "t",
+            SessionId::new("t"),
             dir,
             Arc::new(crate::extension::NoFrontend),
             Default::default(),

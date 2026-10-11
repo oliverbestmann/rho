@@ -8,7 +8,9 @@
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use crate::provider::{Content, Event, ImageSource, Request, Role, StopReason, Usage};
+use crate::provider::{
+    Content, Event, ImageSource, Request, Role, StopReason, ToolCallId, ToolName, Usage,
+};
 
 /// A thinking block holding an OpenAI reasoning item. Anthropic signatures
 /// are base64, so they never start with `{`. Each API skips the other's.
@@ -180,8 +182,8 @@ impl SseParser {
                         self.tool_use = true;
                         let args = item["arguments"].as_str().filter(|a| !a.trim().is_empty());
                         out.push(Ok(Event::Block(Content::ToolUse {
-                            id: text(&item["call_id"]),
-                            name: text(&item["name"]),
+                            id: ToolCallId::new(text(&item["call_id"])),
+                            name: ToolName::new(text(&item["name"])),
                             input: serde_json::from_str(args.unwrap_or("{}"))?,
                         })));
                     }
@@ -220,13 +222,14 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ModelId;
     use crate::provider::{Message, Thinking, ToolSpec};
 
     #[test]
     fn body_replays_reasoning_calls_and_results() {
         let reasoning = json!({"type": "reasoning", "id": "rs_1", "encrypted_content": "x"});
         let request = Request {
-            model: "gpt-5.5".into(),
+            model: ModelId::new("gpt-5.5"),
             system: "sys".into(),
             messages: vec![
                 Message {
@@ -245,8 +248,8 @@ mod tests {
                             signature: reasoning.to_string(),
                         },
                         Content::ToolUse {
-                            id: "call_1".into(),
-                            name: "Read".into(),
+                            id: ToolCallId::new("call_1"),
+                            name: ToolName::new("Read"),
                             input: json!({"path": "a"}),
                         },
                     ],
@@ -255,7 +258,7 @@ mod tests {
                     role: Role::User,
                     content: vec![
                         Content::ToolResult {
-                            tool_use_id: "call_1".into(),
+                            tool_use_id: ToolCallId::new("call_1"),
                             content: String::new(),
                             is_error: false,
                             images: vec![],
@@ -265,7 +268,7 @@ mod tests {
                 },
             ],
             tools: vec![ToolSpec {
-                name: "Read".into(),
+                name: ToolName::new("Read"),
                 description: "d".into(),
                 input_schema: json!({"type": "object"}),
             }],
@@ -312,8 +315,8 @@ mod tests {
         assert_eq!(
             out[3],
             Event::Block(Content::ToolUse {
-                id: "call_1".into(),
-                name: "Read".into(),
+                id: ToolCallId::new("call_1"),
+                name: ToolName::new("Read"),
                 input: json!({"path": "a"}),
             })
         );

@@ -29,12 +29,12 @@ pub enum Content {
         source: ImageSource,
     },
     ToolUse {
-        id: String,
-        name: String,
+        id: ToolCallId,
+        name: ToolName,
         input: Value,
     },
     ToolResult {
-        tool_use_id: String,
+        tool_use_id: ToolCallId,
         content: String,
         #[serde(default)]
         is_error: bool,
@@ -67,6 +67,11 @@ impl Content {
             },
         }
     }
+}
+
+crate::id_type! {
+    /// The id a model gives a tool call; its result refers to it.
+    pub ToolCallId
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -115,14 +120,14 @@ pub struct Message {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
-    pub name: String,
+    pub name: ToolName,
     pub description: String,
     pub input_schema: Value,
 }
 
 #[derive(Clone, Debug)]
 pub struct Request {
-    pub model: String,
+    pub model: ModelId,
     pub system: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
@@ -220,8 +225,7 @@ impl Price {
 /// A model a provider offers, for model pickers and usage reporting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInfo {
-    /// Without the provider name, as in `Request::model`.
-    pub id: String,
+    pub id: ModelId,
     pub name: String,
     pub context_window: u64,
     pub price: Option<Price>,
@@ -296,27 +300,98 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
-    fn model_info(&self, model: &str) -> Option<ModelInfo> {
-        self.models().into_iter().find(|m| m.id == model)
+    fn model_info(&self, model: &ModelId) -> Option<ModelInfo> {
+        self.models().into_iter().find(|m| m.id == *model)
     }
 
     /// Context window of `model` in tokens, for usage reporting.
-    fn context_window(&self, model: &str) -> u64 {
+    fn context_window(&self, model: &ModelId) -> u64 {
         self.model_info(model).map_or(200_000, |m| m.context_window)
     }
 }
 
-/// Providers by name; models are addressed as `provider/model`.
-#[derive(Default, Clone)]
-pub struct Registry(HashMap<String, Arc<dyn Provider>>);
+/// A model as "provider/model", e.g. `anthropic/claude-sonnet-5-5`: the
+/// provider's name in the `Registry` and the id sent in `Request::model`.
+/// Parse user input with `FromStr`; `Display` gives the same form back.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ModelSpec {
+    provider: ProviderName,
+    id: ModelId,
+}
 
-impl Registry {
-    pub fn register(&mut self, name: impl Into<String>, provider: Arc<dyn Provider>) {
-        self.0.insert(name.into(), provider);
+impl ModelSpec {
+    pub fn new(provider: impl Into<String>, id: impl Into<String>) -> Self {
+        Self::of(ProviderName::new(provider), ModelId::new(id))
     }
 
-    /// Every provider's models as `("provider/model", info)`, providers in name order.
-    pub fn models(&self) -> Vec<(String, ModelInfo)> {
+    pub fn of(provider: ProviderName, id: ModelId) -> Self {
+        Self { provider, id }
+    }
+
+    /// For constants, e.g. a default model.
+    pub const fn from_static(provider: &'static str, id: &'static str) -> Self {
+        Self {
+            provider: ProviderName::from_static(provider),
+            id: ModelId::from_static(id),
+        }
+    }
+
+    pub fn provider(&self) -> &ProviderName {
+        &self.provider
+    }
+
+    pub fn id(&self) -> &ModelId {
+        &self.id
+    }
+}
+
+crate::id_type! {
+    /// A provider's name in the `Registry`, e.g. `anthropic`; also its
+    /// entry in the credential file.
+    pub ProviderName
+}
+
+crate::id_type! {
+    /// A model's id at its provider, without the provider name, as in
+    /// `Request::model`.
+    pub ModelId
+}
+
+crate::id_type! {
+    /// A tool's name, as the model calls it.
+    pub ToolName
+}
+
+impl std::str::FromStr for ModelSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.split_once('/') {
+            Some((provider, id)) if !provider.is_empty() && !id.is_empty() => {
+                Ok(Self::new(provider, id))
+            }
+            _ => anyhow::bail!("model must be provider/model, got {s:?}"),
+        }
+    }
+}
+
+impl std::fmt::Display for ModelSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.provider, self.id)
+    }
+}
+
+/// Providers by name, see `ModelSpec`.
+#[derive(Default, Clone)]
+pub struct Registry(HashMap<ProviderName, Arc<dyn Provider>>);
+
+impl Registry {
+    pub fn register(&mut self, name: ProviderName, provider: Arc<dyn Provider>) {
+        self.0.insert(name, provider);
+    }
+
+    /// Every provider's models, providers in name order.
+    pub fn models(&self) -> Vec<(ModelSpec, ModelInfo)> {
         let mut providers: Vec<_> = self.0.iter().collect();
         providers.sort_by_key(|(name, _)| name.as_str());
         providers
@@ -325,26 +400,26 @@ impl Registry {
                 provider
                     .models()
                     .into_iter()
-                    .map(move |m| (format!("{name}/{}", m.id), m))
+                    .map(move |m| (ModelSpec::of(name.clone(), m.id.clone()), m))
             })
             .collect()
     }
 
-    pub fn resolve(&self, spec: &str) -> Result<(Arc<dyn Provider>, String)> {
-        let (name, model) = spec
-            .split_once('/')
-            .with_context(|| format!("model must be provider/model, got {spec:?}"))?;
+    /// The provider serving `spec`.
+    pub fn resolve(&self, spec: &ModelSpec) -> Result<Arc<dyn Provider>> {
+        let name = spec.provider();
         let provider = self
             .0
             .get(name)
-            .with_context(|| format!("unknown provider {name:?}"))?;
-        Ok((provider.clone(), model.to_string()))
+            .with_context(|| format!("unknown provider {:?}", name.as_str()))?;
+        Ok(provider.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ModelId;
 
     fn price(input: f64) -> Price {
         Price {
@@ -358,7 +433,7 @@ mod tests {
     #[test]
     fn long_prompts_use_the_higher_price_for_the_whole_request() {
         let model = ModelInfo {
-            id: "m".into(),
+            id: ModelId::new("m"),
             name: "M".into(),
             context_window: 1_000_000,
             price: Some(price(1.0)),
@@ -427,6 +502,19 @@ mod tests {
         let big =
             base64::engine::general_purpose::STANDARD.encode(vec![0u8; ImageSource::MAX_BYTES + 1]);
         assert!(err(source("image/png", &big)).contains("limit is 5 MB"));
+    }
+
+    #[test]
+    fn model_specs_parse_and_print() {
+        let spec: ModelSpec = "openrouter/meta/llama".parse().unwrap();
+        assert_eq!(
+            (spec.provider().as_str(), spec.id().as_str()),
+            ("openrouter", "meta/llama")
+        );
+        assert_eq!(spec.to_string(), "openrouter/meta/llama");
+        for bad in ["m", "/m", "p/"] {
+            assert!(bad.parse::<ModelSpec>().is_err(), "{bad}");
+        }
     }
 
     #[test]

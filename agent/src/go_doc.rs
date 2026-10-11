@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
-use rho::provider::ToolSpec;
+use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -48,7 +48,7 @@ impl Tool for GoDocTool {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "GoDoc".into(),
+            name: ToolName::from_static("GoDoc"),
             description: "Look up Go documentation or source code via `go doc`. Pass a package path (e.g. 'fmt') \
                 or package.Symbol (e.g. 'fmt.Println' or 'net/http.Client'). Set src to true to print source instead of docs. \
                 Use it instead of grepping GOPATH to look up Go standard library or module documentation and source."
@@ -98,10 +98,16 @@ impl Tool for GoDocTool {
 mod tests {
     use super::*;
     use rho::extension::{NoFrontend, Profile};
+    use rho::store::SessionId;
     use serde_json::json;
 
     async fn tools(dir: &std::path::Path) -> Vec<String> {
-        let ctx = Context::new("s", dir, Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            dir,
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
         let mut setup = SessionSetup {
             ctx,
             tools: vec![],
@@ -111,7 +117,11 @@ mod tests {
             profiles: vec![Profile::write()],
         };
         GoDoc.session_start(&mut setup).await;
-        setup.tools.iter().map(|t| t.spec().name).collect()
+        setup
+            .tools
+            .iter()
+            .map(|t| t.spec().name.to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -135,7 +145,12 @@ mod tests {
         );
         let tool = GoDocTool { go };
         // Sandboxed with the base policy, which grants the mock's dir.
-        let ctx = Context::new("s", dir.path(), Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            dir.path(),
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
         let run = async |input| tool.run(input, &ctx).await;
 
         let out = run(json!({"target": "strings.TrimSpace"})).await.unwrap();

@@ -12,8 +12,13 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Client, ConnectionTo};
 use anyhow::Result;
 use rho::agent::Agent;
-use rho::extension::{Context, Extension, NoFrontend, Profile, SessionSetup, ToolOutput};
-use rho::provider::{Content, Event, Request, StopReason, ToolSpec};
+use rho::extension::{
+    Context, Extension, NoFrontend, Profile, ProfileId, SessionSetup, ToolOutput,
+};
+use rho::provider::{
+    Content, Event, ModelSpec, Request, StopReason, ToolCallId, ToolName, ToolSpec,
+};
+use rho::store::SessionId;
 use rho::tools::Tool;
 use serde_json::{Value, json};
 
@@ -26,10 +31,10 @@ struct Look;
 impl Extension for Look {
     async fn session_start(&self, session: &mut SessionSetup) {
         session.profiles.push(Profile {
-            id: "look".into(),
+            id: ProfileId::new("look"),
             name: "Look".into(),
             description: "read only".into(),
-            hidden_tools: vec!["Write".into()],
+            hidden_tools: vec![ToolName::new("Write")],
             read_only: true,
             instructions: Some("Only look.".into()),
         });
@@ -43,28 +48,28 @@ struct Switch;
 impl Tool for Switch {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Switch".into(),
+            name: ToolName::new("Switch"),
             description: "switch".into(),
             input_schema: json!({"type": "object"}),
         }
     }
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
-        ctx.set_profile(input["to"].as_str().unwrap_or_default())?;
+        ctx.set_profile(&ProfileId::new(input["to"].as_str().unwrap_or_default()))?;
         Ok("switched".into())
     }
 }
 
 fn tool_use(id: &str, name: &str, input: Value) -> Event {
     Event::Block(Content::ToolUse {
-        id: id.into(),
-        name: name.into(),
+        id: ToolCallId::new(id),
+        name: ToolName::new(name),
         input,
     })
 }
 
 fn tool_names(r: &Request) -> Vec<String> {
-    r.tools.iter().map(|t| t.name.clone()).collect()
+    r.tools.iter().map(|t| t.name.to_string()).collect()
 }
 
 /// Texts of the last message, which is the user's.
@@ -97,7 +102,7 @@ fn tool_results(r: &Request) -> Vec<(String, bool)> {
 }
 
 fn agent(scripted: Arc<Scripted>, db: Option<std::path::PathBuf>) -> Agent {
-    let mut agent = Agent::new(scripted, "m", rho::tools::builtin());
+    let mut agent = Agent::new(scripted, ModelSpec::new("test", "m"), rho::tools::builtin());
     agent.extensions.push(Arc::new(Look));
     if let Some(db) = db {
         agent.sessions_db = Some(Arc::new(move |_| db.clone()));
@@ -126,7 +131,7 @@ async fn switching_changes_tools_and_sandbox_and_tells_the_model() {
     ]);
     let agent = agent(scripted.clone(), Some(dir.path().join("sessions.db")));
     let mut session = agent
-        .start_session("s", &cwd, vec![], Arc::new(NoFrontend))
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
     agent
@@ -163,14 +168,14 @@ async fn switching_changes_tools_and_sandbox_and_tells_the_model() {
     session.save().await;
     drop(session);
     let mut session = agent
-        .resume_session("s", &cwd, vec![], Arc::new(NoFrontend))
+        .resume_session(&SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
-    assert_eq!(session.ctx.profile().id, "look");
+    assert_eq!(session.ctx.profile().id, ProfileId::new("look"));
 
     // The user switches back while idle; the next prompt carries the note.
-    session.ctx.set_profile(Profile::WRITE).unwrap();
-    assert!(session.ctx.set_profile("nope").is_err());
+    session.ctx.set_profile(&Profile::WRITE).unwrap();
+    assert!(session.ctx.set_profile(&ProfileId::new("nope")).is_err());
     agent
         .run(&mut session, vec![Content::text("now write")])
         .await
@@ -191,7 +196,7 @@ async fn a_restricting_first_profile_is_announced_on_the_first_request() {
     struct Narrow;
     impl Extension for Narrow {
         async fn session_start(&self, session: &mut SessionSetup) {
-            session.profiles[0].hidden_tools.push("Bash".into());
+            session.profiles[0].hidden_tools.push(ToolName::new("Bash"));
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -199,10 +204,19 @@ async fn a_restricting_first_profile_is_announced_on_the_first_request() {
         vec![text("a"), Event::Done(StopReason::EndTurn)],
         vec![text("b"), Event::Done(StopReason::EndTurn)],
     ]);
-    let mut agent = Agent::new(scripted.clone(), "m", rho::tools::builtin());
+    let mut agent = Agent::new(
+        scripted.clone(),
+        ModelSpec::new("test", "m"),
+        rho::tools::builtin(),
+    );
     agent.extensions.push(Arc::new(Narrow));
     let mut session = agent
-        .start_session("s", dir.path(), vec![], Arc::new(NoFrontend))
+        .start_session(
+            SessionId::new("s"),
+            dir.path(),
+            vec![],
+            Arc::new(NoFrontend),
+        )
         .await
         .unwrap();
     for prompt in ["one", "two"] {
@@ -320,7 +334,11 @@ fn rho_prompt(
 
 #[tokio::test]
 async fn sessions_without_profiles_have_no_selector() {
-    let agent = Arc::new(Agent::new(Scripted::new(vec![]), "m", vec![]));
+    let agent = Arc::new(Agent::new(
+        Scripted::new(vec![]),
+        ModelSpec::new("test", "m"),
+        vec![],
+    ));
     let client =
         Client
             .builder()

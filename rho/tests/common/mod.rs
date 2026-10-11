@@ -8,6 +8,7 @@ use futures::stream::{self, BoxStream};
 use rho::agent::{Agent, AgentEvent, Session};
 use rho::extension::Frontend;
 use rho::provider::{Event, Provider, Request};
+use rho::store::SessionId;
 
 /// Replays one scripted response per request and records the requests.
 #[derive(Default)]
@@ -63,7 +64,7 @@ pub async fn session(agent: &Agent, cwd: &std::path::Path) -> (Session, Arc<Log>
     let log = Arc::new(Log::default());
     (
         agent
-            .start_session("test", cwd, vec![], log.clone())
+            .start_session(SessionId::new("test"), cwd, vec![], log.clone())
             .await
             .unwrap(),
         log,

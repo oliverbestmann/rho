@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rho::extension::{Context, Extension, PromptSetup, Settle};
+use rho::store::SessionId;
 
 /// Failed checks in a row (per session) before giving back to the user.
 pub const MAX_FAILURES: u32 = 3;
@@ -20,7 +21,7 @@ pub struct GoCheck {
     /// The `go` binary; tests use a mock.
     go: PathBuf,
     /// Failures in a row, by session id.
-    failures: Mutex<HashMap<String, u32>>,
+    failures: Mutex<HashMap<SessionId, u32>>,
 }
 
 impl Default for GoCheck {
@@ -46,7 +47,7 @@ impl Extension for GoCheck {
 
     async fn before_settle(&self, ctx: &Context, settle: &Settle<'_>) -> Option<String> {
         // Skip pure Q&A runs: only check after tools that may have changed files.
-        let changed = settle.tools_called.iter().any(|t| t != "Read");
+        let changed = settle.tools_called.iter().any(|t| *t != rho::tools::READ);
         if !changed || ctx.profile().read_only || !ctx.cwd().join("go.mod").exists() {
             return None;
         }
@@ -86,7 +87,7 @@ impl Extension for GoCheck {
 
         let failures = {
             let mut map = self.failures.lock().unwrap();
-            let n = map.entry(ctx.session_id().to_string()).or_default();
+            let n = map.entry(ctx.session_id().clone()).or_default();
             *n = if failed { *n + 1 } else { 0 };
             *n
         };
@@ -109,6 +110,7 @@ impl Extension for GoCheck {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use rho::provider::ToolName;
     use std::sync::Arc;
 
     use super::*;
@@ -117,7 +119,12 @@ pub(crate) mod tests {
 
     /// Sandboxed with the base policy (system dirs and `dir`).
     fn sandboxed(dir: &std::path::Path) -> Context {
-        Context::new("t", dir, Arc::new(NoFrontend), Default::default())
+        Context::new(
+            SessionId::new("t"),
+            dir,
+            Arc::new(NoFrontend),
+            Default::default(),
+        )
     }
 
     /// Unsandboxed: the test machine's Go cache may be anywhere.
@@ -128,7 +135,7 @@ pub(crate) mod tests {
     }
 
     async fn check_in(go: &GoCheck, ctx: &Context, tools: &[&str]) -> Option<String> {
-        let tools: Vec<String> = tools.iter().map(|t| t.to_string()).collect();
+        let tools: Vec<ToolName> = tools.iter().map(|t| ToolName::new(*t)).collect();
         let settle = Settle {
             stop: StopReason::EndTurn,
             history: &[],
@@ -242,6 +249,6 @@ pub(crate) mod tests {
         // Passing resets the count too.
         std::fs::remove_file(dir.join("fail")).unwrap();
         assert_eq!(check(&go, dir, &["Write"]).await, None);
-        assert_eq!(go.failures.lock().unwrap()["t"], 0);
+        assert_eq!(go.failures.lock().unwrap()[&SessionId::new("t")], 0);
     }
 }

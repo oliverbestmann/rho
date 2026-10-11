@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
 use rho::extension::{Context, Extension, RunEnd, SessionSetup, ToolOutput};
-use rho::provider::{Content, Message, Role, ToolSpec};
-use rho::store::{SessionInfo, Store, StoredMessage};
+use rho::provider::{Content, Message, ModelSpec, Role, ToolName, ToolSpec};
+use rho::store::{SessionId, SessionInfo, Store, StoredMessage};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use rusqlite::{Connection, params};
 use schemars::JsonSchema;
@@ -81,8 +81,8 @@ struct Inner {
     path: PathBuf,
     conn: Mutex<Option<Connection>>,
     embed: Embed,
-    /// "provider/model" that answers with `summarizeOver`.
-    model: String,
+    /// Answers searches with `summarizeOver`.
+    model: ModelSpec,
     /// One indexing pass at a time in this process.
     syncing: tokio::sync::Mutex<()>,
 }
@@ -94,16 +94,16 @@ impl Default for History {
 }
 
 impl History {
-    /// `model` ("provider/model") answers searches with `summarizeOver`.
-    pub fn with_model(model: impl Into<String>) -> History {
+    /// `model` answers searches with `summarizeOver`.
+    pub fn with_model(model: ModelSpec) -> History {
         History::new(
             memory::cache_dir().join("history.db"),
             Box::new(memory::embed),
-            model.into(),
+            model,
         )
     }
 
-    fn new(path: PathBuf, embed: Embed, model: String) -> History {
+    fn new(path: PathBuf, embed: Embed, model: ModelSpec) -> History {
         History(Arc::new(Inner {
             path,
             conn: Mutex::new(None),
@@ -175,7 +175,7 @@ struct Input {
     #[schemars(range(min = 1, max = 50))]
     limit: Option<u32>,
     /// Session id from a search result (read)
-    session: Option<String>,
+    session: Option<SessionId>,
     /// First message to show, from a search result (read)
     seq: Option<i64>,
     /// With more results than this, a cheap model answers the query from them
@@ -191,7 +191,7 @@ struct HistoryTool {
 impl Tool for HistoryTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "History".into(),
+            name: ToolName::from_static("History"),
             description: format!(
                 "Search earlier conversations of the project in {root}: all sessions whose working directory is {root} or below it, \
                  including parts that were compacted away. Use it to find what was decided, tried, or fixed before. \
@@ -312,7 +312,7 @@ impl Inner {
             }
         }
         let inner = self.clone();
-        let indexed: HashMap<String, (i64, Option<String>)> =
+        let indexed: HashMap<SessionId, (i64, Option<String>)> =
             tokio::task::spawn_blocking(move || {
                 inner.with_conn(|c| {
                     let mut stmt = c.prepare("SELECT id, updated_at, title FROM sessions")?;
@@ -343,8 +343,11 @@ impl Inner {
                 None => c.text.clone(),
             })
             .collect();
-        let hashes: Vec<String> = embedded.iter().map(|t| hex(&Sha256::digest(t))).collect();
-        let mut known: HashMap<String, Vec<u8>> = self.with_conn(|c| {
+        let hashes: Vec<ChunkHash> = embedded
+            .iter()
+            .map(|t| ChunkHash::new(hex(&Sha256::digest(t))))
+            .collect();
+        let mut known: HashMap<ChunkHash, Vec<u8>> = self.with_conn(|c| {
             let mut stmt = c.prepare("SELECT hash, embedding FROM chunks WHERE session_id = ?1")?;
             let rows = stmt.query_map([&s.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -482,12 +485,17 @@ impl Inner {
     }
 }
 
+rho::id_type! {
+    /// SHA-256 of a chunk's embedded text; chunks with the same hash reuse the embedding.
+    ChunkHash
+}
+
 /// A search result: one chunk or several consecutive ones.
 #[derive(Debug)]
 struct Hit {
     /// Chunk ids. A session's chunks get consecutive ids in window order.
     ids: Range<i64>,
-    session: String,
+    session: SessionId,
     epoch: i64,
     first_seq: i64,
     last_seq: i64,
@@ -686,6 +694,7 @@ mod tests {
     use futures::stream::{self, BoxStream, StreamExt};
     use rho::agent::Agent;
     use rho::extension::NoFrontend;
+    use rho::provider::ProviderName;
     use rho::provider::{Event, Provider, Request as ModelRequest, StopReason};
     use serde_json::json;
 
@@ -755,7 +764,7 @@ mod tests {
         let db = dir.path().join("sessions.db");
         let mut agent = Agent::new(
             Arc::new(Scripted(Mutex::new(answers.to_vec()))),
-            "m",
+            ModelSpec::new("test", "m"),
             vec![],
         );
         agent.sessions_db = Some(Arc::new(move |_| db.clone()));
@@ -766,7 +775,7 @@ mod tests {
             ("long", &sub, &long),
         ] {
             let mut s = agent
-                .start_session(id, cwd, vec![], Arc::new(NoFrontend))
+                .start_session(SessionId::new(id), cwd, vec![], Arc::new(NoFrontend))
                 .await
                 .unwrap();
             agent
@@ -778,21 +787,24 @@ mod tests {
             Event::TextDelta("the answer".into()),
             Event::Done(StopReason::EndTurn),
         ]];
-        agent
-            .registry
-            .register("cheap", Arc::new(Scripted(Mutex::new(cheap))));
+        agent.registry.register(
+            ProviderName::new("cheap"),
+            Arc::new(Scripted(Mutex::new(cheap))),
+        );
         let history = History::new(
             dir.path().join("history.db"),
             Box::new(letters),
-            "cheap/m".into(),
+            ModelSpec::new("cheap", "m"),
         );
         agent.extensions.push(Arc::new(History(history.0.clone())));
 
         let session = agent
-            .start_session("s", &root, vec![], Arc::new(NoFrontend))
+            .start_session(SessionId::new("s"), &root, vec![], Arc::new(NoFrontend))
             .await
             .unwrap();
-        let tool = session.tool("History").expect("tool offered");
+        let tool = session
+            .tool(&ToolName::from_static("History"))
+            .expect("tool offered");
         let run = async |v: Value| tool.run(v, &session.ctx).await.map(|o| o.output);
         let out = run(json!({"action": "search", "query": "zebra", "mode": "keyword"}))
             .await
@@ -844,9 +856,9 @@ mod tests {
 
         // No marker, no tool.
         let session = agent
-            .start_session("o", &outside, vec![], Arc::new(NoFrontend))
+            .start_session(SessionId::new("o"), &outside, vec![], Arc::new(NoFrontend))
             .await
             .unwrap();
-        assert!(session.tool("History").is_none());
+        assert!(session.tool(&ToolName::from_static("History")).is_none());
     }
 }

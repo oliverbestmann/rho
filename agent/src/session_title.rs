@@ -5,29 +5,30 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use rho::extension::{Context, Extension, PromptSetup, SessionSetup};
-use rho::provider::Content;
+use rho::provider::{Content, ModelSpec};
+use rho::store::SessionId;
 
-pub const MODEL: &str = "anthropic/claude-haiku-5-5";
+pub const MODEL: ModelSpec = ModelSpec::from_static("anthropic", "claude-haiku-5-5");
 const CONTEXT_LIMIT: usize = 800;
 const SYSTEM: &str = "Write a concise 3-7 word session title for a conversation that starts with the following user message. Return only the title, with no quotes, markdown, label, or punctuation at the end.";
 
 #[derive(Default)]
 pub struct SessionTitle {
     /// Sessions that already had their first prompt.
-    seen: Mutex<HashSet<String>>,
+    seen: Mutex<HashSet<SessionId>>,
 }
 
 impl Extension for SessionTitle {
     async fn session_start(&self, session: &mut SessionSetup) {
         // A resumed session keeps its title.
         if session.resumed {
-            let id = session.ctx.session_id().to_string();
+            let id = session.ctx.session_id().clone();
             self.seen.lock().unwrap().insert(id);
         }
     }
 
     async fn before_prompt(&self, ctx: &Context, prompt: &mut PromptSetup) {
-        if !self.seen.lock().unwrap().insert(ctx.session_id().into()) {
+        if !self.seen.lock().unwrap().insert(ctx.session_id().clone()) {
             return;
         }
         let text: String = prompt
@@ -47,7 +48,7 @@ impl Extension for SessionTitle {
         }
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            match ctx.complete(MODEL, SYSTEM, &text).await {
+            match ctx.complete(&MODEL, SYSTEM, &text).await {
                 Ok(reply) => {
                     let title = clean_title(&reply);
                     if !title.is_empty() {

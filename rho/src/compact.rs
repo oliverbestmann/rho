@@ -87,13 +87,13 @@ impl Agent {
             .is_some_and(|t| t.elapsed() + CACHE_MARGIN < CACHE_TTL);
         let (provider, request, label) = match &self.compact_model {
             Some(cheap) if !warm => {
-                let (provider, model) = self.registry.resolve(cheap)?;
+                let provider = self.registry.resolve(cheap)?;
                 let text = format!(
                     "<conversation>\n{}\n</conversation>\n\n{instructions}",
                     serialize(&session.history)
                 );
                 let request = Request {
-                    model,
+                    model: cheap.id().clone(),
                     system: SYSTEM.into(),
                     messages: vec![Message {
                         role: Role::User,
@@ -110,7 +110,7 @@ impl Agent {
                 let mut messages = session.history.clone();
                 push_user(&mut messages, vec![Content::text(instructions)]);
                 let request = Request {
-                    model: session.model.clone(),
+                    model: session.model.id().clone(),
                     system: session.system.clone(),
                     messages,
                     tools: session.tool_specs(),
@@ -200,6 +200,8 @@ fn serialize(history: &[Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ToolCallId;
+    use crate::provider::ToolName;
     use serde_json::json;
 
     #[test]
@@ -214,8 +216,8 @@ mod tests {
                 content: vec![
                     Content::text("looking"),
                     Content::ToolUse {
-                        id: "1".into(),
-                        name: "Write".into(),
+                        id: ToolCallId::new("1"),
+                        name: ToolName::new("Write"),
                         input: json!({"content": "x".repeat(5000)}),
                     },
                 ],
@@ -223,7 +225,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![Content::ToolResult {
-                    tool_use_id: "1".into(),
+                    tool_use_id: ToolCallId::new("1"),
                     content: "SECRET OUTPUT".into(),
                     is_error: false,
                     images: vec![],

@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::extension::{Context, Extension, SessionSetup, SlashCommand};
+use crate::extension::{CommandName, Context, Extension, SessionSetup, SlashCommand};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -239,22 +239,27 @@ const UNSUPPORTED: &str =
 /// session's sandbox. The model is told with the next prompt.
 pub struct GrantCommands;
 
+const GRANT_READ: CommandName = CommandName::from_static("grant-read");
+const GRANT_WRITE: CommandName = CommandName::from_static("grant-write");
+
 impl Extension for GrantCommands {
     async fn session_start(&self, session: &mut SessionSetup) {
-        for (name, what) in [("grant-read", "read"), ("grant-write", "read-write")] {
+        for (name, what) in [(GRANT_READ, "read"), (GRANT_WRITE, "read-write")] {
             session.commands.push(SlashCommand {
-                name: name.into(),
+                name,
                 description: format!("Allow {what} access to a file or directory"),
                 hint: Some("path".into()),
             });
         }
     }
 
-    async fn command(&self, ctx: &Context, name: &str, args: &str) -> Option<String> {
-        let (access, what) = match name {
-            "grant-read" => (Access::Read, "read"),
-            "grant-write" => (Access::ReadWrite, "read-write"),
-            _ => return None,
+    async fn command(&self, ctx: &Context, name: &CommandName, args: &str) -> Option<String> {
+        let (access, what) = if *name == GRANT_READ {
+            (Access::Read, "read")
+        } else if *name == GRANT_WRITE {
+            (Access::ReadWrite, "read-write")
+        } else {
+            return None;
         };
         Some(grant(ctx, args, access, what))
     }

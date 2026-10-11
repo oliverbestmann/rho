@@ -21,7 +21,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use rho::extension::{Context, Extension, PromptSetup, SessionSetup, ToolOutput};
-use rho::provider::{ImageSource, ToolSpec};
+use rho::provider::{ImageSource, ToolName, ToolSpec};
+use rho::store::SessionId;
 use rho::tools::{Tool, truncate};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -34,7 +35,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(rename_all = "camelCase")]
 struct Config {
     #[serde(default)]
-    mcp_servers: BTreeMap<String, ServerConfig>,
+    mcp_servers: BTreeMap<ServerName, ServerConfig>,
 }
 
 #[derive(Deserialize)]
@@ -51,7 +52,7 @@ pub struct Mcp {
     /// Config problems, shown in every session.
     problems: Vec<String>,
     /// Problems per session id, shown with its first prompt.
-    pending: Mutex<HashMap<String, Vec<String>>>,
+    pending: Mutex<HashMap<SessionId, Vec<String>>>,
 }
 
 impl Mcp {
@@ -70,7 +71,7 @@ impl Mcp {
         match config {
             Ok(config) => {
                 for (name, c) in config.mcp_servers {
-                    match Server::new(&name, c) {
+                    match Server::new(name.clone(), c) {
                         Ok(s) => servers.push(Arc::new(s)),
                         Err(e) => problems.push(format!("MCP server {name}: {e:#}")),
                     }
@@ -114,7 +115,7 @@ impl Extension for Mcp {
             }
         }
         if !problems.is_empty() {
-            let id = session.ctx.session_id().to_string();
+            let id = session.ctx.session_id().clone();
             self.pending.lock().unwrap().insert(id, problems);
         }
     }
@@ -131,9 +132,19 @@ impl Extension for Mcp {
     }
 }
 
+rho::id_type! {
+    /// An MCP server's name in `mcp.json`.
+    ServerName
+}
+
+rho::id_type! {
+    /// The server's `Mcp-Session-Id`.
+    McpSessionId
+}
+
 /// The server's MCP session, set by `initialize`.
 struct Conn {
-    session: Option<String>,
+    session: Option<McpSessionId>,
     version: String,
 }
 
@@ -150,7 +161,7 @@ impl std::fmt::Display for Expired {
 impl std::error::Error for Expired {}
 
 struct Server {
-    name: String,
+    name: ServerName,
     url: String,
     headers: HeaderMap,
     http: reqwest::Client,
@@ -161,7 +172,7 @@ struct Server {
 }
 
 impl Server {
-    fn new(name: &str, c: ServerConfig) -> Result<Self> {
+    fn new(name: ServerName, c: ServerConfig) -> Result<Self> {
         match c.kind.as_deref() {
             Some("http") => {}
             other => bail!("type {other:?} is not supported, only \"http\""),
@@ -176,7 +187,7 @@ impl Server {
             headers.insert(HeaderName::from_bytes(k.as_bytes())?, value);
         }
         Ok(Self {
-            name: name.into(),
+            name,
             url,
             headers,
             http: reqwest::Client::new(),
@@ -237,7 +248,7 @@ impl Server {
     }
 
     /// `tools/call`, with one reconnect if the MCP session expired.
-    async fn call(&self, tool: &str, input: Value) -> Result<Value> {
+    async fn call(&self, tool: &ToolName, input: Value) -> Result<Value> {
         let params = json!({"name": tool, "arguments": input});
         match self.request("tools/call", params.clone()).await {
             Err(e) if e.is::<Expired>() => {
@@ -249,7 +260,7 @@ impl Server {
     }
 
     /// A JSON-RPC request: its result and the `Mcp-Session-Id` header.
-    async fn request(&self, method: &str, params: Value) -> Result<(Value, Option<String>)> {
+    async fn request(&self, method: &str, params: Value) -> Result<(Value, Option<McpSessionId>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let res = self
             .post(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
@@ -260,7 +271,7 @@ impl Server {
                 .and_then(|v| v.to_str().ok())
                 .map(String::from)
         };
-        let session = header("mcp-session-id");
+        let session = header("mcp-session-id").map(McpSessionId::new);
         let sse = header(CONTENT_TYPE.as_str()).is_some_and(|t| t.contains("text/event-stream"));
         let body = res.text().await?;
         let msg = if sse {
@@ -287,7 +298,7 @@ impl Server {
             if let Some(c) = &*conn {
                 req = req.header("MCP-Protocol-Version", &c.version);
                 if let Some(s) = &c.session {
-                    req = req.header("Mcp-Session-Id", s);
+                    req = req.header("Mcp-Session-Id", s.as_str());
                     has_session = true;
                 }
             }
@@ -343,7 +354,7 @@ fn expand(s: &str) -> Result<String> {
 }
 
 /// `mcp__server__tool` with what the API allows: `[A-Za-z0-9_-]`, 64 chars.
-fn tool_name(server: &str, tool: &str) -> String {
+fn tool_name(server: &ServerName, tool: &ToolName) -> ToolName {
     let mut name: String = format!("mcp__{server}__{tool}")
         .chars()
         .map(|c| {
@@ -355,19 +366,19 @@ fn tool_name(server: &str, tool: &str) -> String {
         })
         .collect();
     name.truncate(64);
-    name
+    ToolName::new(name)
 }
 
 struct McpTool {
     server: Arc<Server>,
     /// The tool's name on the server.
-    remote: String,
+    remote: ToolName,
     spec: ToolSpec,
 }
 
 impl McpTool {
     fn new(server: &Arc<Server>, tool: &Value) -> Option<Self> {
-        let remote = tool["name"].as_str()?.to_string();
+        let remote = ToolName::new(tool["name"].as_str()?);
         Some(Self {
             spec: ToolSpec {
                 name: tool_name(&server.name, &remote),
@@ -458,8 +469,12 @@ mod tests {
 
     #[test]
     fn cleans_tool_names() {
-        assert_eq!(tool_name("git hub", "get.issue"), "mcp__git_hub__get_issue");
-        assert_eq!(tool_name("s", &"x".repeat(100)).len(), 64);
+        let name = |s: &str, t: &str| tool_name(&ServerName::new(s), &ToolName::new(t));
+        assert_eq!(
+            name("git hub", "get.issue").as_str(),
+            "mcp__git_hub__get_issue"
+        );
+        assert_eq!(name("s", &"x".repeat(100)).as_str().len(), 64);
     }
 
     #[test]
@@ -557,7 +572,12 @@ mod tests {
         assert_eq!(mcp.servers.len(), 2);
         assert!(mcp.problems[0].contains("local"), "{:?}", mcp.problems);
 
-        let ctx = Context::new("s", "/tmp", Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
         let mut setup = SessionSetup {
             ctx: ctx.clone(),
             tools: vec![],
@@ -567,7 +587,11 @@ mod tests {
             profiles: vec![],
         };
         mcp.session_start(&mut setup).await;
-        let names: Vec<_> = setup.tools.iter().map(|t| t.spec().name).collect();
+        let names: Vec<_> = setup
+            .tools
+            .iter()
+            .map(|t| t.spec().name.to_string())
+            .collect();
         assert_eq!(
             names,
             [
@@ -581,7 +605,7 @@ mod tests {
         for tool in &setup.tools[2..] {
             let out = tool.run(json!({"text": "hi"}), &ctx).await.unwrap();
             assert_eq!(out.output, "hi");
-            assert_eq!(out.is_error, tool.spec().name.ends_with("fail"));
+            assert_eq!(out.is_error, tool.spec().name.as_str().ends_with("fail"));
         }
         let calls = calls.lock().unwrap();
         // The second call got a 404, reconnected and was sent again.

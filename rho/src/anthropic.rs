@@ -22,12 +22,14 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::AuthStore;
 use crate::provider::{
-    Content, Event, ImageSource, Message, ModelInfo, Price, Provider, Request, Role, StopReason,
-    Thinking, ToolSpec, Usage,
+    Content, Event, ImageSource, Message, ModelId, ModelInfo, Price, Provider, ProviderName,
+    Request, Role, StopReason, Thinking, ToolCallId, ToolName, ToolSpec, Usage,
 };
 
 /// Claude Code version we claim to be; keep in sync with pi-ai.
 pub const CLAUDE_CODE_VERSION: &str = "2.1.280";
+/// Name in the registry and the credential file.
+pub const NAME: ProviderName = ProviderName::from_static("anthropic");
 pub const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const BETAS: &str = "claude-code-20250219,oauth-2025-04-20";
@@ -149,7 +151,7 @@ impl Anthropic {
         let resp = self
             .http
             .post(&self.url)
-            .bearer_auth(token)
+            .bearer_auth(token.expose())
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", BETAS)
             .header("user-agent", format!("claude-cli/{CLAUDE_CODE_VERSION}"))
@@ -213,7 +215,7 @@ impl Provider for Anthropic {
         MODELS
             .iter()
             .map(|&(id, name, context_window, prices, above)| ModelInfo {
-                id: id.into(),
+                id: ModelId::from_static(id),
                 name: name.into(),
                 context_window,
                 price: Some(price(prices)),
@@ -223,7 +225,7 @@ impl Provider for Anthropic {
     }
 
     /// Unlisted models get the 1M window of the current ones.
-    fn context_window(&self, model: &str) -> u64 {
+    fn context_window(&self, model: &ModelId) -> u64 {
         self.model_info(model)
             .map_or(1_000_000, |m| m.context_window)
     }
@@ -232,7 +234,7 @@ impl Provider for Anthropic {
 /// Request body of `POST /v1/messages`.
 #[derive(Serialize)]
 pub struct Body<'a> {
-    model: &'a str,
+    model: &'a ModelId,
     max_tokens: u32,
     stream: bool,
     system: Vec<Cached<SystemBlock<'a>>>,
@@ -318,7 +320,7 @@ impl<'a> From<&'a Content> for WireBlock<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename = "tool_result")]
 struct ToolResultBlocks<'a> {
-    tool_use_id: &'a str,
+    tool_use_id: &'a ToolCallId,
     content: Vec<ResultPart<'a>>,
     is_error: bool,
 }
@@ -502,8 +504,8 @@ struct MessageStart {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BlockStart {
     ToolUse {
-        id: String,
-        name: String,
+        id: ToolCallId,
+        name: ToolName,
     },
     Thinking {
         #[serde(default)]
@@ -570,8 +572,8 @@ struct ApiError {
 /// A content block still being streamed.
 enum Partial {
     Tool {
-        id: String,
-        name: String,
+        id: ToolCallId,
+        name: ToolName,
         json: String,
     },
     Thinking {
@@ -735,7 +737,7 @@ mod tests {
 
     fn request(model: &str, thinking: Thinking) -> Request {
         Request {
-            model: model.into(),
+            model: ModelId::new(model),
             system: "be brief".into(),
             messages: vec![
                 Message {
@@ -745,15 +747,15 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     content: vec![Content::ToolUse {
-                        id: "t1".into(),
-                        name: "Bash".into(),
+                        id: ToolCallId::new("t1"),
+                        name: ToolName::new("Bash"),
                         input: json!({}),
                     }],
                 },
                 Message {
                     role: Role::User,
                     content: vec![Content::ToolResult {
-                        tool_use_id: "t1".into(),
+                        tool_use_id: ToolCallId::new("t1"),
                         content: "ok".into(),
                         is_error: false,
                         images: vec![],
@@ -762,12 +764,12 @@ mod tests {
             ],
             tools: vec![
                 ToolSpec {
-                    name: "Read".into(),
+                    name: ToolName::new("Read"),
                     description: "read".into(),
                     input_schema: json!({"type": "object"}),
                 },
                 ToolSpec {
-                    name: "Bash".into(),
+                    name: ToolName::new("Bash"),
                     description: "run".into(),
                     input_schema: json!({"type": "object"}),
                 },
@@ -919,8 +921,8 @@ mod tests {
                 }),
                 Event::TextDelta("Hé".into()),
                 Event::Block(Content::ToolUse {
-                    id: "t1".into(),
-                    name: "Bash".into(),
+                    id: ToolCallId::new("t1"),
+                    name: ToolName::new("Bash"),
                     input: json!({"command": "ls"})
                 }),
                 Event::Block(Content::RedactedThinking {

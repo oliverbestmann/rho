@@ -28,9 +28,14 @@ use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, Responder};
 use futures::future::{AbortHandle, Abortable};
 
 use crate::agent::{Agent, AgentEvent, Session};
-use crate::extension::{Answers, BoxFuture, Context, Field, FieldKind, Form, FormReply, Frontend};
-use crate::provider::{self, Content, ImageSource, Role, Thinking, Usage};
-use crate::store::Store;
+use crate::edit::EDIT;
+use crate::extension::{
+    Answers, BoxFuture, CommandName, Context, Field, FieldKey, FieldKind, Form, FormReply,
+    Frontend, ProfileId,
+};
+use crate::provider::{self, Content, ImageSource, Role, Thinking, ToolCallId, ToolName, Usage};
+use crate::store::{self, Store};
+use crate::tools;
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
 
@@ -170,18 +175,14 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         responder: Responder<NewSessionResponse>,
                         cx: ConnectionTo<Client>| {
                 // Unique across processes: sessions are stored by id.
-                let sid = SessionId::new(crate::store::new_session_id());
+                let id = store::SessionId::generate();
+                let sid = SessionId::new(id.as_str());
                 let (agent, state) = (agent.clone(), new_state.clone());
                 // Extension session_start hooks are async; keep them off the dispatch loop.
                 cx.clone().spawn(async move {
                     let frontend = frontend(&cx, &sid, &state, &req.cwd);
                     let started = agent
-                        .start_session(
-                            sid.0.to_string(),
-                            req.cwd,
-                            req.additional_directories,
-                            frontend.clone(),
-                        )
+                        .start_session(id, req.cwd, req.additional_directories, frontend.clone())
                         .await;
                     let session = match started {
                         Ok(s) => s,
@@ -310,9 +311,11 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                                 Ok(provider::StopReason::EndTurn)
                             }
                             Some((name, args))
-                                if session.commands.iter().any(|c| c.name == name) =>
+                                if session.commands.iter().any(|c| c.name.as_str() == name) =>
                             {
-                                agent.command(&session, name, &args).await;
+                                agent
+                                    .command(&session, &CommandName::new(name), &args)
+                                    .await;
                                 Ok(provider::StopReason::EndTurn)
                             }
                             _ => match to_content(req.prompt.clone()) {
@@ -350,7 +353,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                 // A running turn picks it up with its next request.
                 if *req.config_id.0 == *PROFILE_OPTION {
                     let value = req.value.as_value_id().map(|v| v.0.to_string());
-                    return match ctx.set_profile(value.as_deref().unwrap_or_default()) {
+                    return match ctx.set_profile(&ProfileId::new(value.unwrap_or_default())) {
                         Ok(()) => responder
                             .respond(SetSessionConfigOptionResponse::new(frontend.options())),
                         Err(e) => responder
@@ -415,7 +418,7 @@ fn commands(session: &Session) -> Vec<AvailableCommand> {
         AvailableCommand::new("usage", "Show token, cache and cost usage of this session"),
     ];
     for c in &session.commands {
-        let mut command = AvailableCommand::new(&c.name, &c.description);
+        let mut command = AvailableCommand::new(c.name.to_string(), &c.description);
         if let Some(hint) = &c.hint {
             command = command.input(AvailableCommandInput::Unstructured(
                 UnstructuredCommandInput::new(hint),
@@ -479,7 +482,12 @@ async fn open_stored(
         None => {
             let frontend = frontend(cx, sid, state, &cwd);
             let session = agent
-                .resume_session(&sid.0, &cwd, additional_dirs, frontend.clone())
+                .resume_session(
+                    &store::SessionId::new(&*sid.0),
+                    &cwd,
+                    additional_dirs,
+                    frontend.clone(),
+                )
                 .await?;
             let session = register(agent, state, cx, sid, session, frontend.clone())?;
             (session, frontend, None)
@@ -496,7 +504,7 @@ async fn open_stored(
     if replay {
         // Compaction keeps older epochs in the store; show them too.
         let earlier = match session.ctx.store() {
-            Some(store) => store.messages(&sid.0).await?,
+            Some(store) => store.messages(&store::SessionId::new(&*sid.0)).await?,
             None => vec![],
         };
         let epoch = session.epoch();
@@ -616,7 +624,7 @@ async fn list_sessions(
         .sessions
         .into_iter()
         .map(|s| {
-            AcpSessionInfo::new(s.id, s.cwd)
+            AcpSessionInfo::new(s.id.to_string(), s.cwd)
                 .additional_directories(s.additional_dirs)
                 .title(s.title)
                 .updated_at(rfc3339(s.updated_at))
@@ -684,7 +692,7 @@ struct AcpFrontend {
     terminal_cwd: Option<PathBuf>,
     /// How running tool calls were shown, by id. `ToolEnd` replaces the
     /// call's content, so it has to repeat the command or the questions.
-    shown: Mutex<HashMap<String, Shown>>,
+    shown: Mutex<HashMap<ToolCallId, Shown>>,
     published: Mutex<Published>,
 }
 
@@ -727,7 +735,7 @@ impl Frontend for AcpFrontend {
                     self.shown
                         .lock()
                         .unwrap()
-                        .insert(id.to_string(), shown.clone());
+                        .insert((*id).clone(), shown.clone());
                 }
                 shown
             }
@@ -741,10 +749,16 @@ impl Frontend for AcpFrontend {
             .send_notification(SessionNotification::new(self.sid.clone(), update));
     }
 
-    fn confirm<'a>(&'a self, tool_call_id: Option<&'a str>, title: &'a str) -> BoxFuture<'a, bool> {
+    fn confirm<'a>(
+        &'a self,
+        tool_call_id: Option<&'a ToolCallId>,
+        title: &'a str,
+    ) -> BoxFuture<'a, bool> {
         Box::pin(async move {
             let call = ToolCallUpdate::new(
-                tool_call_id.unwrap_or("confirm").to_string(),
+                tool_call_id
+                    .map_or("confirm", ToolCallId::as_str)
+                    .to_string(),
                 ToolCallUpdateFields::new().title(title.to_string()),
             );
             let request = RequestPermissionRequest::new(
@@ -801,7 +815,7 @@ fn form_schema(form: &Form) -> ElicitationSchema {
         let (title, description) = (Some(title.clone()), description.clone());
         schema = match kind {
             FieldKind::Text => schema.property(
-                key,
+                key.to_string(),
                 StringPropertySchema::new()
                     .title(title)
                     .description(description),
@@ -810,11 +824,14 @@ fn form_schema(form: &Form) -> ElicitationSchema {
             FieldKind::Choice { options, multiple } => {
                 let options = options
                     .iter()
-                    .map(|o| EnumOption::new(&o.value, &o.title).description(o.description.clone()))
+                    .map(|o| {
+                        EnumOption::new(o.value.to_string(), &o.title)
+                            .description(o.description.clone())
+                    })
                     .collect();
                 if *multiple {
                     schema.property(
-                        key,
+                        key.to_string(),
                         MultiSelectPropertySchema::titled(options)
                             .title(title)
                             .description(description),
@@ -822,7 +839,7 @@ fn form_schema(form: &Form) -> ElicitationSchema {
                     )
                 } else {
                     schema.property(
-                        key,
+                        key.to_string(),
                         StringPropertySchema::new()
                             .title(title)
                             .description(description)
@@ -853,7 +870,7 @@ fn form_answers(content: Option<BTreeMap<String, ElicitationContentValue>>) -> A
             .filter(|v| !v.trim().is_empty())
             .collect();
         if !values.is_empty() {
-            answers.insert(key, values);
+            answers.insert(FieldKey::new(key), values);
         }
     }
     answers
@@ -872,7 +889,7 @@ fn config_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> 
         let choices: Vec<_> = profiles
             .iter()
             .map(|p| {
-                SessionConfigSelectOption::new(p.id.clone(), p.name.clone())
+                SessionConfigSelectOption::new(p.id.to_string(), p.name.clone())
                     .description(p.description.clone())
             })
             .collect();
@@ -880,7 +897,7 @@ fn config_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> 
             SessionConfigOption::select(
                 PROFILE_OPTION,
                 "Profile",
-                session.ctx.profile().id,
+                session.ctx.profile().id.to_string(),
                 choices,
             )
             .category(SessionConfigOptionCategory::Mode)
@@ -901,21 +918,19 @@ fn model_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
             if let Some(p) = m.price {
                 description += &format!(", ${}/${} per MTok", p.input, p.output);
             }
-            SessionConfigSelectOption::new(spec, m.name).description(description)
+            SessionConfigSelectOption::new(spec.to_string(), m.name).description(description)
         })
         .collect();
     let mut options = vec![];
     // Without any known model there is nothing to pick from.
     if !models.is_empty() {
         // A model from `-m` that the provider does not list.
-        if models.iter().all(|m| *m.value.0 != *session.model_spec) {
-            models.insert(
-                0,
-                SessionConfigSelectOption::new(session.model_spec.clone(), &session.model_spec),
-            );
+        let current = session.model.to_string();
+        if models.iter().all(|m| *m.value.0 != *current) {
+            models.insert(0, SessionConfigSelectOption::new(current.clone(), &current));
         }
         options.push(
-            SessionConfigOption::select(MODEL_OPTION, "Model", session.model_spec.clone(), models)
+            SessionConfigOption::select(MODEL_OPTION, "Model", current, models)
                 .category(SessionConfigOptionCategory::Model)
                 .description("Model for this session"),
         );
@@ -956,15 +971,12 @@ fn set_config(
     };
     match &*req.config_id.0 {
         MODEL_OPTION => {
-            let listed = agent
-                .registry
-                .models()
-                .iter()
-                .any(|(spec, _)| spec == value);
-            if !listed && value != session.model_spec {
+            let spec = value.parse()?;
+            let listed = agent.registry.models().iter().any(|(m, _)| *m == spec);
+            if !listed && spec != session.model {
                 anyhow::bail!("unknown model {value:?}");
             }
-            agent.set_model(session, value)
+            agent.set_model(session, &spec)
         }
         THINKING_OPTION => {
             session.thinking = value.parse()?;
@@ -1095,7 +1107,7 @@ enum Shown {
 
 impl Shown {
     fn of(
-        name: &str,
+        name: &ToolName,
         input: &serde_json::Value,
         description: Option<&str>,
         terminal_cwd: Option<&Path>,
@@ -1105,7 +1117,7 @@ impl Shown {
         }
         let command = input["command"].as_str()?;
         Some(match terminal_cwd {
-            Some(cwd) if name == "Bash" => Self::Terminal {
+            Some(cwd) if *name == tools::BASH => Self::Terminal {
                 cwd: cwd.into(),
                 command: command.into(),
             },
@@ -1190,7 +1202,7 @@ fn to_update(
             cost,
         } => {
             *last_usage = LastUsage {
-                model: model.into(),
+                model: model.to_string(),
                 used: usage.prompt() + usage.output,
                 request: usage,
                 total,
@@ -1202,17 +1214,20 @@ fn to_update(
             spec,
             context_window,
         } => {
-            last_usage.model = spec.into();
+            last_usage.model = spec.to_string();
             usage_update(last_usage, context_window)
         }
         AgentEvent::ToolStart {
             id, name, input, ..
         } => {
-            let kind = match name {
-                "Read" => ToolKind::Read,
-                "Write" | "Edit" => ToolKind::Edit,
-                "Bash" => ToolKind::Execute,
-                _ => ToolKind::Other,
+            let kind = if *name == tools::READ {
+                ToolKind::Read
+            } else if *name == tools::WRITE || *name == EDIT {
+                ToolKind::Edit
+            } else if *name == tools::BASH {
+                ToolKind::Execute
+            } else {
+                ToolKind::Other
             };
             let call = match shown {
                 Some(Shown::Terminal { cwd, command }) => ToolCall::new(id.to_string(), command)
@@ -1278,7 +1293,7 @@ const TITLE_KEYS: [&str; 10] = [
 ];
 
 /// "Bash first line of the command", at most `MAX_TITLE` characters.
-fn title(name: &str, input: &serde_json::Value) -> String {
+fn title(name: &ToolName, input: &serde_json::Value) -> String {
     let arg = TITLE_KEYS.iter().find_map(|k| input[k].as_str());
     let Some(arg) = arg else {
         return name.to_string();
@@ -1301,11 +1316,14 @@ fn to_stop(stop: provider::StopReason) -> StopReason {
 
 #[cfg(test)]
 mod tests {
+    use crate::extension::ChoiceValue;
+    use crate::extension::FieldKey;
     use agent_client_protocol::schema::v1::TextContent;
     use serde_json::json;
 
     use super::*;
     use crate::extension::{Choice, Diff as FileDiff};
+    use crate::provider::ModelSpec;
 
     fn update(ev: AgentEvent, shown: Option<&Shown>) -> serde_json::Value {
         let mut last = Published::default();
@@ -1321,7 +1339,7 @@ mod tests {
         };
         let wire = update(
             AgentEvent::ToolEnd {
-                id: "t1",
+                id: &ToolCallId::new("t1"),
                 output: "ok",
                 is_error: false,
                 diff: Some(&diff),
@@ -1344,7 +1362,7 @@ mod tests {
         }];
         let wire = update(
             AgentEvent::ToolEnd {
-                id: "t1",
+                id: &ToolCallId::new("t1"),
                 output: "pic.png (image/png, 1 KB)",
                 is_error: false,
                 diff: None,
@@ -1364,10 +1382,10 @@ mod tests {
         assert_eq!(command_block("echo ```"), "````sh\necho ```\n````");
 
         let input = json!({"command": "ls"});
-        let shown = Shown::of("Bash", &input, None, None).unwrap();
+        let shown = Shown::of(&ToolName::new("Bash"), &input, None, None).unwrap();
         let start = AgentEvent::ToolStart {
-            id: "t1",
-            name: "Bash",
+            id: &ToolCallId::new("t1"),
+            name: &ToolName::new("Bash"),
             input: &input,
             description: None,
         };
@@ -1376,7 +1394,7 @@ mod tests {
 
         // ToolEnd replaces the content, so the command comes first again.
         let end = AgentEvent::ToolEnd {
-            id: "t1",
+            id: &ToolCallId::new("t1"),
             output: "out",
             is_error: false,
             diff: None,
@@ -1390,10 +1408,10 @@ mod tests {
     #[test]
     fn tool_descriptions_replace_the_command_block() {
         let input = json!({"questions": []});
-        let shown = Shown::of("Ask", &input, Some("**Q?**"), None).unwrap();
+        let shown = Shown::of(&ToolName::new("Ask"), &input, Some("**Q?**"), None).unwrap();
         let start = AgentEvent::ToolStart {
-            id: "t1",
-            name: "Ask",
+            id: &ToolCallId::new("t1"),
+            name: &ToolName::new("Ask"),
             input: &input,
             description: Some("**Q?**"),
         };
@@ -1406,10 +1424,10 @@ mod tests {
     #[test]
     fn bash_is_a_terminal_when_the_client_supports_it() {
         let input = json!({"command": "false"});
-        let shown = Shown::of("Bash", &input, None, Some(Path::new("/w"))).unwrap();
+        let shown = Shown::of(&ToolName::new("Bash"), &input, None, Some(Path::new("/w"))).unwrap();
         let start = AgentEvent::ToolStart {
-            id: "t1",
-            name: "Bash",
+            id: &ToolCallId::new("t1"),
+            name: &ToolName::new("Bash"),
             input: &input,
             description: None,
         };
@@ -1426,7 +1444,7 @@ mod tests {
         );
 
         let end = AgentEvent::ToolEnd {
-            id: "t1",
+            id: &ToolCallId::new("t1"),
             output: "boom\n[exit status: 3]",
             is_error: true,
             diff: None,
@@ -1443,11 +1461,16 @@ mod tests {
 
         // Other tools and clients without the capability keep the fenced block.
         assert!(matches!(
-            Shown::of("BackgroundTask", &input, None, Some(Path::new("/w"))),
+            Shown::of(
+                &ToolName::new("BackgroundTask"),
+                &input,
+                None,
+                Some(Path::new("/w"))
+            ),
             Some(Shown::Text(_))
         ));
         assert!(matches!(
-            Shown::of("Bash", &input, None, None),
+            Shown::of(&ToolName::new("Bash"), &input, None, None),
             Some(Shown::Text(_))
         ));
     }
@@ -1462,14 +1485,20 @@ mod tests {
     #[test]
     fn long_titles_are_cut() {
         let long = "a".repeat(300);
-        let t = title("Bash", &json!({"command": long}));
+        let t = title(&ToolName::new("Bash"), &json!({"command": long}));
         assert_eq!(t.chars().count(), MAX_TITLE + 1);
         assert!(t.ends_with('…'));
-        assert_eq!(title("Bash", &json!({"command": "ls\nmore"})), "Bash ls");
+        assert_eq!(
+            title(&ToolName::new("Bash"), &json!({"command": "ls\nmore"})),
+            "Bash ls"
+        );
         let grep = json!({"pattern": "fn x", "path": "src"});
-        assert_eq!(title("Grep", &grep), "Grep fn x");
+        assert_eq!(title(&ToolName::new("Grep"), &grep), "Grep fn x");
         let fetch = json!({"url": "https://x.y", "raw": true});
-        assert_eq!(title("FetchUrl", &fetch), "FetchUrl https://x.y");
+        assert_eq!(
+            title(&ToolName::new("FetchUrl"), &fetch),
+            "FetchUrl https://x.y"
+        );
     }
 
     #[test]
@@ -1489,7 +1518,7 @@ mod tests {
         let mut last = Published::default();
         let wire = serde_json::to_value(to_update(
             AgentEvent::Usage {
-                model: "p/m",
+                model: &ModelSpec::new("p", "m"),
                 usage: request,
                 context_window: 1_000_000,
                 total,
@@ -1516,7 +1545,7 @@ mod tests {
         // A model switch republishes the context with the new window.
         let wire = serde_json::to_value(to_update(
             AgentEvent::Model {
-                spec: "p/small",
+                spec: &ModelSpec::new("p", "small"),
                 context_window: 200_000,
             },
             1,
@@ -1571,18 +1600,18 @@ mod tests {
             message: "Two questions".into(),
             fields: vec![
                 Field {
-                    key: "q0".into(),
+                    key: FieldKey::new("q0"),
                     title: "Which db?".into(),
                     description: Some("Pick one".into()),
                     kind: FieldKind::Choice {
                         options: vec![
                             Choice {
-                                value: "pg".into(),
+                                value: ChoiceValue::new("pg"),
                                 title: "Postgres".into(),
                                 description: Some("SQL".into()),
                             },
                             Choice {
-                                value: "sqlite".into(),
+                                value: ChoiceValue::new("sqlite"),
                                 title: "SQLite".into(),
                                 description: None,
                             },
@@ -1592,19 +1621,19 @@ mod tests {
                     required: false,
                 },
                 Field {
-                    key: "q0_text".into(),
+                    key: FieldKey::new("q0_text"),
                     title: "Or your own".into(),
                     description: None,
                     kind: FieldKind::Text,
                     required: false,
                 },
                 Field {
-                    key: "q1".into(),
+                    key: FieldKey::new("q1"),
                     title: "Features?".into(),
                     description: None,
                     kind: FieldKind::Choice {
                         options: vec![Choice {
-                            value: "a".into(),
+                            value: ChoiceValue::new("a"),
                             title: "A".into(),
                             description: None,
                         }],
@@ -1652,8 +1681,8 @@ mod tests {
         assert_eq!(
             answers,
             Answers::from([
-                ("a".into(), vec!["x".into()]),
-                ("c".into(), vec!["1".into(), "2".into()]),
+                (FieldKey::new("a"), vec!["x".into()]),
+                (FieldKey::new("c"), vec!["1".into(), "2".into()]),
             ])
         );
         assert!(form_answers(None).is_empty());

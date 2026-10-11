@@ -7,16 +7,18 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use rho::extension::{Context, Decision, Extension, Profile, SessionSetup, ToolCall, ToolOutput};
-use rho::provider::ToolSpec;
+use rho::extension::{
+    Context, Decision, Extension, Profile, ProfileId, SessionSetup, ToolCall, ToolOutput,
+};
+use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-pub const PLAN: &str = "plan";
-const ENTER: &str = "EnterPlanMode";
-const EXIT: &str = "ExitPlanMode";
+pub const PLAN: ProfileId = ProfileId::from_static("plan");
+const ENTER: ToolName = ToolName::from_static("EnterPlanMode");
+const EXIT: ToolName = ToolName::from_static("ExitPlanMode");
 
 const INSTRUCTIONS: &str = "You are in plan mode. Explore the code (Read, Bash, Grep, ...) and ask the user questions, \
 but do not change anything: no file edits, no commits, no commands with side effects. \
@@ -29,14 +31,14 @@ impl Extension for PlanMode {
     async fn session_start(&self, session: &mut SessionSetup) {
         for p in &mut session.profiles {
             if p.id == Profile::WRITE {
-                p.hidden_tools.push(EXIT.into());
+                p.hidden_tools.push(EXIT);
             }
         }
         session.profiles.push(Profile {
-            id: PLAN.into(),
+            id: PLAN,
             name: "Plan".into(),
             description: "Read-only: explore and plan, no changes".into(),
-            hidden_tools: vec!["Write".into(), "Edit".into(), ENTER.into()],
+            hidden_tools: vec![rho::tools::WRITE, rho::edit::EDIT, ENTER],
             read_only: true,
             instructions: Some(INSTRUCTIONS.into()),
         });
@@ -72,7 +74,7 @@ struct EnterPlanMode;
 impl Tool for EnterPlanMode {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: ENTER.into(),
+            name: ENTER,
             description: "Switch to plan mode before a non-trivial change: when there are several ways to do it, \
                 it touches many files, or the requirements are unclear. In plan mode you explore read-only and \
                 design the approach; the user approves the plan before you change anything."
@@ -82,7 +84,7 @@ impl Tool for EnterPlanMode {
     }
 
     async fn run(&self, _input: Value, ctx: &Context) -> Result<ToolOutput> {
-        ctx.set_profile(PLAN)?;
+        ctx.set_profile(&PLAN)?;
         Ok("Entered plan mode.".into())
     }
 }
@@ -98,7 +100,7 @@ struct ExitPlanMode;
 impl Tool for ExitPlanMode {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: EXIT.into(),
+            name: EXIT,
             description: "Present your implementation plan to the user and leave plan mode once they approve it. \
                 Only for plans of changes to make; not for research questions."
                 .into(),
@@ -115,7 +117,7 @@ impl Tool for ExitPlanMode {
         if i.plan.trim().is_empty() {
             bail!("the plan is empty");
         }
-        ctx.set_profile(Profile::WRITE)?;
+        ctx.set_profile(&Profile::WRITE)?;
         Ok("The user approved the plan. Start implementing it.".into())
     }
 }
@@ -125,6 +127,8 @@ mod tests {
     use super::*;
     use rho::agent::AgentEvent;
     use rho::extension::{BoxFuture, Frontend};
+    use rho::provider::ToolCallId;
+    use rho::store::SessionId;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -137,8 +141,15 @@ mod tests {
     impl Frontend for Confirms {
         fn event(&self, _event: AgentEvent<'_>) {}
 
-        fn confirm<'a>(&'a self, id: Option<&'a str>, _title: &'a str) -> BoxFuture<'a, bool> {
-            self.asked.lock().unwrap().push(id.map(String::from));
+        fn confirm<'a>(
+            &'a self,
+            id: Option<&'a ToolCallId>,
+            _title: &'a str,
+        ) -> BoxFuture<'a, bool> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(id.map(ToolCallId::to_string));
             let approve = self.approve;
             Box::pin(async move { approve })
         }
@@ -149,7 +160,12 @@ mod tests {
             approve,
             asked: Mutex::default(),
         });
-        let ctx = Context::new("s", "/tmp", frontend.clone(), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            frontend.clone(),
+            Default::default(),
+        );
         let mut setup = SessionSetup {
             ctx,
             tools: vec![],
@@ -164,8 +180,8 @@ mod tests {
 
     fn exit_call() -> ToolCall {
         ToolCall {
-            id: "t1".into(),
-            name: EXIT.into(),
+            id: ToolCallId::new("t1"),
+            name: EXIT,
             input: json!({"plan": "1. do it"}),
         }
     }
@@ -176,10 +192,14 @@ mod tests {
         let [write, plan] = &setup.profiles[..] else {
             panic!("two profiles");
         };
-        assert!(!write.shows(EXIT) && write.shows(ENTER) && write.shows("Edit"));
+        assert!(!write.shows(&EXIT) && write.shows(&ENTER) && write.shows(&rho::edit::EDIT));
         assert!(plan.read_only);
-        assert!(!plan.shows("Write") && !plan.shows("Edit") && !plan.shows(ENTER));
-        assert!(plan.shows(EXIT) && plan.shows("Read") && plan.shows("Bash"));
+        assert!(
+            !plan.shows(&rho::tools::WRITE) && !plan.shows(&rho::edit::EDIT) && !plan.shows(&ENTER)
+        );
+        assert!(
+            plan.shows(&EXIT) && plan.shows(&rho::tools::READ) && plan.shows(&rho::tools::BASH)
+        );
     }
 
     /// The context with the profiles installed, as the agent does after
@@ -208,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_exit_stays_and_stops() {
         let (_, ctx) = ctx(false).await;
-        ctx.set_profile(PLAN).unwrap();
+        ctx.set_profile(&PLAN).unwrap();
         let decision = PlanMode.tool_call(&ctx, &mut exit_call()).await;
         assert!(matches!(decision, Decision::Block(r) if r.contains("did not approve")));
         assert_eq!(ctx.profile().id, PLAN);
@@ -223,9 +243,9 @@ mod tests {
             PlanMode.tool_call(&ctx, &mut exit_call()).await,
             Decision::Allow
         );
-        ctx.set_profile(PLAN).unwrap();
+        ctx.set_profile(&PLAN).unwrap();
         let mut read = ToolCall {
-            name: "Read".into(),
+            name: ToolName::new("Read"),
             ..exit_call()
         };
         assert_eq!(PlanMode.tool_call(&ctx, &mut read).await, Decision::Allow);

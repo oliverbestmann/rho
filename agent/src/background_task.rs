@@ -11,26 +11,33 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
-use rho::provider::ToolSpec;
+use rho::provider::{ToolName, ToolSpec};
+use rho::store::SessionId;
 use rho::tools::{Tool, input_schema, parse};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
+pub const BACKGROUND_TASK: ToolName = ToolName::from_static("BackgroundTask");
 const TAIL_LINES: usize = 10;
+
+rho::id_type! {
+    /// A background task's id, unique within its session.
+    pub TaskId
+}
 const MAX_TIMEOUT: u64 = 3600;
 
 #[derive(Default)]
 pub struct BackgroundTasks {
-    sessions: Mutex<HashMap<String, Arc<Tasks>>>,
+    sessions: Mutex<HashMap<SessionId, Arc<Tasks>>>,
 }
 
 /// One session's tasks.
 #[derive(Default)]
 struct Tasks {
     next_id: AtomicU32,
-    running: Mutex<HashMap<String, Task>>,
+    running: Mutex<HashMap<TaskId, Task>>,
 }
 
 struct Task {
@@ -52,7 +59,7 @@ impl Extension for BackgroundTasks {
         self.sessions
             .lock()
             .unwrap()
-            .insert(session.ctx.session_id().into(), tasks.clone());
+            .insert(session.ctx.session_id().clone(), tasks.clone());
         session.tools.push(Arc::new(Start(tasks.clone())));
         session.tools.push(Arc::new(List(tasks.clone())));
         session.tools.push(Arc::new(Cancel(tasks)));
@@ -81,7 +88,7 @@ struct Start(Arc<Tasks>);
 impl Tool for Start {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "BackgroundTask".into(),
+            name: BACKGROUND_TASK,
             description: format!(
                 "Run a shell command in the background (e.g. a long build, or a while loop waiting for a process). Returns a task id immediately. When the command exits or times out, you get a message with the id, exit status and the last {TAIL_LINES} output lines. Sandboxed like Bash."
             ),
@@ -105,7 +112,7 @@ impl Tool for Start {
         ctx.sandbox_command(&mut cmd)?;
         let mut child = cmd.spawn()?;
 
-        let id = (self.0.next_id.fetch_add(1, Ordering::Relaxed) + 1).to_string();
+        let id = TaskId::new((self.0.next_id.fetch_add(1, Ordering::Relaxed) + 1).to_string());
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let task = Task {
             command: i.command.clone(),
@@ -195,7 +202,7 @@ struct List(Arc<Tasks>);
 impl Tool for List {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "BackgroundTaskList".into(),
+            name: ToolName::from_static("BackgroundTaskList"),
             description:
                 "List running background tasks with id, runtime, command and last output line."
                     .into(),
@@ -206,7 +213,7 @@ impl Tool for List {
     async fn run(&self, _input: Value, _ctx: &Context) -> Result<ToolOutput> {
         let running = self.0.running.lock().unwrap();
         let mut ids: Vec<_> = running.keys().collect();
-        ids.sort_by_key(|id| id.parse::<u32>().unwrap_or_default());
+        ids.sort_by_key(|id| id.as_str().parse::<u32>().unwrap_or_default());
         let lines: Vec<String> = ids
             .into_iter()
             .map(|id| {
@@ -230,7 +237,7 @@ impl Tool for List {
 #[derive(Deserialize, JsonSchema)]
 struct CancelInput {
     /// Task id
-    id: String,
+    id: TaskId,
 }
 
 struct Cancel(Arc<Tasks>);
@@ -238,7 +245,7 @@ struct Cancel(Arc<Tasks>);
 impl Tool for Cancel {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "BackgroundTaskCancel".into(),
+            name: ToolName::from_static("BackgroundTaskCancel"),
             description: "Stop a background task by id. No completion message is sent for it."
                 .into(),
             input_schema: input_schema::<CancelInput>(),
@@ -285,7 +292,12 @@ mod tests {
     fn setup() -> (tempfile::TempDir, Arc<Notices>, Context, Arc<Tasks>) {
         let dir = tempfile::tempdir().unwrap();
         let notices = Arc::new(Notices::default());
-        let ctx = Context::new("s", dir.path(), notices.clone(), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            dir.path(),
+            notices.clone(),
+            Default::default(),
+        );
         (dir, notices, ctx, Arc::new(Tasks::default()))
     }
 

@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
-use rho::provider::ToolSpec;
+use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use schemars::JsonSchema;
@@ -123,7 +123,7 @@ struct Input {
     /// Memory content (store)
     content: Option<String>,
     /// Memory content hash (get, update, delete)
-    hash: Option<String>,
+    hash: Option<MemoryHash>,
     /// Memory tags (store, update)
     tags: Option<Vec<String>>,
     /// Memory type (store, list, update)
@@ -145,9 +145,24 @@ struct Input {
     /// Tag filter (list)
     tag: Option<String>,
     /// Conversation ID; bypasses semantic deduplication (store)
-    conversation_id: Option<String>,
+    conversation_id: Option<ConversationId>,
     /// Agent ID added as an agent:<id> tag (store)
-    agent_id: Option<String>,
+    agent_id: Option<AgentId>,
+}
+
+rho::id_type! {
+    /// A memory's id: the SHA-256 of its content, in hex.
+    MemoryHash
+}
+
+rho::id_type! {
+    /// Groups memories from one conversation (`store`).
+    ConversationId
+}
+
+rho::id_type! {
+    /// The agent a memory came from, kept as an `agent:<id>` tag.
+    AgentId
 }
 
 struct MemoryTool(Arc<Inner>);
@@ -155,7 +170,7 @@ struct MemoryTool(Arc<Inner>);
 impl Tool for MemoryTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Memory".into(),
+            name: ToolName::from_static("Memory"),
             description: format!(
                 "Search, store, list, get, update, or delete persistent memories, shared by all sessions. \
                  Search is semantic (embeddings): it matches by meaning, so the query need not share words with the memory. Output is cut at {}KB.\n\
@@ -176,7 +191,7 @@ impl Tool for MemoryTool {
 }
 
 struct Mem {
-    hash: String,
+    hash: MemoryHash,
     content: String,
     tags: Option<String>,
     memory_type: Option<String>,
@@ -248,7 +263,7 @@ pub fn open(path: &Path, schema: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-fn get(c: &Connection, hash: &str) -> Result<Mem> {
+fn get(c: &Connection, hash: &MemoryHash) -> Result<Mem> {
     let sql = format!("SELECT {COLUMNS} FROM memories WHERE hash = ?1");
     c.query_row(&sql, [hash], Mem::read)
         .optional()?
@@ -270,8 +285,13 @@ impl Inner {
             _ => None,
         };
         let hash = match i.action {
-            Action::Get | Action::Update | Action::Delete => need(&i.hash, "hash")?,
-            _ => String::new(),
+            Action::Get | Action::Update | Action::Delete => i
+                .hash
+                .clone()
+                .filter(|h| !h.as_str().is_empty())
+                .with_context(|| format!("hash is required for {action}"))?,
+            // Unused by the other actions.
+            _ => MemoryHash::from_static(""),
         };
 
         let mut conn = self.conn.lock().unwrap();
@@ -311,12 +331,17 @@ impl Inner {
             Action::Store => {
                 let content = i.content.as_deref().unwrap_or_default();
                 let embedding = blob(&embedding.unwrap());
-                let hash: String = Sha256::digest(content)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
-                let conversation = nonempty(&i.conversation_id);
-                let duplicate: Option<String> = c
+                let hash = MemoryHash::new(
+                    Sha256::digest(content)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>(),
+                );
+                let conversation = i
+                    .conversation_id
+                    .as_ref()
+                    .filter(|c| !c.as_str().is_empty());
+                let duplicate: Option<MemoryHash> = c
                     .query_row(
                         "SELECT hash FROM memories WHERE hash = ?1
                             OR (?2 AND 1 - vec_distance_cosine(embedding, ?3) >= ?4)
@@ -337,7 +362,7 @@ impl Inner {
                     ));
                 }
                 let mut tags = i.tags.clone().unwrap_or_default();
-                if let Some(agent) = nonempty(&i.agent_id) {
+                if let Some(agent) = i.agent_id.as_ref().filter(|a| !a.as_str().is_empty()) {
                     let tag = format!("agent:{agent}");
                     if !tags.contains(&tag) {
                         tags.push(tag);
@@ -345,7 +370,7 @@ impl Inner {
                 }
                 let mut metadata = i.metadata.clone().unwrap_or_default();
                 if let Some(conversation) = conversation {
-                    metadata.insert("conversation_id".into(), conversation.into());
+                    metadata.insert("conversation_id".into(), conversation.as_str().into());
                 }
                 let now = now_ms();
                 c.execute(
@@ -441,6 +466,7 @@ impl Inner {
 mod tests {
     use super::*;
     use rho::extension::NoFrontend;
+    use rho::store::SessionId;
     use serde_json::json;
 
     /// Letter counts: texts sharing letters are similar.
@@ -457,7 +483,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::new(dir.path().join("memory.db"), Box::new(letters));
         let tool = MemoryTool(memory.0.clone());
-        let ctx = Context::new("s", "/tmp", Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
         let run = async |v: Value| tool.run(v, &ctx).await.map(|o| o.output);
 
         let out = run(json!({"action": "store", "content": "aaa bbb", "tags": ["x"], "memoryType": "note", "agentId": "rho"})).await.unwrap();

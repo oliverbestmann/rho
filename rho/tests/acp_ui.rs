@@ -16,9 +16,12 @@ use agent_client_protocol::{Client, ConnectionTo, Responder};
 use anyhow::Result;
 use futures::stream::BoxStream;
 use rho::agent::Agent;
-use rho::extension::{Choice, Context, Field, FieldKind, Form, FormReply, ToolOutput};
+use rho::extension::{
+    Choice, ChoiceValue, Context, Field, FieldKey, FieldKind, Form, FormReply, ToolOutput,
+};
 use rho::provider::{
-    Content, Event, ModelInfo, Price, Provider, Request, StopReason, ToolSpec, Usage,
+    Content, Event, ModelId, ModelInfo, ModelSpec, Price, Provider, ProviderName, Request,
+    StopReason, ToolCallId, ToolName, ToolSpec, Usage,
 };
 use rho::tools::Tool;
 use serde_json::{Value, json};
@@ -36,7 +39,7 @@ impl Provider for Models {
 
     fn models(&self) -> Vec<ModelInfo> {
         let model = |id: &str, name: &str, window, input| ModelInfo {
-            id: id.into(),
+            id: ModelId::new(id),
             name: name.into(),
             context_window: window,
             price: Some(Price {
@@ -56,9 +59,8 @@ impl Provider for Models {
 
 fn agent_with(scripted: Arc<Scripted>, tools: Vec<Arc<dyn rho::tools::DynTool>>) -> Arc<Agent> {
     let provider = Arc::new(Models(scripted));
-    let mut agent = Agent::new(provider.clone(), "big", tools);
-    agent.model_spec = Some("fake/big".into());
-    agent.registry.register("fake", provider);
+    let mut agent = Agent::new(provider.clone(), ModelSpec::new("fake", "big"), tools);
+    agent.registry.register(ProviderName::new("fake"), provider);
     Arc::new(agent)
 }
 
@@ -179,7 +181,7 @@ async fn model_and_thinking_are_session_config_options() {
     // The run used the picked model and thinking level.
     let requests = scripted.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].model, "small");
+    assert_eq!(requests[0].model.as_str(), "small");
     assert_eq!(requests[0].thinking, rho::provider::Thinking::Low);
 
     let updates = updates.lock().unwrap();
@@ -209,8 +211,8 @@ fn bash_run() -> Vec<Vec<Event>> {
     vec![
         vec![
             Event::Block(Content::ToolUse {
-                id: "t1".into(),
-                name: "Bash".into(),
+                id: ToolCallId::new("t1"),
+                name: ToolName::new("Bash"),
                 input: json!({"command": "echo hi"}),
             }),
             Event::Done(StopReason::ToolUse),
@@ -311,7 +313,7 @@ struct Ask;
 impl Tool for Ask {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "Ask".into(),
+            name: ToolName::new("Ask"),
             description: "ask".into(),
             input_schema: json!({"type": "object"}),
         }
@@ -322,12 +324,12 @@ impl Tool for Ask {
             message: "Pick".into(),
             fields: vec![
                 Field {
-                    key: "db".into(),
+                    key: FieldKey::new("db"),
                     title: "Which db?".into(),
                     description: None,
                     kind: FieldKind::Choice {
                         options: vec![Choice {
-                            value: "pg".into(),
+                            value: ChoiceValue::new("pg"),
                             title: "Postgres".into(),
                             description: Some("SQL".into()),
                         }],
@@ -336,7 +338,7 @@ impl Tool for Ask {
                     required: true,
                 },
                 Field {
-                    key: "note".into(),
+                    key: FieldKey::new("note"),
                     title: "Note".into(),
                     description: None,
                     kind: FieldKind::Text,
@@ -358,8 +360,8 @@ async fn ask_with(form_support: bool, reply: Option<(&'static str, &'static str)
     let scripted = Scripted::new(vec![
         vec![
             Event::Block(Content::ToolUse {
-                id: "a1".into(),
-                name: "Ask".into(),
+                id: ToolCallId::new("a1"),
+                name: ToolName::new("Ask"),
                 input: json!({}),
             }),
             Event::Done(StopReason::ToolUse),
@@ -510,8 +512,8 @@ async fn read_image_sends_the_image_to_model_and_client() {
     let scripted = Scripted::new(vec![
         vec![
             Event::Block(Content::ToolUse {
-                id: "i1".into(),
-                name: "ReadImage".into(),
+                id: ToolCallId::new("i1"),
+                name: ToolName::new("ReadImage"),
                 input: json!({"path": "pic.png"}),
             }),
             Event::Done(StopReason::ToolUse),

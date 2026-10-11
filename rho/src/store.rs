@@ -17,7 +17,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
-use crate::provider::{Content, Message, Role, Thinking, Usage};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+
+use crate::extension::ProfileId;
+use crate::provider::{Content, Message, ModelSpec, Role, Thinking, Usage};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
 const MIGRATIONS: &[&str] = &[
@@ -90,12 +93,11 @@ pub struct Store {
 /// A stored session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionInfo {
-    pub id: String,
+    pub id: SessionId,
     pub cwd: PathBuf,
     pub additional_dirs: Vec<PathBuf>,
     pub title: Option<String>,
-    /// "provider/model".
-    pub model: String,
+    pub model: ModelSpec,
     pub thinking: Thinking,
     pub usage: Usage,
     /// Usage of the latest request.
@@ -103,8 +105,7 @@ pub struct SessionInfo {
     pub cost: f64,
     /// Number of compactions.
     pub epoch: i64,
-    /// `Profile::id`.
-    pub profile: String,
+    pub profile: ProfileId,
     /// Unix milliseconds.
     pub created_at: i64,
     pub updated_at: i64,
@@ -130,16 +131,16 @@ pub struct StoredMessage {
 
 /// What `Store::save_state` writes besides messages.
 pub(crate) struct State {
-    pub id: String,
+    pub id: SessionId,
     pub cwd: PathBuf,
     pub additional_dirs: Vec<PathBuf>,
     pub title: Option<String>,
-    pub model: String,
+    pub model: ModelSpec,
     pub thinking: Thinking,
     pub usage: Usage,
     pub last_usage: Usage,
     pub cost: f64,
-    pub profile: String,
+    pub profile: ProfileId,
 }
 
 /// A stored session ready to continue: its info, the `seq` of the first
@@ -157,8 +158,19 @@ pub fn default_path() -> PathBuf {
         .unwrap_or_else(|| crate::prompt::config_dir().join("sessions.db"))
 }
 
-/// A UUIDv7: unique across processes, sorts by creation time.
-pub fn new_session_id() -> String {
+crate::id_type! {
+    /// A session's id; ACP clients and the store address sessions by it.
+    pub SessionId
+}
+
+impl SessionId {
+    /// A UUIDv7: unique across processes, sorts by creation time.
+    pub fn generate() -> Self {
+        Self::new(new_session_id())
+    }
+}
+
+fn new_session_id() -> String {
     let mut b = [0u8; 16];
     getrandom::fill(&mut b).expect("random session id");
     b[..6].copy_from_slice(&(now_ms() as u64).to_be_bytes()[2..]);
@@ -251,8 +263,8 @@ impl Store {
         tokio::task::spawn_blocking(move || f(&mut conn.lock().unwrap())).await?
     }
 
-    pub async fn session(&self, id: &str) -> Result<Option<SessionInfo>> {
-        let id = id.to_string();
+    pub async fn session(&self, id: &SessionId) -> Result<Option<SessionInfo>> {
+        let id = id.clone();
         self.call(move |c| {
             let sql = format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1");
             c.query_row(&sql, [&id], read_info).optional()?.transpose()
@@ -298,13 +310,13 @@ impl Store {
     }
 
     /// The session's current history (messages since the last compaction).
-    pub async fn history(&self, id: &str) -> Result<Vec<Message>> {
+    pub async fn history(&self, id: &SessionId) -> Result<Vec<Message>> {
         Ok(self.load(id).await?.map(|l| l.history).unwrap_or_default())
     }
 
     /// All messages of the session, older epochs included, by `seq`.
-    pub async fn messages(&self, id: &str) -> Result<Vec<StoredMessage>> {
-        let id = id.to_string();
+    pub async fn messages(&self, id: &SessionId) -> Result<Vec<StoredMessage>> {
+        let id = id.clone();
         self.call(move |c| {
             let mut stmt = c.prepare(
                 "SELECT seq, epoch, role, content, created_at FROM messages
@@ -332,8 +344,8 @@ impl Store {
         .await
     }
 
-    pub(crate) async fn load(&self, id: &str) -> Result<Option<Loaded>> {
-        let id = id.to_string();
+    pub(crate) async fn load(&self, id: &SessionId) -> Result<Option<Loaded>> {
+        let id = id.clone();
         self.call(move |c| {
             let tx = c.transaction()?;
             let sql = format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1");
@@ -438,12 +450,12 @@ impl Store {
     /// Replaces the session's messages from `seq` on with `messages`.
     pub(crate) async fn save_messages(
         &self,
-        id: &str,
+        id: &SessionId,
         epoch: i64,
         seq: i64,
         messages: Vec<Message>,
     ) -> Result<()> {
-        let id = id.to_string();
+        let id = id.clone();
         self.call(move |c| {
             let now = now_ms();
             let tx = c.transaction()?;
@@ -483,8 +495,8 @@ impl Store {
 
     /// Starts a new epoch (after compaction). Returns it and the `seq` its
     /// first message gets.
-    pub(crate) async fn next_epoch(&self, id: &str) -> Result<(i64, i64)> {
-        let id = id.to_string();
+    pub(crate) async fn next_epoch(&self, id: &SessionId) -> Result<(i64, i64)> {
+        let id = id.clone();
         self.call(move |c| {
             let tx = c.transaction()?;
             let epoch = tx.query_row(
@@ -504,8 +516,8 @@ impl Store {
     }
 
     /// Sets the title of a stored session; no-op if it is not stored yet.
-    pub(crate) async fn set_title(&self, id: &str, title: &str) -> Result<()> {
-        let (id, title) = (id.to_string(), title.to_string());
+    pub(crate) async fn set_title(&self, id: &SessionId, title: &str) -> Result<()> {
+        let (id, title) = (id.clone(), title.to_string());
         self.call(move |c| {
             c.execute(
                 "UPDATE sessions SET title = ?2 WHERE id = ?1",
@@ -514,6 +526,22 @@ impl Store {
             Ok(())
         })
         .await
+    }
+}
+
+/// Stored as "provider/model".
+impl FromSql for ModelSpec {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|e: anyhow::Error| FromSqlError::Other(e.into()))
+    }
+}
+
+impl ToSql for ModelSpec {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
     }
 }
 
@@ -583,11 +611,11 @@ mod tests {
 
     fn state(id: &str, cwd: &str) -> State {
         State {
-            id: id.into(),
+            id: SessionId::new(id),
             cwd: cwd.into(),
             additional_dirs: vec!["/extra".into()],
             title: None,
-            model: "p/m".into(),
+            model: ModelSpec::new("p", "m"),
             thinking: Thinking::Low,
             usage: Usage {
                 input: 1,
@@ -602,7 +630,7 @@ mod tests {
                 cache_write: 8,
             },
             cost: 0.5,
-            profile: "plan".into(),
+            profile: ProfileId::new("plan"),
         }
     }
 
@@ -612,13 +640,16 @@ mod tests {
         store.save_state(state("s", "/w")).await.unwrap();
         let history = vec![msg(Role::User, "a"), msg(Role::Assistant, "b")];
         store
-            .save_messages("s", 0, 0, history.clone())
+            .save_messages(&SessionId::new("s"), 0, 0, history.clone())
             .await
             .unwrap();
         // Rewrite the last message and add one.
         let more = vec![msg(Role::Assistant, "b2"), msg(Role::User, "c")];
-        store.save_messages("s", 0, 1, more).await.unwrap();
-        let loaded = store.load("s").await.unwrap().unwrap();
+        store
+            .save_messages(&SessionId::new("s"), 0, 1, more)
+            .await
+            .unwrap();
+        let loaded = store.load(&SessionId::new("s")).await.unwrap().unwrap();
         assert_eq!(loaded.base, 0);
         assert_eq!(loaded.history[1], msg(Role::Assistant, "b2"));
         assert_eq!(loaded.history.len(), 3);
@@ -626,27 +657,39 @@ mod tests {
         assert_eq!(loaded.info.additional_dirs, [PathBuf::from("/extra")]);
         assert_eq!(loaded.info.usage.cache_write, 4);
         assert_eq!(loaded.info.last_usage.cache_write, 8);
-        assert_eq!(loaded.info.profile, "plan");
+        assert_eq!(loaded.info.profile, ProfileId::new("plan"));
 
-        assert_eq!(store.next_epoch("s").await.unwrap(), (1, 3));
+        assert_eq!(
+            store.next_epoch(&SessionId::new("s")).await.unwrap(),
+            (1, 3)
+        );
         store
-            .save_messages("s", 1, 3, vec![msg(Role::User, "summary")])
+            .save_messages(&SessionId::new("s"), 1, 3, vec![msg(Role::User, "summary")])
             .await
             .unwrap();
-        let loaded = store.load("s").await.unwrap().unwrap();
+        let loaded = store.load(&SessionId::new("s")).await.unwrap().unwrap();
         assert_eq!((loaded.base, loaded.info.epoch), (3, 1));
         assert_eq!(loaded.history, [msg(Role::User, "summary")]);
-        let all = store.messages("s").await.unwrap();
+        let all = store.messages(&SessionId::new("s")).await.unwrap();
         let seqs: Vec<_> = all.iter().map(|m| (m.seq, m.epoch)).collect();
         assert_eq!(seqs, [(0, 0), (1, 0), (2, 0), (3, 1)]);
         assert_eq!(all[1].message, msg(Role::Assistant, "b2"));
 
-        store.set_title("s", "Title").await.unwrap();
+        store
+            .set_title(&SessionId::new("s"), "Title")
+            .await
+            .unwrap();
         // A later save without a title keeps it.
         store.save_state(state("s", "/w")).await.unwrap();
-        let info = store.session("s").await.unwrap().unwrap();
+        let info = store.session(&SessionId::new("s")).await.unwrap().unwrap();
         assert_eq!(info.title.as_deref(), Some("Title"));
-        assert!(store.session("nope").await.unwrap().is_none());
+        assert!(
+            store
+                .session(&SessionId::new("nope"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -654,7 +697,7 @@ mod tests {
         let store = Store::memory().unwrap();
         // No session row: foreign key.
         let err = store
-            .save_messages("ghost", 0, 0, vec![msg(Role::User, "x")])
+            .save_messages(&SessionId::new("ghost"), 0, 0, vec![msg(Role::User, "x")])
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("FOREIGN KEY"), "{err:#}");
@@ -685,7 +728,12 @@ mod tests {
             store.save_state(state(id, cwd)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        let ids = |p: &Page| p.sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        let ids = |p: &Page| {
+            p.sessions
+                .iter()
+                .map(|s| s.id.to_string())
+                .collect::<Vec<_>>()
+        };
         let page = store.list(Some(Path::new("/w")), None, 2).await.unwrap();
         assert_eq!(ids(&page), ["d", "c"]);
         let page = store
@@ -714,6 +762,10 @@ mod tests {
         rt.block_on(store.save_state(state("s", "/w"))).unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
-        assert!(rt.block_on(store.session("s")).unwrap().is_some());
+        assert!(
+            rt.block_on(store.session(&SessionId::new("s")))
+                .unwrap()
+                .is_some()
+        );
     }
 }

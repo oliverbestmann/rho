@@ -23,11 +23,17 @@ mod tests {
 
     use super::*;
     use rho::extension::{Context, NoFrontend, Profile};
+    use rho::store::SessionId;
 
     #[tokio::test]
     async fn appends_the_skill_to_the_system_prompt() {
         let mut setup = SessionSetup {
-            ctx: Context::new("s", "/tmp", Arc::new(NoFrontend), Default::default()),
+            ctx: Context::new(
+                SessionId::new("s"),
+                "/tmp",
+                Arc::new(NoFrontend),
+                Default::default(),
+            ),
             tools: vec![],
             system: "base".into(),
             commands: vec![],

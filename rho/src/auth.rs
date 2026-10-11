@@ -17,7 +17,14 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+use crate::provider::ProviderName;
+
+crate::id_type! {
+    /// An OAuth app's public client id.
+    pub ClientId
+}
+
+pub const CLIENT_ID: ClientId = ClientId::from_static("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
 pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 pub const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
@@ -26,6 +33,28 @@ pub const SCOPES: &str = "org:create_api_key user:profile user:inference user:se
 /// pi's `auth.json`: credentials by provider key (`anthropic`,
 /// `github-copilot`); other entries are kept as they are.
 type AuthFile = Map<String, Value>;
+
+/// A token or key. `Debug` hides it, so it does not end up in logs or
+/// error messages; `expose` makes each use visible.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CredentialKind {
@@ -37,8 +66,8 @@ pub enum CredentialKind {
 pub struct Credentials {
     #[serde(rename = "type")]
     pub kind: CredentialKind,
-    pub access: String,
-    pub refresh: String,
+    pub access: Secret,
+    pub refresh: Secret,
     /// Expiry as unix millis (already reduced by a safety margin).
     pub expires: i64,
 }
@@ -50,7 +79,7 @@ impl Credentials {
 }
 
 pub struct Pkce {
-    pub verifier: String,
+    pub verifier: Secret,
     pub challenge: String,
 }
 
@@ -64,7 +93,7 @@ impl Pkce {
     pub fn from_verifier(verifier: String) -> Self {
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         Self {
-            verifier,
+            verifier: Secret(verifier),
             challenge,
         }
     }
@@ -76,13 +105,13 @@ impl Pkce {
             AUTHORIZE_URL,
             [
                 ("code", "true"),
-                ("client_id", CLIENT_ID),
+                ("client_id", CLIENT_ID.as_str()),
                 ("response_type", "code"),
                 ("redirect_uri", REDIRECT_URI),
                 ("scope", SCOPES),
                 ("code_challenge", &self.challenge),
                 ("code_challenge_method", "S256"),
-                ("state", &self.verifier),
+                ("state", self.verifier.expose()),
             ],
         )
         .expect("static url is valid")
@@ -118,29 +147,31 @@ pub async fn exchange_code(
     if code.is_empty() {
         bail!("missing authorization code");
     }
-    if state.as_ref().is_some_and(|s| *s != pkce.verifier) {
+    let verifier = pkce.verifier.expose();
+    if state.as_ref().is_some_and(|s| s != verifier) {
         bail!("OAuth state mismatch");
     }
     token_request(
         http,
         Grant::AuthorizationCode {
             code: &code,
-            state: state.as_deref().unwrap_or(&pkce.verifier),
+            state: state.as_deref().unwrap_or(verifier),
             redirect_uri: REDIRECT_URI,
-            code_verifier: &pkce.verifier,
+            code_verifier: verifier,
         },
     )
     .await
 }
 
-pub async fn refresh(http: &reqwest::Client, refresh_token: &str) -> Result<Credentials> {
+pub async fn refresh(http: &reqwest::Client, refresh_token: &Secret) -> Result<Credentials> {
+    let refresh_token = refresh_token.expose();
     token_request(http, Grant::RefreshToken { refresh_token }).await
 }
 
 /// Body of a token request.
 #[derive(Serialize)]
 struct TokenRequest<'a> {
-    client_id: &'a str,
+    client_id: &'a ClientId,
     #[serde(flatten)]
     grant: Grant<'a>,
 }
@@ -162,13 +193,13 @@ enum Grant<'a> {
 async fn token_request(http: &reqwest::Client, grant: Grant<'_>) -> Result<Credentials> {
     #[derive(Deserialize)]
     struct TokenResponse {
-        access_token: String,
-        refresh_token: String,
+        access_token: Secret,
+        refresh_token: Secret,
         expires_in: i64,
     }
 
     let body = TokenRequest {
-        client_id: CLIENT_ID,
+        client_id: &CLIENT_ID,
         grant,
     };
     let resp = http.post(TOKEN_URL).json(&body).send().await?;
@@ -192,12 +223,12 @@ pub struct AuthStore {
     path: PathBuf,
     http: reqwest::Client,
     /// Entry in the file, e.g. `anthropic`; also the `rho login` argument.
-    key: &'static str,
+    key: ProviderName,
     lock: Mutex<()>,
 }
 
 impl AuthStore {
-    pub fn new(path: PathBuf, http: reqwest::Client, key: &'static str) -> Self {
+    pub fn new(path: PathBuf, http: reqwest::Client, key: ProviderName) -> Self {
         Self {
             path,
             http,
@@ -219,7 +250,7 @@ impl AuthStore {
     }
 
     /// Returns a valid Anthropic access token, refreshing and persisting it if expired.
-    pub async fn access_token(&self) -> Result<String> {
+    pub async fn access_token(&self) -> Result<Secret> {
         let creds = self
             .fresh(async |http, creds| refresh(http, &creds.refresh).await)
             .await?;
@@ -232,7 +263,7 @@ impl AuthStore {
         refresh: impl AsyncFn(&reqwest::Client, &Credentials) -> Result<Credentials>,
     ) -> Result<Credentials> {
         let _guard = self.lock.lock().await;
-        let key = self.key;
+        let key = &self.key;
         let creds = self.load()?.with_context(|| {
             format!(
                 "not logged in (no {key} credentials in {}); run `rho login {key}`",
@@ -250,7 +281,7 @@ impl AuthStore {
     }
 
     pub fn load(&self) -> Result<Option<Credentials>> {
-        let Some(entry) = self.read_file()?.remove(self.key) else {
+        let Some(entry) = self.read_file()?.remove(self.key.as_str()) else {
             return Ok(None);
         };
         let creds = serde_json::from_value(entry)
@@ -260,7 +291,7 @@ impl AuthStore {
 
     pub fn save(&self, creds: &Credentials) -> Result<()> {
         let mut file = self.read_file()?;
-        file.insert(self.key.into(), serde_json::to_value(creds)?);
+        file.insert(self.key.to_string(), serde_json::to_value(creds)?);
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -302,6 +333,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anthropic::NAME as ANTHROPIC;
 
     #[test]
     fn pkce_challenge_is_s256() {
@@ -313,13 +345,14 @@ mod tests {
     #[test]
     fn authorize_url_has_required_params() {
         let p = Pkce::generate().unwrap();
+        assert_eq!(format!("{:?}", p.verifier), "Secret(***)");
         let url = reqwest::Url::parse(&p.authorize_url()).unwrap();
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(q["client_id"], CLIENT_ID);
+        assert_eq!(q["client_id"], CLIENT_ID.as_str());
         assert_eq!(q["redirect_uri"], REDIRECT_URI);
         assert_eq!(q["code_challenge"], p.challenge);
         assert_eq!(q["code_challenge_method"], "S256");
-        assert_eq!(q["state"], p.verifier);
+        assert_eq!(q["state"], p.verifier.expose());
         assert_eq!(q["code"], "true");
         assert!(q["scope"].contains("user:inference"));
     }
@@ -342,18 +375,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
         std::fs::write(&path, r#"{"openai":{"key":"x"}}"#).unwrap();
-        let store = AuthStore::new(path.clone(), reqwest::Client::new(), "anthropic");
+        let store = AuthStore::new(path.clone(), reqwest::Client::new(), ANTHROPIC);
 
         let creds = Credentials {
             kind: CredentialKind::OAuth,
-            access: "sk-ant-oat-test".into(),
-            refresh: "r".into(),
+            access: Secret::new("sk-ant-oat-test"),
+            refresh: Secret::new("r"),
             expires: now_ms() + 60_000,
         };
         store.save(&creds).unwrap();
 
         assert_eq!(store.load().unwrap(), Some(creds));
-        assert_eq!(store.access_token().await.unwrap(), "sk-ant-oat-test");
+        assert_eq!(
+            store.access_token().await.unwrap(),
+            Secret::new("sk-ant-oat-test")
+        );
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(raw["openai"]["key"], "x");
         use std::os::unix::fs::PermissionsExt;
@@ -369,7 +405,7 @@ mod tests {
         let store = AuthStore::new(
             dir.path().join("none.json"),
             reqwest::Client::new(),
-            "anthropic",
+            ANTHROPIC,
         );
         let err = store.access_token().await.unwrap_err().to_string();
         assert!(err.contains("rho login anthropic"), "{err}");

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
-use rho::provider::ToolSpec;
+use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -48,7 +48,7 @@ impl Tool for Fetch {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "FetchUrl".into(),
+            name: ToolName::from_static("FetchUrl"),
             description: "Fetch a URL and return its content as markdown, with HTML markup converted to readable text.".into(),
             input_schema: input_schema::<Input>(),
         }
@@ -109,6 +109,7 @@ mod tests {
     use super::*;
     use axum::http::header;
     use rho::extension::NoFrontend;
+    use rho::store::SessionId;
     use serde_json::json;
 
     #[test]
@@ -140,7 +141,12 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let ctx = Context::new("s", "/tmp", Arc::new(NoFrontend), Default::default());
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
         let fetch = Fetch::default();
         let get = |path: &str, extra: Value| {
             let mut input = json!({ "url": format!("{base}{path}") });

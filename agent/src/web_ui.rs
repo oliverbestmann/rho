@@ -37,10 +37,11 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rho::extension::{
-    Context, Decision, Extension, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
+    CommandName, Context, Decision, Extension, SessionSetup, Settle, SlashCommand, ToolCall,
+    ToolOutput, TurnEnd,
 };
-use rho::provider::{Content, Message, Request as ModelRequest, Role};
-use rho::store::{SessionInfo, Store};
+use rho::provider::{Content, Message, Request as ModelRequest, Role, ToolCallId};
+use rho::store::{SessionId, SessionInfo, Store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -77,7 +78,7 @@ pub struct WebUi {
 struct Hub {
     /// Required on API requests from other machines; without one they are refused.
     password: Option<String>,
-    sessions: Mutex<BTreeMap<String, View>>,
+    sessions: Mutex<BTreeMap<SessionId, View>>,
     /// The databases of the sessions seen so far, for the stored ones.
     stores: Mutex<Vec<Store>>,
 }
@@ -194,7 +195,7 @@ impl Timeline {
 }
 
 impl View {
-    fn summary(&self, id: &str) -> Value {
+    fn summary(&self, id: &SessionId) -> Value {
         json!({
             "id": id,
             "title": self.ctx.title(),
@@ -211,7 +212,7 @@ impl View {
 
 /// A session that is not open in this process.
 fn stored_summary(s: &SessionInfo) -> Value {
-    let mut profile = s.profile.clone();
+    let mut profile = s.profile.to_string();
     if let Some(first) = profile.get_mut(..1) {
         first.make_ascii_uppercase();
     }
@@ -228,7 +229,7 @@ fn stored_summary(s: &SessionInfo) -> Value {
     })
 }
 
-fn tool_end(id: &str, output: &str, is_error: bool) -> Value {
+fn tool_end(id: &ToolCallId, output: &str, is_error: bool) -> Value {
     let output = match output.char_indices().nth(MAX_OUTPUT) {
         Some((end, _)) => format!("{}\n[… cut for the web view]", &output[..end]),
         None => output.to_string(),
@@ -366,7 +367,7 @@ impl WebUi {
     }
 
     /// The link for `/web`.
-    fn link(&self, session_id: &str) -> String {
+    fn link(&self, session_id: &SessionId) -> String {
         let addr = match self.serve() {
             Ok(addr) => *addr,
             Err(e) => return format!("No web view: {e}"),
@@ -386,11 +387,13 @@ impl WebUi {
     }
 }
 
+const WEB: CommandName = CommandName::from_static("web");
+
 impl Extension for WebUi {
     async fn session_start(&self, session: &mut SessionSetup) {
         let _ = self.serve();
         session.commands.push(SlashCommand {
-            name: "web".into(),
+            name: WEB,
             description: "Show the link to the web view".into(),
             hint: None,
         });
@@ -419,7 +422,7 @@ impl Extension for WebUi {
             .sessions
             .lock()
             .unwrap()
-            .insert(ctx.session_id().into(), view);
+            .insert(ctx.session_id().clone(), view);
     }
 
     fn session_end(&self, ctx: &Context) {
@@ -452,7 +455,7 @@ impl Extension for WebUi {
         self.hub.with(ctx, |v| {
             let mut end = tool_end(&call.id, &result.output, result.is_error);
             // Calls blocked before the hooks ran have no start event.
-            end["name"] = call.name.clone().into();
+            end["name"] = call.name.to_string().into();
             end["input"] = call.input.clone();
             v.log.push(Slot::Tool, end);
         });
@@ -475,8 +478,8 @@ impl Extension for WebUi {
         None
     }
 
-    async fn command(&self, ctx: &Context, name: &str, _args: &str) -> Option<String> {
-        (name == "web").then(|| self.link(ctx.session_id()))
+    async fn command(&self, ctx: &Context, name: &CommandName, _args: &str) -> Option<String> {
+        (*name == WEB).then(|| self.link(ctx.session_id()))
     }
 }
 
@@ -552,7 +555,7 @@ struct Since {
 
 async fn events(
     State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
+    Path(id): Path<SessionId>,
     Query(q): Query<Since>,
 ) -> Response {
     let open = {
@@ -581,7 +584,7 @@ struct Send {
 
 async fn send(
     State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
+    Path(id): Path<SessionId>,
     Json(body): Json<Send>,
 ) -> Response {
     let text = body.text.trim().to_string();
@@ -613,7 +616,8 @@ mod tests {
     use futures::stream::{self, BoxStream, StreamExt};
     use rho::agent::{Agent, AgentEvent};
     use rho::extension::{Frontend, NoFrontend};
-    use rho::provider::{Event, Provider, StopReason};
+    use rho::provider::ToolName;
+    use rho::provider::{Event, ModelSpec, Provider, StopReason};
 
     /// Replays one scripted response per request.
     struct Scripted(Mutex<Vec<Vec<Event>>>);
@@ -677,8 +681,8 @@ mod tests {
             vec![
                 Event::TextDelta("Let me look.".into()),
                 Event::Block(Content::ToolUse {
-                    id: "t1".into(),
-                    name: "Bash".into(),
+                    id: ToolCallId::new("t1"),
+                    name: ToolName::new("Bash"),
                     input: json!({"command": "echo hi"}),
                 }),
                 Event::Done(StopReason::ToolUse),
@@ -693,12 +697,12 @@ mod tests {
             ],
         ])));
         let web = Arc::new(WebUi::listen("127.0.0.1:0"));
-        let mut agent = Agent::new(provider, "m", rho::tools::builtin());
+        let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), rho::tools::builtin());
         agent.extensions.push(web.clone());
         let dir = tempfile::tempdir().unwrap();
         let notices = Arc::new(Notices::default());
         let mut session = agent
-            .start_session("s1", dir.path(), vec![], notices.clone())
+            .start_session(SessionId::new("s1"), dir.path(), vec![], notices.clone())
             .await
             .unwrap();
         agent
@@ -785,8 +789,8 @@ mod tests {
         let provider = Arc::new(Scripted(Mutex::new(vec![
             vec![
                 Event::Block(Content::ToolUse {
-                    id: "t1".into(),
-                    name: "Bash".into(),
+                    id: ToolCallId::new("t1"),
+                    name: ToolName::new("Bash"),
                     input: json!({"command": "false"}),
                 }),
                 Event::Done(StopReason::ToolUse),
@@ -799,11 +803,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("sessions.db");
         let web = Arc::new(WebUi::listen("127.0.0.1:0"));
-        let mut agent = Agent::new(provider, "m", rho::tools::builtin());
+        let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), rho::tools::builtin());
         agent.extensions.push(web.clone());
         agent.sessions_db = Some(Arc::new(move |_| db.clone()));
         let mut session = agent
-            .start_session("s1", dir.path(), vec![], Arc::new(NoFrontend))
+            .start_session(
+                SessionId::new("s1"),
+                dir.path(),
+                vec![],
+                Arc::new(NoFrontend),
+            )
             .await
             .unwrap();
         agent
@@ -812,7 +821,12 @@ mod tests {
             .unwrap();
         drop(session);
         let open = agent
-            .start_session("s2", dir.path(), vec![], Arc::new(NoFrontend))
+            .start_session(
+                SessionId::new("s2"),
+                dir.path(),
+                vec![],
+                Arc::new(NoFrontend),
+            )
             .await
             .unwrap();
 
@@ -847,7 +861,12 @@ mod tests {
 
         // Loaded again: the same history, now live.
         let _session = agent
-            .resume_session("s1", dir.path(), vec![], Arc::new(NoFrontend))
+            .resume_session(
+                &SessionId::new("s1"),
+                dir.path(),
+                vec![],
+                Arc::new(NoFrontend),
+            )
             .await
             .unwrap();
         let s = get_json(&http, format!("{base}/api/sessions/s1")).await;
@@ -906,7 +925,10 @@ mod tests {
         std::fs::write(&file, r#"{"listen": "127.0.0.1:0", "password": "pw"}"#).unwrap();
         let web = WebUi::new(Config::load(dir.path()).unwrap());
         assert_eq!(web.hub.password.as_deref(), Some("pw"));
-        assert!(web.link("s").starts_with("Web view: http://127.0.0.1:"));
+        assert!(
+            web.link(&SessionId::new("s"))
+                .starts_with("Web view: http://127.0.0.1:")
+        );
         std::fs::write(&file, r#"{"pasword": "typo"}"#).unwrap();
         assert!(
             Config::load(dir.path())
@@ -918,6 +940,6 @@ mod tests {
     #[test]
     fn can_be_turned_off() {
         let web = WebUi::listen("off");
-        assert!(web.link("s").contains("disabled"));
+        assert!(web.link(&SessionId::new("s")).contains("disabled"));
     }
 }
