@@ -23,14 +23,9 @@ pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 pub const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 pub const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
-/// pi's `auth.json`: our entry plus other providers' entries, kept as they are.
-#[derive(Default, Serialize, Deserialize)]
-struct AuthFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    anthropic: Option<Credentials>,
-    #[serde(flatten)]
-    other: Map<String, Value>,
-}
+/// pi's `auth.json`: credentials by provider key (`anthropic`,
+/// `github-copilot`); other entries are kept as they are.
+type AuthFile = Map<String, Value>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CredentialKind {
@@ -196,14 +191,17 @@ async fn token_request(http: &reqwest::Client, grant: Grant<'_>) -> Result<Crede
 pub struct AuthStore {
     path: PathBuf,
     http: reqwest::Client,
+    /// Entry in the file, e.g. `anthropic`; also the `rho login` argument.
+    key: &'static str,
     lock: Mutex<()>,
 }
 
 impl AuthStore {
-    pub fn new(path: PathBuf, http: reqwest::Client) -> Self {
+    pub fn new(path: PathBuf, http: reqwest::Client, key: &'static str) -> Self {
         Self {
             path,
             http,
+            key,
             lock: Mutex::new(()),
         }
     }
@@ -220,32 +218,49 @@ impl AuthStore {
         &self.path
     }
 
-    /// Returns a valid access token, refreshing and persisting it if expired.
+    /// Returns a valid Anthropic access token, refreshing and persisting it if expired.
     pub async fn access_token(&self) -> Result<String> {
+        let creds = self
+            .fresh(async |http, creds| refresh(http, &creds.refresh).await)
+            .await?;
+        Ok(creds.access)
+    }
+
+    /// Valid credentials; expired ones are replaced by `refresh` and saved.
+    pub async fn fresh(
+        &self,
+        refresh: impl AsyncFn(&reqwest::Client, &Credentials) -> Result<Credentials>,
+    ) -> Result<Credentials> {
         let _guard = self.lock.lock().await;
+        let key = self.key;
         let creds = self.load()?.with_context(|| {
             format!(
-                "not logged in (no credentials in {}); run `rho login`",
+                "not logged in (no {key} credentials in {}); run `rho login {key}`",
                 self.path.display()
             )
         })?;
         if !creds.is_expired() {
-            return Ok(creds.access);
+            return Ok(creds);
         }
-        let fresh = refresh(&self.http, &creds.refresh)
+        let fresh = refresh(&self.http, &creds)
             .await
-            .context("refreshing OAuth token")?;
+            .with_context(|| format!("refreshing {key} token"))?;
         self.save(&fresh)?;
-        Ok(fresh.access)
+        Ok(fresh)
     }
 
     pub fn load(&self) -> Result<Option<Credentials>> {
-        Ok(self.read_file()?.anthropic)
+        let Some(entry) = self.read_file()?.remove(self.key) else {
+            return Ok(None);
+        };
+        let creds = serde_json::from_value(entry)
+            .with_context(|| format!("parsing {} in {}", self.key, self.path.display()))?;
+        Ok(Some(creds))
     }
 
     pub fn save(&self, creds: &Credentials) -> Result<()> {
         let mut file = self.read_file()?;
-        file.anthropic = Some(creds.clone());
+        file.insert(self.key.into(), serde_json::to_value(creds)?);
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -327,7 +342,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
         std::fs::write(&path, r#"{"openai":{"key":"x"}}"#).unwrap();
-        let store = AuthStore::new(path.clone(), reqwest::Client::new());
+        let store = AuthStore::new(path.clone(), reqwest::Client::new(), "anthropic");
 
         let creds = Credentials {
             kind: CredentialKind::OAuth,
@@ -351,8 +366,12 @@ mod tests {
     #[tokio::test]
     async fn missing_credentials_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let store = AuthStore::new(dir.path().join("none.json"), reqwest::Client::new());
+        let store = AuthStore::new(
+            dir.path().join("none.json"),
+            reqwest::Client::new(),
+            "anthropic",
+        );
         let err = store.access_token().await.unwrap_err().to_string();
-        assert!(err.contains("rho login"), "{err}");
+        assert!(err.contains("rho login anthropic"), "{err}");
     }
 }

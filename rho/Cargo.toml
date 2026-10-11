@@ -10,7 +10,7 @@ base64 = "0.23.1"
 futures = "0.3.34"
 getrandom = "0.4.3"
 libc = "0.2"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls", "http2"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "stream", "rustls", "http2"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }

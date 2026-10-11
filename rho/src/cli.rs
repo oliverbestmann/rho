@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::agent::{Agent, AgentEvent, SessionsDb};
 use crate::anthropic::Anthropic;
 use crate::auth::{self, AuthStore, Pkce};
+use crate::copilot::{self, Copilot};
 use crate::extension::{DynExtension, Frontend};
 use crate::provider::{Content, Registry, Thinking, Usage};
 use crate::tools::DynTool;
@@ -13,7 +14,8 @@ const USAGE: &str = "\
 usage:
   rho [options] <prompt...>   one-shot: run the prompt, print the answer
   rho acp [options]           serve the Agent Client Protocol on stdio
-  rho login                   sign in with a Claude Pro/Max subscription
+  rho login [anthropic]       sign in with a Claude Pro/Max subscription
+  rho login github-copilot    sign in with GitHub Copilot (Claude and GPT models)
 
 options:
   -m, --model provider/model                    env RHO_MODEL
@@ -44,7 +46,7 @@ and empty files are ignored";
 /// ```
 pub struct Options {
     /// Providers by name; `-m name/model` picks one. Default: `anthropic`
-    /// (subscription auth from `RHO_AUTH_FILE` / `~/.config/rho/auth.json`).
+    /// and `github-copilot` (auth from `RHO_AUTH_FILE` / `~/.config/rho/auth.json`).
     pub providers: Registry,
     /// Default: `tools::builtin()` (`Read`, `ReadImage`, `Write`, `Edit`,
     /// `Bash`, `RequestAccess`).
@@ -65,9 +67,16 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         let http = reqwest::Client::new();
-        let store = Arc::new(AuthStore::new(AuthStore::default_path(), http.clone()));
+        let store = |key| Arc::new(AuthStore::new(AuthStore::default_path(), http.clone(), key));
         let mut providers = Registry::default();
-        providers.register("anthropic", Arc::new(Anthropic::new(http, store)));
+        providers.register(
+            "anthropic",
+            Arc::new(Anthropic::new(http.clone(), store("anthropic"))),
+        );
+        providers.register(
+            copilot::KEY,
+            Arc::new(Copilot::new(http.clone(), store(copilot::KEY))),
+        );
         Self {
             providers,
             tools: crate::tools::builtin(),
@@ -96,7 +105,11 @@ pub async fn run(options: Options) -> Result<()> {
             eprintln!("{USAGE}");
             Ok(())
         }
-        Some("login") => login().await,
+        Some("login") => match args.get(1).map(String::as_str) {
+            None | Some("anthropic") => login().await,
+            Some(copilot::KEY) => login_copilot().await,
+            Some(other) => bail!("unknown provider {other:?}\n{USAGE}"),
+        },
         Some("acp") => {
             let sessions_db = options.sessions_db.clone();
             let mut agent = make_agent(options, &model, thinking)?;
@@ -219,7 +232,7 @@ async fn one_shot(agent: Agent, prompt: String) -> Result<()> {
 
 async fn login() -> Result<()> {
     let http = &reqwest::Client::new();
-    let store = AuthStore::new(AuthStore::default_path(), http.clone());
+    let store = AuthStore::new(AuthStore::default_path(), http.clone(), "anthropic");
     let pkce = Pkce::generate()?;
     eprintln!(
         "Open this URL, sign in, then paste the code shown by Anthropic:\n\n{}\n",
@@ -231,6 +244,20 @@ async fn login() -> Result<()> {
         .read_line(&mut line)
         .context("reading code")?;
     let creds = auth::exchange_code(http, &line, &pkce).await?;
+    store.save(&creds)?;
+    eprintln!("Saved credentials to {}", store.path().display());
+    Ok(())
+}
+
+async fn login_copilot() -> Result<()> {
+    let http = &reqwest::Client::new();
+    let store = AuthStore::new(AuthStore::default_path(), http.clone(), copilot::KEY);
+    let device = copilot::start_login(http).await?;
+    eprintln!(
+        "Open {} and enter the code {}\nWaiting...",
+        device.verification_uri, device.user_code
+    );
+    let creds = copilot::finish_login(http, &device).await?;
     store.save(&creds)?;
     eprintln!("Saved credentials to {}", store.path().display());
     Ok(())

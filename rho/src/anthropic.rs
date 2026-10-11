@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use futures::stream::{self, BoxStream};
-use futures::{StreamExt, TryStreamExt, future};
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -118,7 +118,7 @@ const MODELS: &[ModelRow] = &[
     ),
 ];
 
-fn price([input, output, cache_read, cache_write]: [f64; 4]) -> Price {
+pub fn price([input, output, cache_read, cache_write]: [f64; 4]) -> Price {
     Price {
         input,
         output,
@@ -169,19 +169,44 @@ impl Anthropic {
     }
 }
 
+/// Events of a streamed response; `send` makes the request, `feed` parses
+/// the body chunks (e.g. `SseParser::feed`).
+pub fn events(
+    send: impl Future<Output = Result<reqwest::Response>> + Send + 'static,
+    mut feed: impl FnMut(&[u8]) -> Vec<Result<Event>> + Send + 'static,
+) -> BoxStream<'static, Result<Event>> {
+    stream::once(send)
+        .map_ok(|resp| resp.bytes_stream().map_err(anyhow::Error::from))
+        .try_flatten()
+        .flat_map(move |chunk| {
+            stream::iter(match chunk {
+                Ok(bytes) => feed(&bytes),
+                Err(e) => vec![Err(e)],
+            })
+        })
+        .boxed()
+}
+
+/// The `data:` payloads of the complete server-sent event lines in `buf`.
+pub fn sse_data(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
+    buf.extend_from_slice(bytes);
+    let mut out = Vec::new();
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let line: Vec<u8> = buf.drain(..=pos).collect();
+        if let Some(data) = String::from_utf8_lossy(&line)
+            .trim_end()
+            .strip_prefix("data:")
+        {
+            out.push(data.trim().to_string());
+        }
+    }
+    out
+}
+
 impl Provider for Anthropic {
     fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>> {
-        stream::once(self.clone().send(request))
-            .map_ok(|resp| resp.bytes_stream().map_err(anyhow::Error::from))
-            .try_flatten()
-            .scan(SseParser::default(), |parser, chunk| {
-                future::ready(Some(match chunk {
-                    Ok(bytes) => parser.feed(&bytes),
-                    Err(e) => vec![Err(e)],
-                }))
-            })
-            .flat_map(stream::iter)
-            .boxed()
+        let mut parser = SseParser::default();
+        events(self.clone().send(request), move |b| parser.feed(b))
     }
 
     fn models(&self) -> Vec<ModelInfo> {
@@ -354,7 +379,12 @@ pub fn build_body<'a>(request: &'a Request, billing: Option<&'a str>) -> Body<'a
         .iter()
         .map(|m: &Message| WireMessage {
             role: m.role,
-            content: m.content.iter().map(|c| Cached::new(c.into())).collect(),
+            content: m
+                .content
+                .iter()
+                .filter(|c| !crate::openai::is_reasoning(c))
+                .map(|c| Cached::new(c.into()))
+                .collect(),
         })
         .collect();
     if let Some(last) = messages.last_mut().filter(|m| m.role == Role::User) {
@@ -563,14 +593,9 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Result<Event>> {
-        self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line);
-            if let Some(data) = line.trim_end().strip_prefix("data:")
-                && let Err(e) = self.handle(data.trim(), &mut out)
-            {
+        for data in sse_data(&mut self.buf, bytes) {
+            if let Err(e) = self.handle(&data, &mut out) {
                 out.push(Err(e));
             }
         }

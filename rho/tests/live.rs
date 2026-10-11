@@ -16,7 +16,7 @@ use rho::provider::{Content, StopReason, Thinking, Usage};
 fn agent() -> Agent {
     let path = std::env::var("RHO_AUTH_FILE").expect("set RHO_AUTH_FILE");
     let http = reqwest::Client::new();
-    let store = Arc::new(AuthStore::new(path.into(), http.clone()));
+    let store = Arc::new(AuthStore::new(path.into(), http.clone(), "anthropic"));
     let model = std::env::var("RHO_MODEL").unwrap_or_else(|_| "claude-sonnet-5-5".into());
     let mut agent = Agent::new(
         Arc::new(Anthropic::new(http, store)),
