@@ -1130,7 +1130,7 @@ impl Shown {
         let command = input["command"].as_str()?;
         Some(match terminal_cwd {
             Some(cwd) if *name == tools::BASH => Self::Terminal {
-                cwd: cwd.into(),
+                cwd: input["cwd"].as_str().map_or(cwd.into(), |d| cwd.join(d)),
                 command: command.into(),
             },
             _ => Self::Text(command_block(command)),

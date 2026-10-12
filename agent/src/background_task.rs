@@ -78,6 +78,8 @@ impl Extension for BackgroundTasks {
 struct StartInput {
     /// Shell command, run with bash -c
     command: String,
+    /// working directory, absolute or relative to the session's; default the session's
+    cwd: Option<String>,
     /// Timeout in seconds (max 3600), the task is killed after this
     #[schemars(range(min = 1, max = 3600))]
     timeout: u64,
@@ -101,10 +103,11 @@ impl Tool for Start {
         if !(1..=MAX_TIMEOUT).contains(&i.timeout) {
             bail!("timeout must be between 1 and {MAX_TIMEOUT} seconds");
         }
+        let cwd = i.cwd.map_or(ctx.cwd().into(), |d| ctx.cwd().join(d));
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c")
             .arg(&i.command)
-            .current_dir(ctx.cwd())
+            .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -329,6 +332,18 @@ mod tests {
         );
         assert!(ctx.has_triggered());
         assert!(tasks.running.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn runs_in_cwd() {
+        let (dir, notices, ctx, tasks) = setup();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        Start(tasks)
+            .run(json!({"command": "pwd", "cwd": "sub", "timeout": 10}), &ctx)
+            .await
+            .unwrap();
+        let (_, text, _) = wait_notice(&notices).await;
+        assert!(text.trim_end().ends_with("/sub"), "{text}");
     }
 
     #[tokio::test]

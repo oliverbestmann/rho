@@ -122,6 +122,8 @@ struct WriteInput {
 #[derive(Deserialize, JsonSchema)]
 struct BashInput {
     command: String,
+    /// working directory, absolute or relative to the session's; default the session's
+    cwd: Option<String>,
     /// seconds, default 120
     timeout: Option<f64>,
 }
@@ -287,10 +289,11 @@ impl Tool for Bash {
             .ok()
             .filter(|t| !t.is_zero())
             .context("timeout must be a positive number of seconds")?;
+        let cwd = i.cwd.map_or(ctx.cwd().into(), |d| resolve(ctx.cwd(), &d));
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
             .arg(&i.command)
-            .current_dir(ctx.cwd())
+            .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -404,6 +407,7 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "cwd": {"type": ["string", "null"], "description": "working directory, absolute or relative to the session's; default the session's"},
                     "timeout": {"type": ["number", "null"], "format": "double", "description": "seconds, default 120"},
                 },
                 "required": ["command"],
@@ -448,6 +452,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.output.trim(), "marker");
+
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/inner"), "").unwrap();
+        let out = Bash
+            .run(json!({"command": "ls", "cwd": "sub"}), &ctx(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(out.output.trim(), "inner");
 
         let err = Bash
             .run(
