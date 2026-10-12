@@ -90,15 +90,7 @@ impl Config {
         };
         let mut config: Self =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        for p in config.read.iter_mut().chain(&mut config.read_write) {
-            if let (Ok(rest), Some(home)) = (p.strip_prefix("~"), &home) {
-                *p = home.join(rest);
-            }
-            if !p.is_absolute() {
-                bail!("{}: {} is not absolute", path.display(), p.display());
-            }
-        }
+        expand(config.read.iter_mut().chain(&mut config.read_write), &path)?;
         Ok(config)
     }
 
@@ -116,6 +108,20 @@ impl Config {
         }
         Some(policy)
     }
+}
+
+/// Expands `~/` in `paths` and fails (naming `file`) if one is not absolute.
+pub(crate) fn expand<'a>(paths: impl Iterator<Item = &'a mut PathBuf>, file: &Path) -> Result<()> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    for p in paths {
+        if let (Ok(rest), Some(home)) = (p.strip_prefix("~"), &home) {
+            *p = home.join(rest);
+        }
+        if !p.is_absolute() {
+            bail!("{}: {} is not absolute", file.display(), p.display());
+        }
+    }
+    Ok(())
 }
 
 impl Policy {

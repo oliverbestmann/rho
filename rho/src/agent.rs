@@ -11,9 +11,10 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::extension::{
-    CommandName, Context, Decision, Diff, DynExtension, Frontend, ProfileId, PromptSetup, RunEnd,
-    SessionInfo, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
+    CommandName, Context, Decision, Diff, DynExtension, Frontend, Profile, ProfileId, PromptSetup,
+    RunEnd, SessionInfo, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
+use crate::feature::{Feature, FeatureId};
 use crate::provider::{
     Content, Event, Message, ModelSpec, Provider, Registry, Request, Role, StopReason, Thinking,
     ToolCallId, ToolName, ToolSpec, Usage,
@@ -92,6 +93,8 @@ pub struct Agent {
     pub thinking: Thinking,
     /// Starting sandbox for each session, from `sandbox.json`.
     pub sandbox: crate::sandbox::Config,
+    /// Features each session starts with, from `features.json`.
+    pub features: Vec<Feature>,
     /// Where sessions are saved, by cwd. Each session opens its own
     /// connection. `None`: sessions are not saved and cannot be resumed.
     pub sessions_db: Option<SessionsDb>,
@@ -120,9 +123,9 @@ pub struct Session {
     pub history: Vec<Message>,
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
-    /// The profile the model was last told about; `None` before the first
-    /// request.
-    profile_seen: Option<ProfileId>,
+    /// The profile and features that were on when the model was last told;
+    /// `None` before the first request.
+    seen: Option<(ProfileId, Vec<FeatureId>)>,
     /// The cwd, then the additional directories.
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
@@ -206,72 +209,97 @@ impl Session {
         Some(&self.tools[i])
     }
 
-    /// What the model needs to know about the profile, once per change: on
-    /// the first request if the profile restricts anything, then after each
-    /// switch. The tools it must not call, the ones it may call again, the
-    /// sandbox, and the profile's instructions.
+    /// What the model needs to know about the profile and features, once per
+    /// change: on the first request if anything is restricted or on, then
+    /// after each switch. The tools it must not call, the ones it may call
+    /// now, the sandbox, and the instructions.
     fn profile_note(&mut self) -> Option<String> {
         let profile = self.ctx.profile();
-        let seen = self.profile_seen.replace(profile.id.clone());
-        if seen.as_ref() == Some(&profile.id) {
+        let features = self.ctx.features();
+        let now = (profile.id.clone(), self.ctx.active_features());
+        let seen = self.seen.replace(now.clone());
+        if seen.as_ref() == Some(&now) {
             return None;
         }
+        let active = &now.1;
         let profiles = self.ctx.profiles();
         let before = seen
             .as_ref()
-            .and_then(|id| profiles.iter().find(|p| &p.id == id));
+            .and_then(|(id, _)| profiles.iter().find(|p| &p.id == id));
+        let was_active = seen.as_ref().map(|(_, a)| a.as_slice());
+        // Before the first request, every tool counts as callable.
+        let callable = |p: Option<&Profile>, on: Option<&[FeatureId]>, n: &ToolName| {
+            p.is_none_or(|p| p.shows(n))
+                && on.is_none_or(|on| crate::feature::unlocks(&features, on, n))
+        };
         let changed = |gone: bool| -> Vec<&str> {
             self.specs
                 .iter()
                 .map(|s| &s.name)
                 .filter(|n| {
-                    let was = before.is_none_or(|b| b.shows(n));
-                    if gone {
-                        was && !profile.shows(n)
-                    } else {
-                        !was && profile.shows(n)
-                    }
+                    let was = callable(before, was_active, n);
+                    let is = callable(Some(&profile), Some(active), n);
+                    if gone { was && !is } else { !was && is }
                 })
                 .map(ToolName::as_str)
                 .collect()
         };
         let (removed, added) = (changed(true), changed(false));
+        let old = was_active.unwrap_or_default();
+        let turned_on: Vec<_> = features
+            .iter()
+            .filter(|f| active.contains(&f.id) && !old.contains(&f.id))
+            .collect();
+        let turned_off = features
+            .iter()
+            .filter(|f| !active.contains(&f.id) && old.contains(&f.id));
+        let switched = seen.as_ref().is_none_or(|(id, _)| *id != profile.id);
         let sandboxed = self.ctx.sandbox().is_some();
-        let mut note = if seen.is_none() {
-            // Nothing to say about an unrestricted profile.
+        let mut parts = vec![];
+        if seen.is_none() {
+            // Nothing to say about an unrestricted profile without features.
             if removed.is_empty()
                 && !(profile.read_only && sandboxed)
                 && profile.instructions.is_none()
+                && turned_on.is_empty()
             {
                 return None;
             }
-            format!(
-                "<system-reminder>\nThe session is in the {} profile ({}).",
+            parts.push(format!(
+                "The session is in the {} profile ({}).",
                 profile.name, profile.description
-            )
-        } else {
-            format!(
-                "<system-reminder>\nThe session switched to the {} profile ({}).",
+            ));
+        } else if switched {
+            parts.push(format!(
+                "The session switched to the {} profile ({}).",
                 profile.name, profile.description
-            )
-        };
+            ));
+        }
+        parts.extend(turned_on.iter().map(|f| f.turned_on(sandboxed)));
+        parts.extend(turned_off.map(|f| format!("The {} feature is off now.", f.id)));
         if !removed.is_empty() {
-            note += &format!(
-                " Do not call these tools now, calls fail: {}.",
+            parts.push(format!(
+                "Do not call these tools now, calls fail: {}.",
                 removed.join(", ")
-            );
+            ));
         }
         if !added.is_empty() {
-            note += &format!(" You can call these tools again: {}.", added.join(", "));
+            parts.push(format!(
+                "You can call these tools now: {}.",
+                added.join(", ")
+            ));
         }
-        if sandboxed && (profile.read_only || before.is_some_and(|b| b.read_only)) {
-            note += if profile.read_only {
-                " The sandbox is read-only now: commands cannot change any files."
+        if switched && sandboxed && (profile.read_only || before.is_some_and(|b| b.read_only)) {
+            parts.push(if profile.read_only {
+                "The sandbox is read-only now: commands cannot change any files.".into()
             } else {
-                " The sandbox allows writing to the workspace again."
-            };
+                "The sandbox allows writing to the workspace again.".into()
+            });
         }
-        if let Some(text) = &profile.instructions {
+        let mut note = format!("<system-reminder>\n{}", parts.join(" "));
+        let instructions = turned_on.iter().map(|f| &f.instructions);
+        let profile_text = switched.then_some(&profile.instructions);
+        for text in profile_text.into_iter().chain(instructions).flatten() {
             note += &format!("\n\n{text}");
         }
         Some(note + "\n</system-reminder>")
@@ -331,6 +359,7 @@ impl Session {
             last_usage: self.last_usage,
             cost: self.cost,
             profile: self.ctx.profile().id,
+            features: self.ctx.active_features(),
         };
         let messages = self.history[from..].to_vec();
         let result = async {
@@ -539,6 +568,7 @@ impl Agent {
             max_tokens: 32_000,
             thinking: Thinking::default(),
             sandbox: Default::default(),
+            features: vec![],
             sessions_db: None,
         }
     }
@@ -618,7 +648,18 @@ impl Agent {
                 .ctx
                 .notify("Profile unavailable", &format!("{e:#}"), true);
         }
-        session.profile_seen = Some(info.profile);
+        // Stored features win over the defaults; the model knows them.
+        for f in session.ctx.active_features() {
+            let _ = session.ctx.set_feature(&f, false);
+        }
+        for f in &info.features {
+            if let Err(e) = session.ctx.set_feature(f, true) {
+                session
+                    .ctx
+                    .notify("Feature unavailable", &format!("{e:#}"), true);
+            }
+        }
+        session.seen = Some((info.profile, info.features));
         session.thinking = info.thinking;
         session.usage = info.usage;
         session.last_usage = info.last_usage;
@@ -651,12 +692,14 @@ impl Agent {
             system: String::new(),
             commands: vec![],
             resumed,
-            profiles: vec![crate::extension::Profile::write()],
+            profiles: vec![Profile::write()],
+            features: self.features.clone(),
         };
         for ext in &self.extensions {
             ext.session_start(&mut setup).await;
         }
         ctx.set_profiles(setup.profiles);
+        ctx.set_features(setup.features);
         // After the hooks, so the tools extensions added are listed too.
         let system = crate::prompt::build(
             &self.system,
@@ -679,7 +722,7 @@ impl Agent {
             commands: setup.commands,
             history: vec![],
             last_request: None,
-            profile_seen: None,
+            seen: None,
             roots,
             extensions: self.extensions.clone(),
             persist: store.map(|store| Persist {
@@ -975,13 +1018,25 @@ impl Agent {
     ) -> ToolOutput {
         let ctx = &session.ctx;
         let profile = ctx.profile();
-        let mut decision = if profile.shows(&call.name) {
-            Decision::Allow
-        } else {
+        let mut decision = if !profile.shows(&call.name) {
             Decision::Block(format!(
                 "{} is not available in the {} profile",
                 call.name, profile.name
             ))
+        } else if !ctx.tool_available(&call.name) {
+            let ids: Vec<_> = ctx
+                .features()
+                .into_iter()
+                .filter(|f| f.tools.contains(&call.name))
+                .map(|f| f.id.to_string())
+                .collect();
+            Decision::Block(format!(
+                "{} needs one of these features, which are off: {}. The user can turn one on with /enable",
+                call.name,
+                ids.join(", ")
+            ))
+        } else {
+            Decision::Allow
         };
         for ext in &self.extensions {
             if decision != Decision::Allow {

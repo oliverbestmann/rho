@@ -173,6 +173,7 @@ mod tests {
             commands: vec![],
             resumed: false,
             profiles: vec![Profile::write()],
+            features: vec![],
         };
         PlanMode.session_start(&mut setup).await;
         (frontend, setup)

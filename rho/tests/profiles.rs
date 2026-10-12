@@ -186,7 +186,7 @@ async fn switching_changes_tools_and_sandbox_and_tells_the_model() {
     let texts = last_texts(last);
     assert_eq!(texts[0], "now write");
     assert!(
-        texts[1].contains("call these tools again: Write.") && texts[1].contains("allows writing"),
+        texts[1].contains("call these tools now: Write.") && texts[1].contains("allows writing"),
         "{texts:?}"
     );
 }

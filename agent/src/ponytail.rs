@@ -39,6 +39,7 @@ mod tests {
             commands: vec![],
             resumed: false,
             profiles: vec![Profile::write()],
+            features: vec![],
         };
         Ponytail.session_start(&mut setup).await;
         assert!(setup.system.starts_with("base\n\n<ponytail>\n# Ponytail\n"));

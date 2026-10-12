@@ -20,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 use crate::extension::ProfileId;
+use crate::feature::FeatureId;
 use crate::provider::{Content, Message, ModelSpec, Role, Thinking, Usage};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
@@ -77,11 +78,17 @@ ALTER TABLE sessions ADD COLUMN last_cache_write_tokens INTEGER NOT NULL DEFAULT
 -- `Profile::id`, e.g. 'write' or 'plan'.
 ALTER TABLE sessions ADD COLUMN profile TEXT NOT NULL DEFAULT 'write' CHECK (profile <> '');
 "#,
+    r#"
+-- Ids of the features that are on, a JSON array.
+ALTER TABLE sessions ADD COLUMN features TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(features) AND json_type(features) = 'array');
+"#,
 ];
 
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
     output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
-    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, created_at, updated_at";
+    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, features, created_at, \
+    updated_at";
 
 /// A session database. Cheap to clone; clones share the connection.
 #[derive(Clone)]
@@ -106,6 +113,8 @@ pub struct SessionInfo {
     /// Number of compactions.
     pub epoch: i64,
     pub profile: ProfileId,
+    /// The features that are on.
+    pub features: Vec<FeatureId>,
     /// Unix milliseconds.
     pub created_at: i64,
     pub updated_at: i64,
@@ -141,6 +150,7 @@ pub(crate) struct State {
     pub last_usage: Usage,
     pub cost: f64,
     pub profile: ProfileId,
+    pub features: Vec<FeatureId>,
 }
 
 /// A stored session ready to continue: its info, the `seq` of the first
@@ -403,9 +413,9 @@ impl Store {
                 "INSERT INTO sessions (id, cwd, additional_dirs, title, model, thinking,
                      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                      last_input_tokens, last_output_tokens, last_cache_read_tokens,
-                     last_cache_write_tokens, cost, profile, created_at, updated_at)
+                     last_cache_write_tokens, cost, profile, features, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?17, ?16, ?16)
+                     ?15, ?17, ?18, ?16, ?16)
                  ON CONFLICT (id) DO UPDATE SET
                      additional_dirs = excluded.additional_dirs,
                      title = COALESCE(excluded.title, title),
@@ -421,6 +431,7 @@ impl Store {
                      last_cache_write_tokens = excluded.last_cache_write_tokens,
                      cost = excluded.cost,
                      profile = excluded.profile,
+                     features = excluded.features,
                      updated_at = excluded.updated_at",
                 params![
                     s.id,
@@ -440,6 +451,7 @@ impl Store {
                     s.cost,
                     now,
                     s.profile,
+                    serde_json::to_string(&s.features)?,
                 ],
             )?;
             Ok(())
@@ -548,6 +560,7 @@ impl ToSql for ModelSpec {
 fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
     let thinking: String = r.get("thinking")?;
     let dirs: String = r.get("additional_dirs")?;
+    let features: String = r.get("features")?;
     let usage = |col| r.get::<_, i64>(col).map(|n| n as u64);
     let info = SessionInfo {
         id: r.get("id")?,
@@ -571,12 +584,14 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
         cost: r.get("cost")?,
         epoch: r.get("epoch")?,
         profile: r.get("profile")?,
+        features: vec![],
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     };
     Ok((|| {
         Ok(SessionInfo {
             additional_dirs: serde_json::from_str(&dirs)?,
+            features: serde_json::from_str(&features)?,
             thinking: thinking.parse()?,
             ..info
         })
@@ -631,6 +646,7 @@ mod tests {
             },
             cost: 0.5,
             profile: ProfileId::new("plan"),
+            features: vec![FeatureId::new("ssh")],
         }
     }
 
@@ -658,6 +674,7 @@ mod tests {
         assert_eq!(loaded.info.usage.cache_write, 4);
         assert_eq!(loaded.info.last_usage.cache_write, 8);
         assert_eq!(loaded.info.profile, ProfileId::new("plan"));
+        assert_eq!(loaded.info.features, [FeatureId::new("ssh")]);
 
         assert_eq!(
             store.next_epoch(&SessionId::new("s")).await.unwrap(),

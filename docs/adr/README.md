@@ -40,3 +40,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0030](0030-local-memory-store.md) | Memories stored locally with embeddings in SQLite | Accepted |
 | [0031](0031-mcp-over-http.md) | MCP servers over Streamable HTTP, from mcp.json | Accepted |
 | [0032](0032-project-history-search.md) | Project history search: hybrid search over past sessions under `.rho-project-root` | Accepted |
+| [0033](0033-features.md) | Features: switchable bundles of sandbox access and tools | Accepted |

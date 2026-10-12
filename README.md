@@ -14,6 +14,7 @@ A small ACP-native coding agent in Rust. Prototype.
 - Sessions in SQLite: list, load, resume, close. Compaction keeps the old
   messages.
 - Profiles and a plan mode with a read-only sandbox.
+- Features: bundles of sandbox access and tools, turned on with `/enable`.
 - Extensions with pi-style hooks, compiled into the binary. The `rho`
   binary brings a git commit/push gate, Go checks and docs, `Grep`, URL
   fetching, local memories, search over a project's past sessions, MCP
@@ -196,6 +197,41 @@ ctx.sandbox_command(&mut cmd)?;
 ```
 
 Both are no-ops without a sandbox.
+
+### Features
+
+A feature bundles sandbox access and tools that the user turns on and off
+during a session: `/enable ssh git`, `/disable ssh`, and `/features` to
+list them with their state (`FeatureCommands`, enabled in the `rho` binary).
+The system prompt lists the features (not their state, so the prompt cache
+holds), and the model can ask for one with `RequestFeature`; the user
+approves like `RequestAccess`. They are defined
+in `~/.config/rho/features.json`, with paths like in `sandbox.json`:
+
+```json
+[
+  {
+    "id": "ssh",
+    "description": "SSH keys for git",
+    "enabled": false,
+    "read": ["~/.ssh"],
+    "read_write": [],
+    "tools": ["mcp__github__create_pull_request"],
+    "instructions": "Use SSH remotes."
+  }
+]
+```
+
+`enabled` turns a feature on when a session starts. A tool listed by any
+feature can only be called while one of those features is on; the profile
+still decides first. Paths are added on top of the session's sandbox (still
+read-only in a read-only profile) and removed when the feature is turned off;
+commands that are already running keep their access. The model is told with
+the next request, like a profile switch. Which features are on is saved with
+the session. Extensions add features through `SessionSetup::features` and
+switch them with `ctx.set_feature(&id, on)`; register them before
+`FeatureCommands`, or their features are missing from the prompt and the
+tool.
 
 ## Extensions
 

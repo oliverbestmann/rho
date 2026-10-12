@@ -585,6 +585,7 @@ mod tests {
             commands: vec![],
             resumed: false,
             profiles: vec![],
+            features: vec![],
         };
         mcp.session_start(&mut setup).await;
         let names: Vec<_> = setup

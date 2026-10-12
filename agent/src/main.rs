@@ -40,6 +40,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(ask_user::AskUser),
             Arc::new(plan_mode::PlanMode),
             Arc::new(ponytail::Ponytail),
+            // After every extension that adds features, so all are listed.
+            Arc::new(rho::feature::FeatureCommands),
             // Last, so the project instructions end the system prompt.
             Arc::new(project_context::ProjectContext::default()),
         ],

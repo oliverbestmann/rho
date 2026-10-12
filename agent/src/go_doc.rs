@@ -115,6 +115,7 @@ mod tests {
             commands: vec![],
             resumed: false,
             profiles: vec![Profile::write()],
+            features: vec![],
         };
         GoDoc.session_start(&mut setup).await;
         setup

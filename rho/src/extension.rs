@@ -44,6 +44,7 @@ impl SessionInfo {
         self.last_usage.prompt() + self.last_usage.output
     }
 }
+use crate::feature::{Feature, FeatureId};
 use crate::sandbox::{Access, Policy};
 use crate::store::{SessionId, Store};
 use crate::tools::DynTool;
@@ -247,6 +248,8 @@ pub struct SessionSetup {
     /// Profiles the user can switch between; starts with `Profile::write`.
     /// Extensions add their own (or hide their tools in `write`).
     pub profiles: Vec<Profile>,
+    /// Features the user can turn on and off; starts with `features.json`.
+    pub features: Vec<Feature>,
 }
 
 crate::id_type! {
@@ -493,6 +496,9 @@ struct Inner {
     title: Mutex<Option<String>>,
     /// The available profiles and the index of the current one.
     profiles: Mutex<(Vec<Profile>, usize)>,
+    /// The available features and the ids of those that are on, in the
+    /// features' order.
+    features: Mutex<(Vec<Feature>, Vec<FeatureId>)>,
     /// Kept up to date by the agent loop; `profile` is filled in on read.
     info: Mutex<SessionInfo>,
 }
@@ -517,6 +523,7 @@ impl Context {
             store: OnceLock::new(),
             title: Mutex::default(),
             profiles: Mutex::new((vec![Profile::write()], 0)),
+            features: Mutex::default(),
             info: Mutex::default(),
         }))
     }
@@ -569,6 +576,49 @@ impl Context {
         Ok(std::mem::replace(current, i) != i)
     }
 
+    pub fn features(&self) -> Vec<Feature> {
+        self.0.features.lock().unwrap().0.clone()
+    }
+
+    /// The ids of the features that are on.
+    pub fn active_features(&self) -> Vec<FeatureId> {
+        self.0.features.lock().unwrap().1.clone()
+    }
+
+    /// Replaces the features; those with `enabled` are on. Agent sessions
+    /// get theirs from `SessionSetup::features`.
+    pub fn set_features(&self, features: Vec<Feature>) {
+        let on = features.iter().filter(|f| f.enabled).map(|f| f.id.clone());
+        let on = on.collect();
+        *self.0.features.lock().unwrap() = (features, on);
+    }
+
+    /// Turns feature `id` on or off, from the next tool call on. The model
+    /// is told with the next model request. Returns whether it changed.
+    pub fn set_feature(&self, id: &FeatureId, on: bool) -> Result<bool> {
+        let (features, active) = &mut *self.0.features.lock().unwrap();
+        if !features.iter().any(|f| f.id == *id) {
+            anyhow::bail!("unknown feature {id}");
+        }
+        if active.contains(id) == on {
+            return Ok(false);
+        }
+        *active = features
+            .iter()
+            .map(|f| &f.id)
+            .filter(|f| if *f == id { on } else { active.contains(f) })
+            .cloned()
+            .collect();
+        Ok(true)
+    }
+
+    /// Whether the model may call `tool` now: the profile shows it and no
+    /// feature that is off hides it.
+    pub fn tool_available(&self, tool: &ToolName) -> bool {
+        let (features, active) = &*self.0.features.lock().unwrap();
+        self.profile().shows(tool) && crate::feature::unlocks(features, active, tool)
+    }
+
     /// The database this session is saved in, `None` if it is not saved.
     /// Use it to read past sessions; writing is up to rho.
     pub fn store(&self) -> Option<&Store> {
@@ -597,16 +647,20 @@ impl Context {
     }
 
     /// The session's sandbox policy (`sandbox::Config::policy` for agent
-    /// sessions, plus grants). A read-only profile restricts it further, see
-    /// `effective_sandbox`.
+    /// sessions, plus grants). Features that are on add to it and a
+    /// read-only profile restricts it, see `effective_sandbox`.
     pub fn sandbox(&self) -> Option<Policy> {
         self.0.sandbox.lock().unwrap().clone()
     }
 
-    /// What sandboxed code runs under: `sandbox` with the current profile
-    /// applied.
+    /// What sandboxed code runs under: `sandbox` plus the features that are
+    /// on, with the current profile applied.
     pub fn effective_sandbox(&self) -> Option<Policy> {
-        let policy = self.sandbox()?;
+        let mut policy = self.sandbox()?;
+        let (features, active) = &*self.0.features.lock().unwrap();
+        for f in features.iter().filter(|f| active.contains(&f.id)) {
+            f.allow(&mut policy);
+        }
         Some(if self.profile().read_only {
             policy.read_only()
         } else {

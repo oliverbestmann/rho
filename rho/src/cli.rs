@@ -146,6 +146,7 @@ fn make_agent(options: Options, model: &ModelSpec, thinking: Thinking) -> Result
     let config_dir = crate::prompt::config_dir();
     crate::prompt::ensure_files(&config_dir);
     agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
+    agent.features = crate::feature::load(&config_dir)?;
     agent.config_dir = Some(config_dir);
     agent.compact_model = Some(match std::env::var("RHO_COMPACT_MODEL") {
         Ok(m) => m.parse().context("RHO_COMPACT_MODEL")?,
