@@ -147,9 +147,6 @@ impl SseParser {
     }
 
     fn handle(&mut self, data: &str, out: &mut Vec<Result<Event>>) -> Result<()> {
-        if data == "[DONE]" {
-            return Ok(());
-        }
         let ev: Value = serde_json::from_str(data)?;
         let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
         match ev["type"].as_str().unwrap_or_default() {

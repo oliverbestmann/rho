@@ -198,8 +198,11 @@ pub fn sse_data(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
         if let Some(data) = String::from_utf8_lossy(&line)
             .trim_end()
             .strip_prefix("data:")
+            .map(str::trim)
+            // OpenAI's end marker; Copilot sends it on Messages streams too.
+            .filter(|data| *data != "[DONE]")
         {
-            out.push(data.trim().to_string());
+            out.push(data.to_string());
         }
     }
     out
@@ -951,5 +954,15 @@ mod tests {
                 .to_string()
                 .contains("overloaded")
         );
+    }
+
+    #[test]
+    fn done_marker_is_ignored() {
+        let mut buf = vec![];
+        let data = sse_data(
+            &mut buf,
+            b"data: {\"type\":\"message_stop\"}\n\ndata: [DONE]\n",
+        );
+        assert_eq!(data, [r#"{"type":"message_stop"}"#]);
     }
 }

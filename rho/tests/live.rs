@@ -1,4 +1,4 @@
-//! Live tests against the Anthropic API. They use real subscription quota, so
+//! Live tests against the Anthropic and Copilot APIs. They use real subscription quota, so
 //! they are ignored by default:
 //!
 //!   RHO_AUTH_FILE=_rho-auth.json cargo test -p rho --test live -- --ignored --nocapture
@@ -191,6 +191,39 @@ async fn cache_hits_across_tool_loop_and_turns() {
         );
         // Only the new tail should be uncached.
         assert!(next.input < 500, "too much uncached input: {next:?}");
+    }
+}
+
+/// Copilot (Claude over Messages, GPT over Responses) through a tool round
+/// trip and a second turn. `RHO_COPILOT_MODELS` overrides the models.
+#[tokio::test]
+#[ignore]
+async fn copilot_tool_round_trip() {
+    let models = std::env::var("RHO_COPILOT_MODELS")
+        .unwrap_or_else(|_| "claude-sonnet-5.5,gpt-5-mini".into());
+    for model in models.split(',') {
+        eprintln!("--- {model}");
+        let path = std::env::var("RHO_AUTH_FILE").expect("set RHO_AUTH_FILE");
+        let http = reqwest::Client::new();
+        let store = Arc::new(AuthStore::new(path.into(), http.clone(), rho::copilot::KEY));
+        let mut agent = Agent::new(
+            Arc::new(rho::copilot::Copilot::new(http, store)),
+            ModelSpec::new("github-copilot", model),
+            rho::tools::builtin(),
+        );
+        agent.thinking = Thinking::Low;
+        let mut s = session(&agent).await;
+        let (usages, answer, ..) = prompt(
+            &agent,
+            &mut s,
+            "Run `echo copilot-test` with the Bash tool, then reply with just its output.",
+        )
+        .await;
+        eprintln!("requests: {}, answer: {answer:?}", usages.len());
+        assert!(usages.len() >= 2, "expected a tool round trip");
+        assert!(answer.contains("copilot-test"), "{answer}");
+        let (_, answer, ..) = prompt(&agent, &mut s, "Now reply with just: done").await;
+        assert!(answer.contains("done"), "{answer}");
     }
 }
 
