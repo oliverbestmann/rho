@@ -120,7 +120,7 @@ struct Input {
     action: Action,
     /// Search query (search)
     query: Option<String>,
-    /// Memory content (store)
+    /// Memory content (store, update; update changes the hash)
     content: Option<String>,
     /// Memory content hash (get, update, delete)
     hash: Option<MemoryHash>,
@@ -227,6 +227,15 @@ fn nonempty(s: &Option<String>) -> Option<&str> {
     s.as_deref().filter(|s| !s.is_empty())
 }
 
+fn content_hash(content: &str) -> MemoryHash {
+    MemoryHash::new(
+        Sha256::digest(content)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    )
+}
+
 pub fn blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
@@ -282,6 +291,7 @@ impl Inner {
         let embedding = match i.action {
             Action::Search => Some((self.embed)(&need(&i.query, "query")?)?),
             Action::Store => Some((self.embed)(&need(&i.content, "content")?)?),
+            Action::Update => nonempty(&i.content).map(&self.embed).transpose()?,
             _ => None,
         };
         let hash = match i.action {
@@ -331,12 +341,7 @@ impl Inner {
             Action::Store => {
                 let content = i.content.as_deref().unwrap_or_default();
                 let embedding = blob(&embedding.unwrap());
-                let hash = MemoryHash::new(
-                    Sha256::digest(content)
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>(),
-                );
+                let hash = content_hash(content);
                 let conversation = i
                     .conversation_id
                     .as_ref()
@@ -427,21 +432,40 @@ impl Inner {
             Action::Update => {
                 let tags = i.tags.as_ref().map(serde_json::to_string).transpose()?;
                 let metadata = i.metadata.as_ref().map(serde_json::to_string).transpose()?;
+                let content = nonempty(&i.content);
+                let new_hash = content.map(content_hash);
+                if let Some(new) = new_hash.as_ref().filter(|n| **n != hash)
+                    && get(c, new).is_ok()
+                {
+                    bail!("memory {new} already has this content");
+                }
                 // Metadata is merged (JSON merge patch: null removes a key).
                 let changed = c.execute(
                     "UPDATE memories SET tags = COALESCE(?2, tags),
                          memory_type = COALESCE(?3, memory_type),
                          metadata = json_patch(metadata, COALESCE(?4, '{}')),
-                         updated_at = ?5
+                         updated_at = ?5,
+                         hash = COALESCE(?6, hash),
+                         content = COALESCE(?7, content),
+                         embedding = COALESCE(?8, embedding)
                      WHERE hash = ?1",
-                    params![hash, tags, nonempty(&i.memory_type), metadata, now_ms()],
+                    params![
+                        hash,
+                        tags,
+                        nonempty(&i.memory_type),
+                        metadata,
+                        now_ms(),
+                        new_hash,
+                        content,
+                        embedding.as_deref().map(blob),
+                    ],
                 )?;
                 if changed == 0 {
                     bail!("memory {hash} not found");
                 }
                 Ok(format!(
                     "Memory updated.\n{}",
-                    get(c, &hash)?.show(None, None)
+                    get(c, new_hash.as_ref().unwrap_or(&hash))?.show(None, None)
                 ))
             }
             Action::Delete => {
@@ -566,6 +590,33 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(metadata, r#"{"k":1}"#);
+
+        // New content: a new hash and embedding, tags and metadata stay.
+        let out = run(json!({"action": "update", "hash": hash, "content": "ccc"}))
+            .await
+            .unwrap();
+        let old = hash;
+        let hash = out.rsplit("Hash: ").next().unwrap().to_string();
+        assert_ne!(hash, old);
+        assert_eq!(
+            out,
+            format!("Memory updated.\n[note]\nccc\nTags: y\nHash: {hash}")
+        );
+        let out = run(json!({"action": "search", "query": "cc", "limit": 1}))
+            .await
+            .unwrap();
+        assert!(out.contains("score 1.000\nccc"), "{out}");
+        let err = run(json!({"action": "get", "hash": old}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().ends_with("not found"));
+        let err = run(json!({"action": "update", "hash": hash, "content": "zzz"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().ends_with("already has this content"),
+            "{err}"
+        );
 
         let out = run(json!({"action": "delete", "hash": hash}))
             .await

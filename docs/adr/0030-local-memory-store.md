@@ -26,8 +26,9 @@ to run separately, and the tool fails when it is down.
 - The hash is the SHA-256 of the content. Store refuses the same content,
   and content with a cosine similarity of 0.95 or more, unless a
   `conversationId` is given (it goes into the metadata). `agentId` adds an
-  `agent:<id>` tag. Update replaces tags and type and merges metadata (JSON
-  merge patch).
+  `agent:<id>` tag. Update replaces content, tags and type and merges
+  metadata (JSON merge patch). New content is embedded again and changes
+  the hash; update refuses content another memory already has.
 - Output is cut at `tools::MAX_OUTPUT`. There is no temp file with the full
   output any more.
 
