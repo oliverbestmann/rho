@@ -6,7 +6,7 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, InitializeRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate,
+    SessionNotification, SessionUpdate, ToolCallContent,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{Client, Responder, SessionMessage};
@@ -365,12 +365,16 @@ async fn ctx_complete_calls_any_registered_model() {
     assert!(req.tools.is_empty());
 }
 
-/// Asks before every tool call, like git-gate.ts.
-struct Confirmer;
+/// Asks before every tool call, like git-gate.ts; with `own_card` on a card
+/// of its own instead of the tool call, like RequestFeature.
+struct Confirmer {
+    own_card: bool,
+}
 
 impl Extension for Confirmer {
     async fn tool_call(&self, ctx: &Context, call: &mut ToolCall) -> Decision {
-        if ctx.confirm(Some(&call.id), "Run it?").await {
+        let id = (!self.own_card).then_some(&call.id);
+        if ctx.confirm(id, "Run it?\nIt echoes hi.").await {
             Decision::Allow
         } else {
             Decision::Block("denied by user".into())
@@ -378,7 +382,7 @@ impl Extension for Confirmer {
     }
 }
 
-fn confirm_agent() -> (Arc<Scripted>, Agent) {
+fn confirm_agent(own_card: bool) -> (Arc<Scripted>, Agent) {
     let provider = Scripted::new(vec![
         vec![tool_use("t1", "Bash", json!({"command": "echo hi"}))],
         vec![text("ok")],
@@ -388,7 +392,7 @@ fn confirm_agent() -> (Arc<Scripted>, Agent) {
         ModelSpec::new("test", "m"),
         rho::tools::builtin(),
     );
-    agent.extensions = vec![Arc::new(Confirmer)];
+    agent.extensions = vec![Arc::new(Confirmer { own_card })];
     (provider, agent)
 }
 
@@ -398,7 +402,7 @@ fn first_result(provider: &Scripted) -> Content {
 
 #[tokio::test]
 async fn confirm_without_ui_denies() {
-    let (provider, agent) = confirm_agent();
+    let (provider, agent) = confirm_agent(false);
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     agent
         .run(&mut session, vec![Content::text("hi")])
@@ -437,7 +441,18 @@ async fn read_text<'a>(
 
 #[tokio::test]
 async fn acp_confirm_uses_request_permission() {
-    let (provider, agent) = confirm_agent();
+    // A tool call keeps its content; our own card gets the rest of the title.
+    acp_confirm(false, "t1", "Run it?\nIt echoes hi.", None).await;
+    acp_confirm(true, "confirm", "Run it?", Some("It echoes hi.")).await;
+}
+
+async fn acp_confirm(
+    own_card: bool,
+    call_id: &'static str,
+    title: &'static str,
+    content: Option<&'static str>,
+) {
+    let (provider, agent) = confirm_agent(own_card);
     let asked = Arc::new(AtomicBool::new(false));
     let asked_in_client = asked.clone();
 
@@ -447,7 +462,17 @@ async fn acp_confirm_uses_request_permission() {
             async move |req: RequestPermissionRequest,
                         responder: Responder<RequestPermissionResponse>,
                         _cx| {
-                assert_eq!(&*req.tool_call.tool_call_id.0, "t1");
+                assert_eq!(&*req.tool_call.tool_call_id.0, call_id);
+                let fields = &req.tool_call.fields;
+                assert_eq!(fields.title.as_deref(), Some(title));
+                let text = fields.content.as_ref().map(|c| match &c[..] {
+                    [ToolCallContent::Content(c)] => match &c.content {
+                        ContentBlock::Text(t) => t.text.clone(),
+                        other => panic!("{other:?}"),
+                    },
+                    other => panic!("{other:?}"),
+                });
+                assert_eq!(text.as_deref(), content);
                 asked_in_client.store(true, Ordering::SeqCst);
                 responder.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),

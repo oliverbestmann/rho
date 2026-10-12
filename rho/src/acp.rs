@@ -755,11 +755,21 @@ impl Frontend for AcpFrontend {
         title: &'a str,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async move {
+            let mut fields = ToolCallUpdateFields::new().title(title.to_string());
+            // Clients show one line of title; the rest goes into the card.
+            // Only for our own card, so a real tool call keeps its content.
+            if tool_call_id.is_none()
+                && let Some((first, rest)) = title.split_once('\n')
+            {
+                fields = ToolCallUpdateFields::new()
+                    .title(first.to_string())
+                    .content(vec![rest.into()]);
+            }
             let call = ToolCallUpdate::new(
                 tool_call_id
                     .map_or("confirm", ToolCallId::as_str)
                     .to_string(),
-                ToolCallUpdateFields::new().title(title.to_string()),
+                fields,
             );
             let request = RequestPermissionRequest::new(
                 self.sid.clone(),

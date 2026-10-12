@@ -106,6 +106,28 @@ impl Feature {
         text + "."
     }
 
+    /// Markdown for the confirmation: the description, then a list per
+    /// access kind and the tools.
+    fn details(&self) -> String {
+        let mut text = self.description.clone();
+        let mut list = |title: &str, items: Vec<String>| {
+            if !items.is_empty() {
+                text += &format!("\n\n{title}:");
+                for item in items {
+                    text += &format!("\n- `{item}`");
+                }
+            }
+        };
+        let paths = |paths: &[PathBuf]| paths.iter().map(|p| p.display().to_string()).collect();
+        list("Read", paths(&self.read));
+        list("Read-write", paths(&self.read_write));
+        list(
+            "Tools",
+            self.tools.iter().map(ToString::to_string).collect(),
+        );
+        text.trim_start().to_string()
+    }
+
     /// One line for the system prompt's list.
     fn listed(&self) -> String {
         let mut line = format!("- {}", self.id);
@@ -255,9 +277,9 @@ impl Tool for RequestFeature {
             return Ok(format!("The {} feature is already on.", feature.id).into());
         }
         let title = format!(
-            "Turn on the {} feature?\n{}\n{}",
+            "Turn on the {} feature?\n{}\n\n{}",
             feature.id,
-            feature.listed().trim_start_matches("- "),
+            feature.details(),
             i.reason
         );
         if !ctx.confirm(None, &title).await {
@@ -372,6 +394,18 @@ mod tests {
             setup.system
         );
         assert_eq!(setup.tools[0].spec().name, REQUEST_FEATURE);
+    }
+
+    #[test]
+    fn details_list_paths_and_tools() {
+        let mut f = feature("ssh", &["T"]);
+        f.read_write = vec!["/w".into(), "/x".into()];
+        assert_eq!(
+            f.details(),
+            "desc\n\nRead:\n- `/r`\n\nRead-write:\n- `/w`\n- `/x`\n\nTools:\n- `T`"
+        );
+        f.description.clear();
+        assert!(f.details().starts_with("Read:"));
     }
 
     #[test]
