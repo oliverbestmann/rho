@@ -918,7 +918,9 @@ fn model_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
             if let Some(p) = m.price {
                 description += &format!(", ${}/${} per MTok", p.input, p.output);
             }
-            SessionConfigSelectOption::new(spec.to_string(), m.name).description(description)
+            // The same model can come from several providers.
+            let name = format!("{} ({})", m.name, spec.provider().as_str());
+            SessionConfigSelectOption::new(spec.to_string(), name).description(description)
         })
         .collect();
     let mut options = vec![];

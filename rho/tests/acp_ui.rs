@@ -142,6 +142,16 @@ async fn model_and_thinking_are_session_config_options() {
                     vec!["fake/big".into(), "fake/small".into()]
                 )
             );
+            let model = options.iter().find(|o| &*o.id.0 == "model").unwrap();
+            let SessionConfigKind::Select(select) = &model.kind else {
+                panic!("model is not a select");
+            };
+            let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(models) =
+                &select.options
+            else {
+                panic!("grouped");
+            };
+            assert_eq!(models[0].name, "Big (fake)");
             let (thinking, levels) = select_value(&options, "thought_level");
             assert_eq!(thinking, "high");
             assert_eq!(levels, ["off", "low", "medium", "high", "xhigh", "max"]);
