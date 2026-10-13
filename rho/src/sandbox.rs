@@ -242,8 +242,11 @@ const UNSUPPORTED: &str =
     "the sandbox is only supported on Linux; set \"disabled\": true in sandbox.json";
 
 /// `/grant-read <path>` and `/grant-write <path>`: the user widens the
-/// session's sandbox. The model is told with the next prompt.
+/// session's sandbox. The model is told with the next prompt. `/sandbox`
+/// lists what sandboxed code may access now.
 pub struct GrantCommands;
+
+const SANDBOX: CommandName = CommandName::from_static("sandbox");
 
 const GRANT_READ: CommandName = CommandName::from_static("grant-read");
 const GRANT_WRITE: CommandName = CommandName::from_static("grant-write");
@@ -257,9 +260,20 @@ impl Extension for GrantCommands {
                 hint: Some("path".into()),
             });
         }
+        session.commands.push(SlashCommand {
+            name: SANDBOX,
+            description: "Show the paths the sandbox allows".into(),
+            hint: None,
+        });
     }
 
     async fn command(&self, ctx: &Context, name: &CommandName, args: &str) -> Option<String> {
+        if *name == SANDBOX {
+            return Some(match ctx.effective_sandbox() {
+                Some(policy) => show(&policy),
+                None => "This session is not sandboxed.".into(),
+            });
+        }
         let (access, what) = if *name == GRANT_READ {
             (Access::Read, "read")
         } else if *name == GRANT_WRITE {
@@ -269,6 +283,20 @@ impl Extension for GrantCommands {
         };
         Some(grant(ctx, args, access, what))
     }
+}
+
+/// Markdown: a list of the read and of the read-write paths.
+fn show(policy: &Policy) -> String {
+    let list = |title: &str, access: Access| {
+        let rules = policy.rules.iter().filter(|r| r.access == access);
+        let items: Vec<_> = rules.map(|r| format!("- `{}`", r.path.display())).collect();
+        format!("{title}:\n{}", items.join("\n"))
+    };
+    format!(
+        "{}\n\n{}",
+        list("Read", Access::Read),
+        list("Read-write", Access::ReadWrite)
+    )
 }
 
 fn grant(ctx: &Context, path: &str, access: Access, what: &str) -> String {
@@ -326,6 +354,15 @@ mod tests {
                 "{path}"
             );
         }
+
+        let mut policy = Policy::default();
+        policy.allow("/r", Access::Read);
+        policy.allow("/w", Access::ReadWrite);
+        policy.allow("/x", Access::Read);
+        assert_eq!(
+            show(&policy),
+            "Read:\n- `/r`\n- `/x`\n\nRead-write:\n- `/w`"
+        );
 
         std::fs::write(&file, r#"{"read": ["rel"]}"#).unwrap();
         assert!(Config::load(dir.path()).is_err());

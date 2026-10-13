@@ -20,6 +20,9 @@ outside the project.
   The tool description names the root. Without a marker there is no
   fallback to the cwd: a cwd alone doesn't say where a project starts,
   and a guess could mix in other projects' sessions.
+- With the tool comes `/history <query>` for the user: the same hybrid
+  search (10 results), shown as a command reply and not added to the
+  conversation, so the model does not see it.
 - The store gets one read method, `Store::messages`, which returns all
   messages with their epoch.
 - The index is `history.db` in `$XDG_CACHE_HOME/rho`. It's derived data:

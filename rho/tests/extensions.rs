@@ -685,7 +685,7 @@ async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
     agent.extensions = vec![Arc::new(rho::sandbox::GrantCommands)];
     let (mut session, log) = common::session(&agent, cwd.path()).await;
     let names: Vec<_> = session.commands.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, ["grant-read", "grant-write"]);
+    assert_eq!(names, ["grant-read", "grant-write", "sandbox"]);
 
     let path = other.path().canonicalize().unwrap();
     assert!(

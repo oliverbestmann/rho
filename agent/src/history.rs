@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use rho::extension::{CommandName, Context, Extension, RunEnd, SessionSetup, ToolOutput};
+use rho::extension::{
+    CommandName, Context, Extension, RunEnd, SessionSetup, SlashCommand, ToolOutput,
+};
 use rho::provider::{Content, Message, ModelSpec, Role, ToolName, ToolSpec};
 use rho::store::{SessionId, SessionInfo, Store, StoredMessage};
 use rho::tools::{Tool, input_schema, parse, truncate};
@@ -29,6 +31,8 @@ use crate::memory;
 use crate::session_title::MODEL;
 
 pub const MARKER: &str = ".rho-project-root";
+/// `/history <query>`: the user searches; the results are not shown to the model.
+const HISTORY: CommandName = CommandName::from_static("history");
 /// Window size and overlap in bytes; ~200 tokens suits MiniLM.
 const CHUNK: usize = 800;
 const OVERLAP: usize = 150;
@@ -127,6 +131,12 @@ impl Extension for History {
             return;
         }
         if let Some(root) = project_root(session.ctx.cwd()) {
+            session.commands.push(SlashCommand {
+                name: HISTORY,
+                description: "Search earlier conversations of the project (not shown to the model)"
+                    .into(),
+                hint: Some("query".into()),
+            });
             session.tools.push(Arc::new(HistoryTool {
                 inner: self.0.clone(),
                 root,
@@ -137,7 +147,15 @@ impl Extension for History {
     /// `/redact` (run by the core for every extension, after the session
     /// store): drops the index of every session with the phrase; the next
     /// sync rebuilds it from the redacted store.
-    async fn command(&self, _ctx: &Context, name: &CommandName, phrase: &str) -> Option<String> {
+    async fn command(&self, ctx: &Context, name: &CommandName, phrase: &str) -> Option<String> {
+        if *name == HISTORY {
+            let root = project_root(ctx.cwd())?;
+            if phrase.trim().is_empty() {
+                return Some("Usage: /history <query>".into());
+            }
+            let found = self.0.find(ctx, &root, phrase, Mode::Hybrid, 10).await;
+            return Some(found.map_or_else(|e| format!("{e:#}"), |(_, results)| results));
+        }
         if name.as_str() != "redact" {
             return None;
         }
@@ -228,32 +246,12 @@ impl Tool for HistoryTool {
                     .query
                     .filter(|q| !q.trim().is_empty())
                     .context("query is required for search")?;
-                self.inner.sync(store, &self.root).await?;
-                // Its current epoch is in the context already.
-                let epoch = store
-                    .session(ctx.session_id())
-                    .await?
-                    .map_or(-1, |s| s.epoch);
-                let (inner, root, current) = (
-                    self.inner.clone(),
-                    self.root.clone(),
-                    (ctx.session_id().to_string(), epoch),
-                );
-                let limit = i.limit.unwrap_or(10).clamp(1, 50);
+                let limit = i.limit.unwrap_or(10).clamp(1, 50) as usize;
                 let mode = i.mode.unwrap_or_default();
-                let q = query.clone();
-                let hits = tokio::task::spawn_blocking(move || {
-                    inner.search(&root, &current, &q, mode, limit as usize)
-                })
-                .await??;
-                let found = format!(
-                    "Found {} results for {query:?} in {}.",
-                    hits.len(),
-                    self.root.display()
-                );
-                let mut parts = vec![found];
-                parts.extend(hits.iter().enumerate().map(|(n, h)| h.show(n + 1)));
-                let results = parts.join("\n\n");
+                let (hits, results) = self
+                    .inner
+                    .find(ctx, &self.root, &query, mode, limit)
+                    .await?;
                 match i.summarize_over {
                     Some(over) if hits.len() > over as usize => {
                         let prompt = format!("<results>\n{results}\n</results>\n\nQuery: {query}");
@@ -301,6 +299,36 @@ impl Tool for HistoryTool {
 }
 
 impl Inner {
+    /// Syncs the index and searches it, without the session's current
+    /// epoch (it is in the context already). Returns the hits and them as text.
+    async fn find(
+        self: &Arc<Self>,
+        ctx: &Context,
+        root: &Path,
+        query: &str,
+        mode: Mode,
+        limit: usize,
+    ) -> Result<(Vec<Hit>, String)> {
+        let store = ctx.store().context("sessions are not saved")?;
+        self.sync(store, root).await?;
+        let epoch = store
+            .session(ctx.session_id())
+            .await?
+            .map_or(-1, |s| s.epoch);
+        let current = (ctx.session_id().to_string(), epoch);
+        let (inner, r, q) = (self.clone(), root.to_path_buf(), query.to_string());
+        let hits = tokio::task::spawn_blocking(move || inner.search(&r, &current, &q, mode, limit))
+            .await??;
+        let found = format!(
+            "Found {} results for {query:?} in {}.",
+            hits.len(),
+            root.display()
+        );
+        let mut parts = vec![found];
+        parts.extend(hits.iter().enumerate().map(|(n, h)| h.show(n + 1)));
+        Ok((hits, parts.join("\n\n")))
+    }
+
     fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.conn.lock().unwrap();
         if conn.is_none() {
@@ -866,6 +894,13 @@ mod tests {
             .unwrap();
         assert!(!out.contains("session out"), "{out}");
         assert!(out.contains("session now"), "{out}");
+
+        assert!(session.commands.iter().any(|c| c.name == HISTORY));
+        let ext = History(history.0.clone());
+        let out = ext.command(&session.ctx, &HISTORY, "zebra").await.unwrap();
+        assert!(out.contains("Assistant: zebra crossing"), "{out}");
+        let out = ext.command(&session.ctx, &HISTORY, " ").await.unwrap();
+        assert_eq!(out, "Usage: /history <query>");
 
         let out = run(json!({"action": "read", "session": "in", "seq": 1}))
             .await

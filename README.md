@@ -194,7 +194,8 @@ ask for more with the `RequestAccess` tool; the user approves via ACP
 `request_permission` (the CLI always denies) and the grant lasts for the
 session. The `GrantCommands` extension (enabled in the `rho` binary) adds
 `/grant-read <path>` and `/grant-write <path>` for the user; the model is
-told about the grant with the next prompt. Extensions can use `ctx.grant` / `ctx.set_sandbox`, and run their own code
+told about the grant with the next prompt, and `/sandbox` to list the
+paths the sandbox allows now. Extensions can use `ctx.grant` / `ctx.set_sandbox`, and run their own code
 under the session's rules:
 
 ```rust
@@ -211,7 +212,7 @@ Both are no-ops without a sandbox.
 
 A feature bundles sandbox access and tools that the user turns on and off
 during a session: `/enable ssh git`, `/disable ssh`, and `/features` to
-list them with their state (`FeatureCommands`, enabled in the `rho` binary).
+list them with their state and paths (`FeatureCommands`, enabled in the `rho` binary).
 The system prompt lists the features (not their state, so the prompt cache
 holds), and the model can ask for one with `RequestFeature`; the user
 approves like `RequestAccess`. They are defined
@@ -355,7 +356,8 @@ Ports of the other pi extensions:
   `Memory` and put into FTS5 in `~/.cache/rho/history.db`; search fuses both
   rankings and merges hits on neighbouring chunks. `summarizeOver: n` lets
   a cheap model answer from more than n results instead. `read` shows the
-  messages around a result (ADR 0032).
+  messages around a result (ADR 0032). The user can search too with
+  `/history <query>`; the results are not shown to the model.
 - `Mcp` adds the tools of MCP servers over Streamable HTTP from `mcp.json`
   in the config dir (Claude's `mcpServers` format, `type: "http"`, headers
   with `${VAR}` from the environment) as `mcp__<server>__<tool>` (ADR 0031).

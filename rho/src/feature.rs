@@ -236,13 +236,16 @@ fn list(ctx: &Context) -> String {
         return format!("No features defined; add them to {FILE} in the config dir.");
     }
     let active = ctx.active_features();
-    let lines: Vec<_> = features
-        .iter()
-        .map(|f| {
-            let state = if active.contains(&f.id) { "on" } else { "off" };
-            format!("- `{}` ({state}) {}", f.id, f.description)
-        })
-        .collect();
+    let mut lines = vec![];
+    for f in &features {
+        let state = if active.contains(&f.id) { "on" } else { "off" };
+        lines.push(format!("- `{}` ({state}) {}", f.id, f.description));
+        for (what, paths) in [("read", &f.read), ("read-write", &f.read_write)] {
+            for p in paths {
+                lines.push(format!("  - {what} `{}`", p.display()));
+            }
+        }
+    }
     lines.join("\n")
 }
 
@@ -365,6 +368,7 @@ mod tests {
         assert!(err.to_string().contains("unknown feature nope"));
         RequestFeature.run(ask("ssh"), &ctx).await.unwrap();
         assert_eq!(ctx.active_features(), [FeatureId::new("ssh")]);
+        assert_eq!(list(&ctx), "- `ssh` (on) desc\n  - read `/r`");
         let again = RequestFeature.run(ask("ssh"), &ctx).await.unwrap();
         assert!(again.output.contains("already on"));
     }
