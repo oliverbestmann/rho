@@ -143,6 +143,7 @@ mod tests {
         fn stream(
             &self,
             _: rho::provider::Request,
+            _: &dyn Fn(&mut serde_json::Value),
         ) -> futures::stream::BoxStream<'static, anyhow::Result<rho::provider::Event>> {
             let text = rho::provider::Event::TextDelta(self.0.into());
             Box::pin(futures::stream::iter([Ok(text)]))

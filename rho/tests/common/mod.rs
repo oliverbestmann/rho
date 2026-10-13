@@ -15,6 +15,8 @@ use rho::store::SessionId;
 pub struct Scripted {
     pub responses: Mutex<Vec<Vec<Event>>>,
     pub requests: Mutex<Vec<Request>>,
+    /// `{system, messages}` of each request, after the `before_send` hooks.
+    pub bodies: Mutex<Vec<serde_json::Value>>,
 }
 
 impl Scripted {
@@ -28,7 +30,14 @@ impl Scripted {
 }
 
 impl Provider for Scripted {
-    fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>> {
+    fn stream(
+        &self,
+        request: Request,
+        before_send: &dyn Fn(&mut serde_json::Value),
+    ) -> BoxStream<'static, Result<Event>> {
+        let mut body = serde_json::json!({"system": request.system, "messages": request.messages});
+        before_send(&mut body);
+        self.bodies.lock().unwrap().push(body);
         self.requests.lock().unwrap().push(request);
         let events = self
             .responses

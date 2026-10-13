@@ -292,7 +292,13 @@ pub enum Event {
 /// A model backend. Implementations stream events for a single request;
 /// dropping the stream cancels the request.
 pub trait Provider: Send + Sync {
-    fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>>;
+    /// `before_send` must be called with the JSON body right before it is
+    /// posted, see `Extension::before_send`.
+    fn stream(
+        &self,
+        request: Request,
+        before_send: &dyn Fn(&mut Value),
+    ) -> BoxStream<'static, Result<Event>>;
 
     /// The models offered to the user to pick from. Other models can still
     /// be requested by id.

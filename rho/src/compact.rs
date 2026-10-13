@@ -126,7 +126,7 @@ impl Agent {
             }
         };
 
-        let mut stream = provider.stream(request);
+        let mut stream = session.ctx.stream(&*provider, request);
         let mut summary = String::new();
         let mut usage = Usage::default();
         while let Some(event) = stream.next().await {

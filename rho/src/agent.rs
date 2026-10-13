@@ -458,7 +458,7 @@ impl Session {
         let ctx = self.ctx.clone();
         self.last_request = Some(Instant::now());
         self.requests += 1;
-        let mut stream = self.provider.stream(request);
+        let mut stream = ctx.stream(&*self.provider, request);
         let mut content: Vec<Content> = Vec::new();
         let mut stop = StopReason::EndTurn;
         let mut usage = Usage::default();
@@ -683,6 +683,7 @@ impl Agent {
     ) -> Session {
         let ctx = Context::new(id, roots[0].clone(), frontend, self.registry.clone());
         ctx.set_sandbox(self.sandbox.policy(&roots));
+        ctx.set_extensions(self.extensions.clone());
         if let Some(store) = &store {
             ctx.set_store(store.clone());
         }

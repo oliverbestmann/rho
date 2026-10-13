@@ -21,6 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::auth::{AuthStore, ClientId, CredentialKind, Credentials, Secret};
 use crate::provider::{Content, Event, ModelId, ModelInfo, Provider, ProviderName, Request, Role};
@@ -227,7 +228,7 @@ impl Copilot {
         Self { http, auth }
     }
 
-    async fn send(self, request: Request) -> Result<reqwest::Response> {
+    async fn send(self, request: Request, body: Value) -> Result<reqwest::Response> {
         let creds = self
             .auth
             .fresh(async |http, creds| copilot_token(http, &creds.refresh).await)
@@ -237,13 +238,11 @@ impl Copilot {
             self.http
                 .post(format!("{base}/v1/messages"))
                 .header("anthropic-version", "2023-06-01")
-                .json(&anthropic::build_body(&request, None))
         } else {
-            self.http
-                .post(format!("{base}/responses"))
-                .json(&openai::build_body(&request))
+            self.http.post(format!("{base}/responses"))
         };
         let mut req = req
+            .json(&body)
             .bearer_auth(creds.access.expose())
             .header("accept", "text/event-stream")
             .header("openai-intent", "conversation-edits")
@@ -267,13 +266,25 @@ impl Copilot {
 }
 
 impl Provider for Copilot {
-    fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>> {
-        if is_claude(&request.model) {
+    fn stream(
+        &self,
+        request: Request,
+        before_send: &dyn Fn(&mut Value),
+    ) -> BoxStream<'static, Result<Event>> {
+        let claude = is_claude(&request.model);
+        let mut body = if claude {
+            serde_json::to_value(anthropic::build_body(&request)).expect("body is JSON")
+        } else {
+            openai::build_body(&request)
+        };
+        before_send(&mut body);
+        let send = self.clone().send(request, body);
+        if claude {
             let mut parser = anthropic::SseParser::default();
-            anthropic::events(self.clone().send(request), move |b| parser.feed(b))
+            anthropic::events(send, move |b| parser.feed(b))
         } else {
             let mut parser = openai::SseParser::default();
-            anthropic::events(self.clone().send(request), move |b| parser.feed(b))
+            anthropic::events(send, move |b| parser.feed(b))
         }
     }
 

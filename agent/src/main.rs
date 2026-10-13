@@ -14,6 +14,7 @@ mod plan_mode;
 mod ponytail;
 mod project_context;
 mod ripgrep_find;
+mod secrets;
 mod session_title;
 mod web_ui;
 
@@ -21,6 +22,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let secrets = secrets::Secrets::new();
     rho::run(rho::Options {
         extensions: vec![
             // First, so it sees every tool call before others can block it.
@@ -44,6 +46,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(rho::feature::FeatureCommands),
             // Last, so the project instructions end the system prompt.
             Arc::new(project_context::ProjectContext::default()),
+            // After every extension that changes prompts or tool output.
+            Arc::new(secrets),
         ],
         ..Default::default()
     })

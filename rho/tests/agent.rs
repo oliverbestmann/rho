@@ -177,7 +177,11 @@ async fn unknown_tool_is_reported_as_error() {
 async fn failed_turn_keeps_history_valid() {
     struct Failing;
     impl Provider for Failing {
-        fn stream(&self, _: Request) -> BoxStream<'static, Result<Event>> {
+        fn stream(
+            &self,
+            _: Request,
+            _: &dyn Fn(&mut serde_json::Value),
+        ) -> BoxStream<'static, Result<Event>> {
             stream::iter([Err(anyhow::anyhow!("boom"))]).boxed()
         }
     }
@@ -281,7 +285,11 @@ async fn acp_session_streams_text_and_tool_calls() {
 async fn acp_cancel_stops_a_running_prompt() {
     struct Hangs;
     impl Provider for Hangs {
-        fn stream(&self, _: Request) -> BoxStream<'static, Result<Event>> {
+        fn stream(
+            &self,
+            _: Request,
+            _: &dyn Fn(&mut serde_json::Value),
+        ) -> BoxStream<'static, Result<Event>> {
             stream::iter([Ok(text("thinking..."))])
                 .chain(stream::pending())
                 .boxed()
@@ -429,4 +437,26 @@ async fn tool_images_the_api_rejects_become_errors() {
     };
     assert!(*is_error && images.is_empty(), "{content}");
     assert!(content.contains("unsupported image type"), "{content}");
+}
+
+#[tokio::test]
+async fn before_send_changes_the_body_but_not_the_history() {
+    struct Mask;
+    impl rho::extension::Extension for Mask {
+        fn before_send(&self, _: &rho::extension::Context, body: &mut serde_json::Value) {
+            body["messages"][0]["content"][0]["text"] = json!("masked");
+        }
+    }
+    let provider = Scripted::new(vec![vec![text("ok"), Event::Done(StopReason::EndTurn)]]);
+    let mut agent = Agent::new(provider.clone(), ModelSpec::new("test", "m"), vec![]);
+    agent.extensions = vec![Arc::new(Mask)];
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _) = common::session(&agent, dir.path()).await;
+    agent
+        .run(&mut session, vec![Content::text("secret")])
+        .await
+        .unwrap();
+    let bodies = provider.bodies.lock().unwrap();
+    assert_eq!(bodies[0]["messages"][0]["content"][0]["text"], "masked");
+    assert_eq!(session.history[0].content[0], Content::text("secret"));
 }

@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use crate::agent::AgentEvent;
 use crate::provider::{
-    Content, Event, Message, ModelSpec, Registry, Request, StopReason, Thinking, ToolCallId,
-    ToolName, Usage,
+    Content, Event, Message, ModelSpec, Provider, Registry, Request, StopReason, Thinking,
+    ToolCallId, ToolName, Usage,
 };
 
 /// What a session runs with and has used so far, see `Context::session_info`.
@@ -80,6 +80,10 @@ pub trait Extension: Send + Sync {
     ) -> impl Future<Output = ()> + Send {
         async {}
     }
+
+    /// The JSON body of a model request, right before it is posted. Runs for
+    /// every request: the agent loop, compaction and `Context::complete`.
+    fn before_send(&self, _ctx: &Context, _body: &mut Value) {}
 
     /// The model wants to call a tool. Can change the input or block it; the
     /// block reason is returned to the model as a tool error.
@@ -151,6 +155,7 @@ pub trait DynExtension: Send + Sync {
         ctx: &'a Context,
         request: &'a mut Request,
     ) -> BoxFuture<'a, ()>;
+    fn before_send(&self, ctx: &Context, body: &mut Value);
     fn tool_call<'a>(&'a self, ctx: &'a Context, call: &'a mut ToolCall)
     -> BoxFuture<'a, Decision>;
     fn tool_result<'a>(
@@ -194,6 +199,9 @@ impl<T: Extension> DynExtension for T {
         request: &'a mut Request,
     ) -> BoxFuture<'a, ()> {
         Box::pin(Extension::before_request(self, ctx, request))
+    }
+    fn before_send(&self, ctx: &Context, body: &mut Value) {
+        Extension::before_send(self, ctx, body)
     }
     fn tool_call<'a>(
         &'a self,
@@ -501,6 +509,8 @@ struct Inner {
     features: Mutex<(Vec<Feature>, Vec<FeatureId>)>,
     /// Kept up to date by the agent loop; `profile` is filled in on read.
     info: Mutex<SessionInfo>,
+    /// Their `before_send` hooks run in `Context::stream`.
+    extensions: OnceLock<Vec<Arc<dyn DynExtension>>>,
 }
 
 impl Context {
@@ -525,7 +535,27 @@ impl Context {
             profiles: Mutex::new((vec![Profile::write()], 0)),
             features: Mutex::default(),
             info: Mutex::default(),
+            extensions: OnceLock::new(),
         }))
+    }
+
+    pub(crate) fn set_extensions(&self, extensions: Vec<Arc<dyn DynExtension>>) {
+        let _ = self.0.extensions.set(extensions);
+    }
+
+    /// Sends `request` to `provider`, with the extensions' `before_send`
+    /// hooks. Every model request goes through here.
+    pub fn stream(
+        &self,
+        provider: &dyn Provider,
+        request: Request,
+    ) -> futures::stream::BoxStream<'static, Result<Event>> {
+        let exts = self.0.extensions.get().map_or(&[][..], Vec::as_slice);
+        provider.stream(request, &|body| {
+            for ext in exts {
+                ext.before_send(self, body);
+            }
+        })
     }
 
     /// The session's model, thinking level, profile and usage right now.
@@ -773,17 +803,20 @@ impl Context {
     /// One-off completion outside the conversation, e.g. to name the session.
     pub async fn complete(&self, model: &ModelSpec, system: &str, prompt: &str) -> Result<String> {
         let provider = self.0.registry.resolve(model)?;
-        let mut stream = provider.stream(Request {
-            model: model.id().clone(),
-            system: system.into(),
-            messages: vec![Message {
-                role: crate::provider::Role::User,
-                content: vec![Content::text(prompt)],
-            }],
-            tools: vec![],
-            max_tokens: 1024,
-            thinking: Thinking::Off,
-        });
+        let mut stream = self.stream(
+            &*provider,
+            Request {
+                model: model.id().clone(),
+                system: system.into(),
+                messages: vec![Message {
+                    role: crate::provider::Role::User,
+                    content: vec![Content::text(prompt)],
+                }],
+                tools: vec![],
+                max_tokens: 1024,
+                thinking: Thinking::Off,
+            },
+        );
         let mut text = String::new();
         while let Some(event) = stream.next().await {
             if let Event::TextDelta(t) = event? {

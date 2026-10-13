@@ -18,6 +18,7 @@ use anyhow::{Result, bail};
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::auth::AuthStore;
@@ -145,9 +146,8 @@ impl Anthropic {
         }
     }
 
-    async fn send(self, request: Request) -> Result<reqwest::Response> {
+    async fn send(self, body: Value) -> Result<reqwest::Response> {
         let token = self.auth.access_token().await?;
-        let billing = first_user_text(&request).and_then(billing_header);
         let resp = self
             .http
             .post(&self.url)
@@ -157,7 +157,7 @@ impl Anthropic {
             .header("user-agent", format!("claude-cli/{CLAUDE_CODE_VERSION}"))
             .header("x-app", "cli")
             .header("accept", "text/event-stream")
-            .json(&build_body(&request, billing.as_deref()))
+            .json(&body)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -209,9 +209,16 @@ pub fn sse_data(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
 }
 
 impl Provider for Anthropic {
-    fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>> {
+    fn stream(
+        &self,
+        request: Request,
+        before_send: &dyn Fn(&mut Value),
+    ) -> BoxStream<'static, Result<Event>> {
+        let mut body = serde_json::to_value(build_body(&request)).expect("body is JSON");
+        before_send(&mut body);
+        add_billing(&mut body);
         let mut parser = SseParser::default();
-        events(self.clone().send(request), move |b| parser.feed(b))
+        events(self.clone().send(body), move |b| parser.feed(b))
     }
 
     fn models(&self) -> Vec<ModelInfo> {
@@ -370,10 +377,9 @@ fn cache_last<T>(blocks: &mut [Cached<T>]) {
     }
 }
 
-pub fn build_body<'a>(request: &'a Request, billing: Option<&'a str>) -> Body<'a> {
-    let mut system: Vec<_> = billing
+pub fn build_body(request: &Request) -> Body<'_> {
+    let mut system: Vec<_> = [IDENTITY]
         .into_iter()
-        .chain([IDENTITY])
         .chain(Some(request.system.as_str()).filter(|s| !s.is_empty()))
         .map(|text| Cached::new(SystemBlock::Text { text }))
         .collect();
@@ -422,18 +428,21 @@ pub fn build_body<'a>(request: &'a Request, billing: Option<&'a str>) -> Body<'a
     }
 }
 
-/// Text of the first user message, which the billing header is derived from.
-fn first_user_text(request: &Request) -> Option<&str> {
-    request
-        .messages
-        .iter()
-        .find(|m| m.role == Role::User)?
-        .content
-        .iter()
-        .find_map(|c| match c {
-            Content::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
+/// Puts the billing header first in the system blocks of `body`. Derived
+/// from the body, after `before_send`, so it matches what is sent.
+fn add_billing(body: &mut Value) {
+    let first_user_text = body["messages"]
+        .as_array()
+        .and_then(|ms| ms.iter().find(|m| m["role"] == "user"))
+        .and_then(|m| m["content"].as_array())
+        .and_then(|cs| cs.iter().find(|c| c["type"] == "text"))
+        .and_then(|c| c["text"].as_str());
+    let Some(billing) = first_user_text.and_then(billing_header) else {
+        return;
+    };
+    if let Some(system) = body["system"].as_array_mut() {
+        system.insert(0, serde_json::json!({"type": "text", "text": billing}));
+    }
 }
 
 /// `x-anthropic-billing-header` text derived from the first user message.
@@ -716,12 +725,13 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
-    /// Wire JSON of the body for `request`, with the billing header it gets in `send`.
+    /// Wire JSON of the body for `request`, with the billing header it gets in `stream`.
     fn wire(request: &Request) -> Value {
-        let billing = first_user_text(request).and_then(billing_header);
-        serde_json::to_value(build_body(request, billing.as_deref())).unwrap()
+        let mut body = serde_json::to_value(build_body(request)).unwrap();
+        add_billing(&mut body);
+        body
     }
 
     #[test]

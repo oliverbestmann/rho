@@ -24,7 +24,11 @@
             pname = "rho";
             version = "0.1.0";
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              # Git dependencies (not on crates.io).
+              outputHashes."gitleaks-rs-0.1.0" = "sha256-yfl3w3STqaTWpetVkDJnvH+46aKI4yUBbOgBfyRNlZE=";
+            };
             cargoBuildFlags = [ "-p" "rho-agent" ];
             # Memory/History embeddings: link onnxruntime from nixpkgs; the ld wrapper adds it to the rpath.
             buildInputs = [ pkgs.onnxruntime ];

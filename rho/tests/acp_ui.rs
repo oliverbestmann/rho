@@ -33,8 +33,12 @@ use common::{Scripted, text};
 struct Models(Arc<Scripted>);
 
 impl Provider for Models {
-    fn stream(&self, request: Request) -> BoxStream<'static, Result<Event>> {
-        self.0.stream(request)
+    fn stream(
+        &self,
+        request: Request,
+        before_send: &dyn Fn(&mut serde_json::Value),
+    ) -> BoxStream<'static, Result<Event>> {
+        self.0.stream(request, before_send)
     }
 
     fn models(&self) -> Vec<ModelInfo> {

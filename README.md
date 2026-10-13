@@ -57,7 +57,7 @@ Cargo workspace:
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
-  `ProjectContext`, `WebUi`) and a `main` that calls
+  `ProjectContext`, `Secrets`, `WebUi`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -271,6 +271,7 @@ async fn main() -> anyhow::Result<()> {
 | `session_end(&Context)` | `session_shutdown` | cleanup (runs when the session is dropped) |
 | `before_prompt(&mut PromptSetup)` | `before_agent_start` | add context, per-run system prompt |
 | `before_request(&mut Request)` | `context` / `before_provider_request` | prune or edit the request |
+| `before_send(&Context, &mut Value)` | `before_provider_request` | the JSON body right before it is posted; every request, also compaction and `Context::complete` (sync) |
 | `tool_call(&mut ToolCall) -> Decision` | `tool_call` | block (reason goes to the model) or edit input |
 | `tool_result(&ToolCall, &mut ToolOutput)` | `tool_result` | rewrite output |
 | `turn_end(&TurnEnd)` | `turn_end` | observe content, results, usage (once per model request) |
@@ -322,6 +323,11 @@ Ports of the other pi extensions:
   `git push` or `git tag`, with a summary of the command by
   `claude-haiku-5-5` (or `gpt-6-luna` if that fails); without a UI (CLI) they
   are blocked.
+- `Secrets` masks secrets with the gitleaks rules (`agent/src/gitleaks.toml`,
+  copied from gitleaks' `config/gitleaks.toml`) as `REDACTED`: prompts, the
+  system prompt and tool output, then every request body again
+  (`before_send`, with a notice on a hit). Write/Edit calls that would put
+  `REDACTED` into a file are blocked (ADR 0034).
 - `RipgrepFind` adds `Grep` (pi's `grep`): `rg` for file names or contents,
   sandboxed like `Bash`, 50 lines by default.
 - `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,

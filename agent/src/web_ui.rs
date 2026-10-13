@@ -623,7 +623,11 @@ mod tests {
     struct Scripted(Mutex<Vec<Vec<Event>>>);
 
     impl Provider for Scripted {
-        fn stream(&self, _request: ModelRequest) -> BoxStream<'static, anyhow::Result<Event>> {
+        fn stream(
+            &self,
+            _request: ModelRequest,
+            _: &dyn Fn(&mut serde_json::Value),
+        ) -> BoxStream<'static, anyhow::Result<Event>> {
             let events = self.0.lock().unwrap().remove(0);
             stream::iter(events.into_iter().map(Ok)).boxed()
         }
