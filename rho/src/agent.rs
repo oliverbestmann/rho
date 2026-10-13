@@ -807,6 +807,45 @@ impl Agent {
         false
     }
 
+    /// `/redact <phrase>`: replaces `phrase` with `store::MASK` in the
+    /// session's history, in every stored session and, through each
+    /// extension's `redact` command, in their stores. Shows a summary.
+    pub async fn redact(&self, session: &mut Session, phrase: &str) -> Result<()> {
+        if phrase.is_empty() {
+            bail!("usage: /redact <phrase>");
+        }
+        for m in &mut session.history {
+            if crate::store::redact_content(&mut m.content, phrase) {
+                // The prompt cache no longer matches.
+                session.last_request = None;
+            }
+        }
+        if let Some(title) = session.ctx.title().filter(|t| t.contains(phrase)) {
+            session
+                .ctx
+                .restore_title(Some(title.replace(phrase, crate::store::MASK)));
+        }
+        let mut lines = vec![];
+        if let Some(p) = &session.persist {
+            let (messages, sessions) = p.store.redact(phrase).await?;
+            lines.push(format!(
+                "- Sessions: {messages} messages in {sessions} sessions"
+            ));
+        }
+        let name = CommandName::from_static("redact");
+        for ext in &self.extensions {
+            if let Some(reply) = ext.command(&session.ctx, &name, phrase).await {
+                lines.push(format!("- {reply}"));
+            }
+        }
+        session.save().await;
+        session.ctx.emit(AgentEvent::Text(&format!(
+            "**Redacted**\n\n{}",
+            lines.join("\n")
+        )));
+        Ok(())
+    }
+
     /// Runs a turn for messages sent with `trigger_turn` while idle.
     /// Returns `None` if there is nothing to run.
     pub async fn run_triggered(&self, session: &mut Session) -> Option<Result<StopReason>> {

@@ -90,6 +90,8 @@ const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_t
     last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, features, created_at, \
     updated_at";
 
+pub const MASK: &str = "REDACTED";
+
 /// A session database. Cheap to clone; clones share the connection.
 #[derive(Clone)]
 pub struct Store {
@@ -527,6 +529,64 @@ impl Store {
         .await
     }
 
+    /// Replaces `phrase` with `MASK` in all messages and titles of all
+    /// sessions, see `redact_content`. Deleted bytes are zeroed and the WAL
+    /// is checkpointed, so no copy stays in the files. Returns the number of
+    /// changed messages and sessions.
+    pub(crate) async fn redact(&self, phrase: &str) -> Result<(usize, usize)> {
+        let phrase = phrase.to_string();
+        // The content column is serde_json output, so it holds the phrase escaped the same way.
+        let escaped = serde_json::to_string(&phrase)?;
+        let escaped = escaped[1..escaped.len() - 1].to_string();
+        self.call(move |c| {
+            c.pragma_update(None, "secure_delete", true)?;
+            let tx = c.transaction()?;
+            let mut rows = vec![];
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT session_id, seq, content FROM messages WHERE instr(content, ?1) > 0",
+                )?;
+                let mut q = stmt.query([&escaped])?;
+                while let Some(r) = q.next()? {
+                    let (id, seq): (SessionId, i64) = (r.get(0)?, r.get(1)?);
+                    let mut content: Vec<Content> = serde_json::from_str(r.get_ref(2)?.as_str()?)
+                        .with_context(|| format!("session {id}: message {seq}"))?;
+                    if redact_content(&mut content, &phrase) {
+                        rows.push((id, seq, content));
+                    }
+                }
+            }
+            let mut sessions = std::collections::HashSet::new();
+            for (id, seq, content) in &rows {
+                tx.execute(
+                    "UPDATE messages SET content = ?3, text = ?4 WHERE session_id = ?1 AND seq = ?2",
+                    params![id, seq, serde_json::to_string(content)?, plain_text(content)],
+                )?;
+                sessions.insert(id.clone());
+            }
+            let mut stmt = tx.prepare(
+                "UPDATE sessions SET title = replace(title, ?1, ?2) WHERE instr(title, ?1) > 0
+                 RETURNING id",
+            )?;
+            for id in stmt.query_map([phrase.as_str(), MASK], |r| r.get(0))? {
+                sessions.insert(id?);
+            }
+            drop(stmt);
+            // A new `updated_at` makes the History index rebuild the session.
+            let now = now_ms();
+            for id in &sessions {
+                tx.execute(
+                    "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?;
+            }
+            tx.commit()?;
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            Ok((rows.len(), sessions.len()))
+        })
+        .await
+    }
+
     /// Sets the title of a stored session; no-op if it is not stored yet.
     pub(crate) async fn set_title(&self, id: &SessionId, title: &str) -> Result<()> {
         let (id, title) = (id.clone(), title.to_string());
@@ -598,6 +658,44 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
     })())
 }
 
+/// Replaces `phrase` with `MASK` in text, tool calls and tool results.
+/// Thinking blocks containing it are dropped: changed text would break their
+/// signature. Returns whether anything changed.
+pub(crate) fn redact_content(content: &mut Vec<Content>, phrase: &str) -> bool {
+    fn replace(s: &mut String, phrase: &str) -> bool {
+        let hit = s.contains(phrase);
+        if hit {
+            *s = s.replace(phrase, MASK);
+        }
+        hit
+    }
+    fn walk(v: &mut serde_json::Value, phrase: &str) -> bool {
+        match v {
+            serde_json::Value::String(s) => replace(s, phrase),
+            serde_json::Value::Array(a) => a.iter_mut().fold(false, |h, v| walk(v, phrase) | h),
+            serde_json::Value::Object(o) => o.values_mut().fold(false, |h, v| walk(v, phrase) | h),
+            _ => false,
+        }
+    }
+    let before = content.len();
+    content
+        .retain(|c| !matches!(c, Content::Thinking { thinking, .. } if thinking.contains(phrase)));
+    let mut changed = content.len() != before;
+    // The API rejects empty messages, and dropping one would break role alternation.
+    if content.is_empty() && changed {
+        content.push(Content::text(MASK));
+    }
+    for c in content.iter_mut() {
+        changed |= match c {
+            Content::Text { text } => replace(text, phrase),
+            Content::ToolUse { input, .. } => walk(input, phrase),
+            Content::ToolResult { content, .. } => replace(content, phrase),
+            _ => false,
+        };
+    }
+    changed
+}
+
 /// Text and tool calls of a message, for search. Thinking and tool output
 /// are left out.
 fn plain_text(content: &[Content]) -> String {
@@ -616,6 +714,7 @@ fn plain_text(content: &[Content]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{ToolCallId, ToolName};
 
     fn msg(role: Role, text: &str) -> Message {
         Message {
@@ -707,6 +806,62 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn redact_replaces_the_phrase_everywhere() {
+        let store = Store::memory().unwrap();
+        let id = SessionId::new("s");
+        store.save_state(state("s", "/w")).await.unwrap();
+        store.set_title(&id, "about s3cr\"et").await.unwrap();
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::Thinking {
+                    thinking: "s3cr\"et".into(),
+                    signature: "sig".into(),
+                },
+                Content::ToolUse {
+                    id: ToolCallId::new("t"),
+                    name: ToolName::new("Bash"),
+                    input: serde_json::json!({"command": ["echo s3cr\"et"]}),
+                },
+            ],
+        };
+        let result = Message {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: ToolCallId::new("t"),
+                content: "s3cr\"et".into(),
+                is_error: false,
+                images: vec![],
+            }],
+        };
+        let history = vec![msg(Role::User, "x s3cr\"et y"), assistant, result];
+        store.save_messages(&id, 0, 0, history).await.unwrap();
+        store.next_epoch(&id).await.unwrap();
+        store
+            .save_messages(
+                &id,
+                1,
+                3,
+                vec![msg(Role::User, "s3cr\"et"), msg(Role::Assistant, "ok")],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.redact("s3cr\"et").await.unwrap(), (4, 1));
+        let all = store.messages(&id).await.unwrap();
+        let json =
+            serde_json::to_string(&all.iter().map(|m| &m.message).collect::<Vec<_>>()).unwrap();
+        assert!(!json.contains("s3cr"), "{json}");
+        assert!(!json.contains("thinking"), "{json}");
+        assert_eq!(all[0].message, msg(Role::User, &format!("x {MASK} y")));
+        let info = store.session(&id).await.unwrap().unwrap();
+        assert_eq!(info.title, Some(format!("about {MASK}")));
+        // Still loads: seq is contiguous.
+        assert_eq!(store.history(&id).await.unwrap().len(), 2);
+        assert_eq!(store.redact("s3cr\"et").await.unwrap(), (0, 0));
     }
 
     #[tokio::test]

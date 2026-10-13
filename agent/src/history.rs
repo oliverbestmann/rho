@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use rho::extension::{Context, Extension, RunEnd, SessionSetup, ToolOutput};
+use rho::extension::{CommandName, Context, Extension, RunEnd, SessionSetup, ToolOutput};
 use rho::provider::{Content, Message, ModelSpec, Role, ToolName, ToolSpec};
 use rho::store::{SessionId, SessionInfo, Store, StoredMessage};
 use rho::tools::{Tool, input_schema, parse, truncate};
@@ -132,6 +132,21 @@ impl Extension for History {
                 root,
             }));
         }
+    }
+
+    /// `/redact` (run by the core for every extension, after the session
+    /// store): drops the index of every session with the phrase; the next
+    /// sync rebuilds it from the redacted store.
+    async fn command(&self, _ctx: &Context, name: &CommandName, phrase: &str) -> Option<String> {
+        if name.as_str() != "redact" {
+            return None;
+        }
+        let (inner, phrase) = (self.0.clone(), phrase.to_string());
+        let n = tokio::task::spawn_blocking(move || inner.redact(&phrase)).await;
+        Some(match n.map_err(anyhow::Error::from).and_then(|n| n) {
+            Ok(n) => format!("History index: {n} sessions dropped, re-indexed on the next search"),
+            Err(e) => format!("History index: failed: {e:#}"),
+        })
     }
 
     async fn run_end(&self, ctx: &Context, _run: &RunEnd) {
@@ -292,6 +307,32 @@ impl Inner {
             *conn = Some(memory::open(&self.path, SCHEMA)?);
         }
         f(conn.as_mut().unwrap())
+    }
+
+    /// Deletes the chunks and index rows of sessions whose text or title
+    /// contain `phrase`. Returns their number.
+    fn redact(&self, phrase: &str) -> Result<usize> {
+        self.with_conn(|c| {
+            memory::purge(c, |tx| {
+                let ids: Vec<String> = tx
+                    .prepare(
+                        "SELECT session_id FROM chunks WHERE instr(text, ?1) > 0
+                         UNION SELECT id FROM sessions WHERE instr(title, ?1) > 0",
+                    )?
+                    .query_map([phrase], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for id in &ids {
+                    tx.execute("DELETE FROM chunks WHERE session_id = ?1", [id])?;
+                    tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+                }
+                // Merges the FTS segments, so deleted terms are gone too.
+                tx.execute(
+                    "INSERT INTO chunks_fts (chunks_fts) VALUES ('optimize')",
+                    [],
+                )?;
+                Ok(ids.len())
+            })
+        })
     }
 
     /// Indexes the sessions under `root` that changed since the last pass.
@@ -802,7 +843,7 @@ mod tests {
         );
         agent.extensions.push(Arc::new(History(history.0.clone())));
 
-        let session = agent
+        let mut session = agent
             .start_session(SessionId::new("s"), &root, vec![], Arc::new(NoFrontend))
             .await
             .unwrap();
@@ -857,6 +898,39 @@ mod tests {
             out,
             "Answer from cheap/m over 1 results for \"okapi\":\n\nthe answer"
         );
+
+        agent.redact(&mut session, "zebra").await.unwrap();
+        let raw: i64 = history
+            .0
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM chunks WHERE instr(text, 'zebra') > 0",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(raw, 0);
+        let tool = session.tool(&ToolName::from_static("History")).unwrap();
+        let out = tool
+            .run(
+                json!({"action": "search", "query": "zebra", "mode": "keyword"}),
+                &session.ctx,
+            )
+            .await
+            .unwrap()
+            .output;
+        assert!(!out.contains("crossing"), "{out}");
+        let out = tool
+            .run(
+                json!({"action": "read", "session": "in", "seq": 0}),
+                &session.ctx,
+            )
+            .await
+            .unwrap()
+            .output;
+        assert!(!out.contains("zebra"), "{out}");
+        assert!(out.contains(rho::store::MASK), "{out}");
 
         // No marker, no tool.
         let session = agent

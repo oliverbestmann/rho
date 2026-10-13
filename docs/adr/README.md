@@ -42,3 +42,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0032](0032-project-history-search.md) | Project history search: hybrid search over past sessions under `.rho-project-root` | Accepted |
 | [0033](0033-features.md) | Features: switchable bundles of sandbox access and tools | Accepted |
 | [0034](0034-secret-redaction.md) | Secrets are masked in two stages with the gitleaks rules | Accepted |
+| [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |

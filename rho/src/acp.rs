@@ -306,6 +306,10 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                                 .compact(&mut session, &focus)
                                 .await
                                 .map(|()| provider::StopReason::EndTurn),
+                            Some(("redact", phrase)) => agent
+                                .redact(&mut session, &phrase)
+                                .await
+                                .map(|()| provider::StopReason::EndTurn),
                             Some(("usage", _)) => {
                                 session.ctx.emit(AgentEvent::Text(&session.usage_report()));
                                 Ok(provider::StopReason::EndTurn)
@@ -416,6 +420,13 @@ fn commands(session: &Session) -> Vec<AvailableCommand> {
             )),
         ),
         AvailableCommand::new("usage", "Show token, cache and cost usage of this session"),
+        AvailableCommand::new(
+            "redact",
+            "Mask a phrase in all saved sessions, the history index and memories",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("exact phrase"),
+        )),
     ];
     for c in &session.commands {
         let mut command = AvailableCommand::new(c.name.to_string(), &c.description);

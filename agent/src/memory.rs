@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
+use rho::extension::{CommandName, Context, Extension, SessionSetup, ToolOutput};
 use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -100,6 +100,34 @@ impl Extension for Memory {
     async fn session_start(&self, session: &mut SessionSetup) {
         session.tools.push(Arc::new(MemoryTool(self.0.clone())));
     }
+
+    /// `/redact` (run by the core for every extension): deletes memories
+    /// containing the phrase.
+    async fn command(&self, _ctx: &Context, name: &CommandName, phrase: &str) -> Option<String> {
+        if name.as_str() != "redact" {
+            return None;
+        }
+        let (inner, phrase) = (self.0.clone(), phrase.to_string());
+        let n = tokio::task::spawn_blocking(move || inner.redact(&phrase)).await;
+        Some(match n.map_err(anyhow::Error::from).and_then(|n| n) {
+            Ok(n) => format!("Memories: {n} deleted"),
+            Err(e) => format!("Memories: failed: {e:#}"),
+        })
+    }
+}
+
+/// Runs `f` with deleted bytes zeroed, then truncates the WAL, so nothing
+/// deleted stays in the files. Used by `/redact`.
+pub fn purge<T>(
+    c: &mut Connection,
+    f: impl FnOnce(&rusqlite::Transaction) -> Result<T>,
+) -> Result<T> {
+    c.pragma_update(None, "secure_delete", true)?;
+    let tx = c.transaction()?;
+    let out = f(&tx)?;
+    tx.commit()?;
+    c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(out)
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq)]
@@ -236,6 +264,12 @@ fn content_hash(content: &str) -> MemoryHash {
     )
 }
 
+/// `s` as it appears inside a JSON string.
+fn json_escaped(s: &str) -> Result<String> {
+    let quoted = serde_json::to_string(s)?;
+    Ok(quoted[1..quoted.len() - 1].to_string())
+}
+
 pub fn blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
@@ -280,6 +314,20 @@ fn get(c: &Connection, hash: &MemoryHash) -> Result<Mem> {
 }
 
 impl Inner {
+    fn redact(&self, phrase: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        if conn.is_none() {
+            *conn = Some(open(&self.path, SCHEMA)?);
+        }
+        purge(conn.as_mut().unwrap(), |tx| {
+            Ok(tx.execute(
+                "DELETE FROM memories WHERE instr(content, ?1) > 0 OR instr(tags, ?2) > 0
+                     OR instr(metadata, ?2) > 0",
+                params![phrase, json_escaped(phrase)?],
+            )?)
+        })
+    }
+
     fn run(&self, i: &Input) -> Result<String> {
         let action = format!("{:?}", i.action).to_lowercase();
         let need = |s: &Option<String>, what: &str| {
@@ -640,6 +688,39 @@ mod tests {
         ] {
             assert_eq!(run(v).await.unwrap_err().to_string(), err);
         }
+    }
+
+    #[tokio::test]
+    async fn redact_deletes_matching_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::new(dir.path().join("memory.db"), Box::new(letters));
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
+        let tool = MemoryTool(memory.0.clone());
+        for v in [
+            json!({"action": "store", "content": "key is s3\"cr"}),
+            json!({"action": "store", "content": "zzz", "tags": ["s3\"cr"]}),
+            json!({"action": "store", "content": "qqq"}),
+        ] {
+            tool.run(v, &ctx).await.unwrap();
+        }
+        let redact = CommandName::from_static("redact");
+        let out = memory.command(&ctx, &redact, "s3\"cr").await;
+        assert_eq!(out.as_deref(), Some("Memories: 2 deleted"));
+        let other = memory
+            .command(&ctx, &CommandName::from_static("x"), "q")
+            .await;
+        assert_eq!(other, None);
+        let out = tool.run(json!({"action": "health"}), &ctx).await.unwrap();
+        assert!(
+            out.output.starts_with("Memory store: 1 memories"),
+            "{}",
+            out.output
+        );
     }
 
     /// Downloads the real model (~90 MB) on first run.

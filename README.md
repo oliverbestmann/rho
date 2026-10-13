@@ -157,6 +157,15 @@ with foreign keys and checks, in WAL mode so processes can share the file.
 history is the messages of its latest epoch. Each message also stores its
 text and tool calls as plain text, ready for full-text search.
 
+`/redact <phrase>` replaces an exact phrase with the secrets marker
+(`store::MASK`) in every stored session (all epochs, titles), in the open
+session, and through each extension's `redact` command in the `History`
+index (dropped, rebuilt on the next search) and `Memory` (matching memories
+are deleted). Thinking blocks with the phrase are dropped, since their
+signature covers the text. The databases zero deleted bytes and truncate
+their WAL. Other open sessions keep the phrase in memory until reopened
+(ADR 0035).
+
 Extensions read the database through `ctx.store()` (`session`, `list`,
 `history`, `messages` for all epochs); writing is up to rho. `SessionSetup::resumed` tells
 `session_start` that a stored session continues (`SessionTitle` keeps its
