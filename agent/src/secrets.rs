@@ -10,12 +10,17 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::hash::{BuildHasher, RandomState};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use anyhow::Result;
+use futures::future::BoxFuture;
 use gitleaks_rs::{Config, Scanner};
-use rho::extension::{Context, Decision, Extension, PromptSetup, ToolCall, ToolOutput};
-use rho::provider::Content;
-use serde_json::Value;
+use rho::extension::{
+    Context, Decision, Extension, PromptSetup, SessionSetup, ToolCall, ToolOutput,
+};
+use rho::provider::{Content, ToolSpec};
+use rho::tools::DynTool;
+use serde_json::{Value, json};
 
 const RULES: &str = include_str!("gitleaks.toml");
 const MARKER: &str = "REDACTED";
@@ -99,9 +104,45 @@ fn markers(text: &str) -> usize {
 }
 
 /// Why a Write or Edit is blocked: it adds `REDACTED` to the file.
-const BLOCKED: &str = "this would write REDACTED into the file, where a secret was masked. You never see the real secret; leave the masked part out of your change (for Edit, choose oldText around it)";
+const BLOCKED: &str = "this would write REDACTED into the file, where a secret was masked. You never see the real secret; leave the masked part out of your change (for Edit, choose oldText around it). If you really mean to write the marker itself (e.g. in a test or docs), repeat the call with allowMasked: true";
+
+/// Write or Edit with an extra `allowMasked` input, for calls that mean to
+/// write the marker itself; stripped before the tool runs.
+struct AllowMasked(Arc<dyn DynTool>);
+
+impl DynTool for AllowMasked {
+    fn spec(&self) -> ToolSpec {
+        let mut spec = self.0.spec();
+        spec.input_schema["properties"]["allowMasked"] = json!({
+            "type": "boolean",
+            "description": "Only when a call was blocked for writing the masked-secret marker and you really mean to write the marker itself",
+        });
+        spec
+    }
+    fn run<'a>(&'a self, mut input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>> {
+        if let Some(o) = input.as_object_mut() {
+            o.remove("allowMasked");
+        }
+        self.0.run(input, ctx)
+    }
+    fn describe(&self, input: &Value) -> Option<String> {
+        self.0.describe(input)
+    }
+    fn rules(&self) -> &'static [&'static str] {
+        self.0.rules()
+    }
+}
 
 impl Extension for Secrets {
+    async fn session_start(&self, session: &mut SessionSetup) {
+        for tool in &mut session.tools {
+            let name = tool.spec().name;
+            if name == rho::edit::EDIT || name == rho::tools::WRITE {
+                *tool = Arc::new(AllowMasked(tool.clone()));
+            }
+        }
+    }
+
     async fn before_prompt(&self, _ctx: &Context, prompt: &mut PromptSetup) {
         self.redact(&mut prompt.system);
         for content in &mut prompt.content {
@@ -130,6 +171,9 @@ impl Extension for Secrets {
 
     async fn tool_call(&self, ctx: &Context, call: &mut ToolCall) -> Decision {
         let input = &call.input;
+        if input["allowMasked"] == true {
+            return Decision::Allow;
+        }
         let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
         let adds = if call.name == rho::edit::EDIT {
             let edits = input["edits"].as_array().into_iter().flatten();
@@ -160,7 +204,6 @@ impl Extension for Secrets {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use rho::extension::NoFrontend;
     use rho::provider::{Registry, ToolCallId, ToolName};
@@ -188,6 +231,36 @@ mod tests {
             name,
             input,
         }
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_get_allow_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path());
+        let mut setup = SessionSetup {
+            ctx: ctx.clone(),
+            tools: rho::tools::builtin(),
+            system: String::new(),
+            commands: vec![],
+            resumed: false,
+            profiles: vec![],
+            features: vec![],
+        };
+        Secrets::new().session_start(&mut setup).await;
+        let tool = |name| {
+            let t = setup.tools.iter().find(|t| t.spec().name == name).unwrap();
+            (
+                t.clone(),
+                t.spec().input_schema["properties"]["allowMasked"].is_object(),
+            )
+        };
+        assert!(tool(rho::edit::EDIT).1);
+        assert!(!tool(rho::tools::BASH).1);
+        let (write, has) = tool(rho::tools::WRITE);
+        assert!(has);
+        let input = json!({"path": "f", "content": "x", "allowMasked": true});
+        write.run(input, &ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("f")).unwrap(), "x");
     }
 
     #[test]
@@ -285,6 +358,9 @@ mod tests {
             decide(EDIT, edit("k=1", "k=REDACTED")).await,
             Decision::Block(_)
         ));
+        let mut allowed = write("new", &format!("k={MARKER}"));
+        allowed["allowMasked"] = true.into();
+        assert_eq!(decide(WRITE, allowed).await, Decision::Allow);
         assert_eq!(
             decide(EDIT, edit("k=REDACTED", "k=REDACTED\nl=2")).await,
             Decision::Allow

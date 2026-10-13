@@ -31,7 +31,12 @@ to `agent/src/gitleaks.toml`. Secrets become `REDACTED`.
 - The Anthropic billing header is derived from the body after `before_send`.
 - Write calls that add `REDACTED` to a file, and Edit calls whose `newText`
   has more of it than `oldText`, are blocked: the model never sees the real
-  secret and would overwrite it.
+  secret and would overwrite it. The block message tells the model it can
+  repeat the call with `allowMasked: true` when it means to write the
+  marker itself, e.g. in tests or docs. `Secrets` adds that field in
+  `session_start` by wrapping Write and Edit (schema plus the field
+  stripped before the tool runs), so the core tools don't know about it.
+  This trusts the model to tell the two cases apart.
 
 ## Consequences
 

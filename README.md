@@ -336,7 +336,8 @@ Ports of the other pi extensions:
   copied from gitleaks' `config/gitleaks.toml`) as `REDACTED`: prompts, the
   system prompt and tool output, then every request body again
   (`before_send`, with a notice on a hit). Write/Edit calls that would put
-  `REDACTED` into a file are blocked (ADR 0034).
+  `REDACTED` into a file are blocked unless the call sets `allowMasked: true`
+  (ADR 0034).
 - `RipgrepFind` adds `Grep` (pi's `grep`): `rg` for file names or contents,
   sandboxed like `Bash`, 50 lines by default.
 - `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,
