@@ -13,10 +13,9 @@ use std::hash::{BuildHasher, RandomState};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Result;
-use futures::future::BoxFuture;
 use gitleaks_rs::{Config, Scanner};
 use rho::extension::{
-    Context, Decision, Extension, PromptSetup, SessionSetup, ToolCall, ToolOutput,
+    BoxFuture, Context, Decision, Extension, PromptSetup, SessionSetup, ToolCall, ToolOutput,
 };
 use rho::provider::{Content, ToolSpec};
 use rho::tools::DynTool;
