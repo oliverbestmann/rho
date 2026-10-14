@@ -13,6 +13,8 @@ serve several editors, with `rho acp` on stdio only forwarding to it.
 
 ## Decision
 
+(Since ADR 0038 this is `rho daemon --listen ADDR`.)
+
 `rho acp --listen ADDR` serves ACP on `ws://ADDR/` (axum, `rho/src/acp_ws.rs`)
 instead of stdio. It lives in the rho crate, because extensions cannot add
 subcommands.

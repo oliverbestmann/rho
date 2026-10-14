@@ -45,3 +45,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |
 | [0036](0036-skills.md) | Skills as an extension: `ReadSkill` tool and `/skill:<name>` | Accepted |
 | [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted |
+| [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted |

@@ -14,7 +14,9 @@ const USAGE: &str = "\
 usage:
   rho [options] <prompt...>   one-shot: run the prompt, print the answer
   rho acp [options]           serve the Agent Client Protocol on stdio
-  rho acp --listen ADDR       ... on ws://ADDR/ instead, with a bearer token
+  rho acp --daemon [options]  ... through the daemon, starting it with the options if needed
+  rho daemon [options]        serve ACP for `acp --daemon` on ~/.config/rho/daemon/acp.sock
+  rho daemon --listen ADDR    ... and on ws://ADDR/, with a bearer token
   rho login [anthropic]       sign in with a Claude Pro/Max subscription
   rho login github-copilot    sign in with GitHub Copilot (Claude and GPT models)
 
@@ -26,7 +28,7 @@ env:
   RHO_AUTH_FILE      credential file
   RHO_COMPACT_MODEL  model for /compact when the cache expired
   RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
-  RHO_ACP_TOKEN      token for `acp --listen`, default from ~/.config/rho/acp-token (created)
+  RHO_ACP_TOKEN      token for `daemon --listen`, default from ~/.config/rho/acp-token (created)
 
 files in ~/.config/rho: PREAMBLE_SYSTEM.md (replaces the preamble), APPEND_SYSTEM.md, AGENTS.md,
 project_context.json (approved project AGENTS.md dirs), mcp.json (MCP servers over HTTP);
@@ -92,12 +94,22 @@ impl Default for Options {
 /// The `rho` command line (one-shot, `acp`, `login`).
 pub async fn run(options: Options) -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let model = take_flag(&mut args, "-m", "--model")?
+    let model_flag = take_flag(&mut args, "-m", "--model")?;
+    let thinking_flag = take_flag(&mut args, "-t", "--thinking")?;
+    // For a daemon that `acp --daemon` starts.
+    let mut daemon_args = vec![];
+    if let Some(m) = &model_flag {
+        daemon_args.extend(["--model".to_string(), m.clone()]);
+    }
+    if let Some(t) = &thinking_flag {
+        daemon_args.extend(["--thinking".to_string(), t.clone()]);
+    }
+    let model = model_flag
         .or_else(|| std::env::var("RHO_MODEL").ok())
         .map(|m| m.parse())
         .transpose()?
         .unwrap_or_else(|| options.model.clone());
-    let thinking: Thinking = take_flag(&mut args, "-t", "--thinking")?
+    let thinking: Thinking = thinking_flag
         .or_else(|| std::env::var("RHO_THINKING").ok())
         .map(|t| t.parse())
         .transpose()?
@@ -115,29 +127,42 @@ pub async fn run(options: Options) -> Result<()> {
             Some(other) => bail!("unknown provider {:?}\n{USAGE}", other.as_str()),
         },
         Some("acp") => {
-            let listen = take_flag(&mut args, "-l", "--listen")?;
-            let sessions_db = options.sessions_db.clone();
-            let mut agent = make_agent(options, &model, thinking)?;
-            agent.sessions_db = sessions_db;
-            let agent = Arc::new(agent);
-            if let Some(addr) = listen {
-                let config_dir = crate::prompt::config_dir();
-                let token = crate::acp_ws::token(&config_dir)?;
-                let listener = tokio::net::TcpListener::bind(&addr)
-                    .await
-                    .with_context(|| format!("listening on {addr}"))?;
-                eprintln!(
-                    "rho acp: ws://{}/ (token from RHO_ACP_TOKEN or {})",
-                    listener.local_addr()?,
-                    config_dir.join(crate::acp_ws::TOKEN_FILE).display()
-                );
-                return crate::acp_ws::serve(agent, listener, token).await;
+            if args.iter().any(|a| a == "--daemon") {
+                let dir = crate::prompt::config_dir().join(crate::acp_ws::DAEMON_DIR);
+                return crate::acp_ws::connect_stdio(&dir, &daemon_args).await;
             }
+            let agent = Arc::new(acp_agent(options, &model, thinking)?);
             use agent_client_protocol::ConnectTo;
             crate::acp::agent(agent)
                 .connect_to(agent_client_protocol::Stdio::new())
                 .await
                 .map_err(|e| anyhow::anyhow!("acp: {e}"))
+        }
+        Some("daemon") => {
+            let listen = take_flag(&mut args, "-l", "--listen")?;
+            let config_dir = crate::prompt::config_dir();
+            let dir = config_dir.join(crate::acp_ws::DAEMON_DIR);
+            let Some((_lock, socket)) = crate::acp_ws::bind_daemon(&dir)? else {
+                eprintln!("rho daemon: already running");
+                return Ok(());
+            };
+            eprintln!("rho daemon: {}", crate::acp_ws::socket_path(&dir).display());
+            let agent = Arc::new(acp_agent(options, &model, thinking)?);
+            let unix = crate::acp_ws::serve(agent.clone(), socket, None);
+            let Some(addr) = listen else {
+                return unix.await;
+            };
+            let token = crate::acp_ws::token(&config_dir)?;
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .with_context(|| format!("listening on {addr}"))?;
+            eprintln!(
+                "rho daemon: ws://{}/ (token from RHO_ACP_TOKEN or {})",
+                listener.local_addr()?,
+                config_dir.join(crate::acp_ws::TOKEN_FILE).display()
+            );
+            let tcp = crate::acp_ws::serve(agent, listener, Some(token));
+            tokio::try_join!(unix, tcp).map(|_| ())
         }
         Some(_) => one_shot(make_agent(options, &model, thinking)?, args.join(" ")).await,
     }
@@ -153,6 +178,14 @@ fn take_flag(args: &mut Vec<String>, short: &str, long: &str) -> Result<Option<S
         bail!("{long} needs a value\n{USAGE}");
     }
     Ok(Some(args.remove(i)))
+}
+
+/// An agent that saves sessions, for ACP.
+fn acp_agent(options: Options, model: &ModelSpec, thinking: Thinking) -> Result<Agent> {
+    let sessions_db = options.sessions_db.clone();
+    let mut agent = make_agent(options, model, thinking)?;
+    agent.sessions_db = sessions_db;
+    Ok(agent)
 }
 
 fn make_agent(options: Options, model: &ModelSpec, thinking: Thinking) -> Result<Agent> {

@@ -45,7 +45,8 @@ A small ACP-native coding agent in Rust. Prototype.
   project waits for the index. Vector search is a full scan, and the model
   is weak on code. Only one session database is searched.
 - ACP over WebSocket: no TLS (put a `wss://` proxy or tunnel in front), one
-  shared token. A dropped connection ends its open sessions and running
+  shared token. Sessions belong to their connection (also through the
+  daemon). A dropped connection ends its open sessions and running
   turns; clients continue them with `session/load`.
 - Images: JPEG, PNG, GIF and WebP up to 5 MB.
 
@@ -71,7 +72,7 @@ Cargo workspace:
 - `rho/src/extension.rs` - `Extension` hooks, `Context` session handle, `Frontend` trait
 - `rho/src/store.rs` - session persistence in SQLite
 - `rho/src/acp.rs` - Agent Client Protocol server (initialize, session/new, load, resume, list, close, prompt, cancel)
-- `rho/src/acp_ws.rs` - ACP over WebSocket (`rho acp --listen`), with a bearer token
+- `rho/src/acp_ws.rs` - ACP over WebSocket: `rho daemon` (Unix socket, `--listen` with a bearer token) and `rho acp --daemon`
 
 ## Use
 
@@ -84,7 +85,8 @@ rho "what does src/main.rs do?"            # one-shot, prints the answer
 rho -m anthropic/claude-opus-4-8 "..."     # pick a model
 rho -t low "..."                           # thinking: off|low|medium|high|xhigh|max (default high)
 rho acp                                    # ACP on stdio
-rho acp --listen 127.0.0.1:8788            # ACP on ws://127.0.0.1:8788/
+rho acp --daemon                           # ACP on stdio, through the shared daemon
+rho daemon --listen 127.0.0.1:8788         # the daemon, also on ws://127.0.0.1:8788/
 ```
 
 `RHO_MODEL` and `RHO_THINKING` set the defaults for `-m` and `-t`.
@@ -449,9 +451,19 @@ Tools can return images too: set `ToolOutput::images`.
 }
 ```
 
-## ACP over WebSocket
+## Daemon and ACP over WebSocket
 
-`rho acp --listen ADDR` serves ACP on `ws://ADDR/` instead of stdio, for
+`rho daemon` is one rho for all editors. It serves ACP over WebSocket on
+`~/.config/rho/daemon/acp.sock` (directory 0700, no token). `rho acp --daemon`
+is what the editor runs: an ACP agent on stdio that only forwards lines to
+the daemon and back. If no daemon answers, it starts one in the background
+(log in `~/.config/rho/daemon/log`), with its own `-m`/`-t` and environment.
+Later clients' flags are ignored, and tools run with the daemon's
+environment, not the editor's. A lock file keeps it to one daemon. After a
+rebuild, stop the old one (`pkill -f 'rho daemon'`); the next editor starts
+the new one.
+
+`rho daemon --listen ADDR` also serves ACP on `ws://ADDR/`, for
 clients like [acp-ui](https://github.com/formulahendry/acp-ui) (web, phone).
 Each text frame carries one JSON-RPC message (several, split by newlines,
 are accepted too). Every connection gets its own ACP connection to one
