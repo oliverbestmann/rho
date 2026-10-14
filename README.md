@@ -18,7 +18,7 @@ A small ACP-native coding agent in Rust. Prototype.
 - Extensions with pi-style hooks, compiled into the binary. The `rho`
   binary brings a git commit/push gate, Go checks and docs, `Grep`, URL
   fetching, local memories, search over a project's past sessions, MCP
-  tools over HTTP, background tasks, a web view and image input.
+  tools over HTTP, background tasks and image input.
 
 ## Limitations
 
@@ -44,7 +44,9 @@ A small ACP-native coding agent in Rust. Prototype.
 - `History`: needs a `.rho-project-root` file. The first search in a large
   project waits for the index. Vector search is a full scan, and the model
   is weak on code. Only one session database is searched.
-- Web view: no streamed text, no TLS, a shared password.
+- ACP over WebSocket: no TLS (put a `wss://` proxy or tunnel in front), one
+  shared token. A dropped connection ends its open sessions and running
+  turns; clients continue them with `session/load`.
 - Images: JPEG, PNG, GIF and WebP up to 5 MB.
 
 The reasons behind these are in [docs/adr](docs/adr/README.md).
@@ -57,7 +59,7 @@ Cargo workspace:
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
-  `ProjectContext`, `Secrets`, `WebUi`) and a `main` that calls
+  `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
@@ -69,6 +71,7 @@ Cargo workspace:
 - `rho/src/extension.rs` - `Extension` hooks, `Context` session handle, `Frontend` trait
 - `rho/src/store.rs` - session persistence in SQLite
 - `rho/src/acp.rs` - Agent Client Protocol server (initialize, session/new, load, resume, list, close, prompt, cancel)
+- `rho/src/acp_ws.rs` - ACP over WebSocket (`rho acp --listen`), with a bearer token
 
 ## Use
 
@@ -81,6 +84,7 @@ rho "what does src/main.rs do?"            # one-shot, prints the answer
 rho -m anthropic/claude-opus-4-8 "..."     # pick a model
 rho -t low "..."                           # thinking: off|low|medium|high|xhigh|max (default high)
 rho acp                                    # ACP on stdio
+rho acp --listen 127.0.0.1:8788            # ACP on ws://127.0.0.1:8788/
 ```
 
 `RHO_MODEL` and `RHO_THINKING` set the defaults for `-m` and `-t`.
@@ -419,39 +423,6 @@ implementing. Rejected: the session stays in plan mode and the run stops, so
 the user can say what to change. Picking `write` in the selector needs no
 approval.
 
-## Web view
-
-`WebUi` (in the `rho` binary, `agent/src/web_ui.rs`) serves a page to follow
-sessions and queue messages for them, also from a phone. It is configured in
-`~/.config/rho/web.json`:
-
-```json
-{ "listen": "0.0.0.0:8787", "password": "something long" }
-```
-
-Both are optional. `listen` defaults to `0.0.0.0:8787` (`RHO_WEB_UI`
-overrides it, `off` disables the page); a taken port moves on to the next of
-ten, e.g. for a second rho. Requests from this machine need no password.
-Other devices need `password`: the page asks once and keeps it. Without a
-password they are refused. Anyone with it can send prompts to the agent, so
-pick a long one. Only `localhost` and IP addresses are accepted as `Host` (no
-DNS rebinding). `/web` in a session shows the link.
-
-The list has this process's open sessions first, then the other sessions
-in the same databases (closed, or open in another rho), newest first. Those
-show their stored history and are read-only.
-
-It is an extension like any other, so it sees what hooks see: messages as
-they go to the model (prompts, queued messages, profile notes), tool calls
-as they start and finish, and the model's text and thinking when its turn
-ends; it does not stream text. "Working" means a model request started and
-the model has not settled since; a cancelled run stays "working" until the
-next one.
-
-A message from the page shows up in the editor as a notice ("Message from
-the web view") and goes to `ctx.send(text, trigger_turn)`: during a run it
-rides along with the next tool results, when idle it starts a run.
-
 ## Images
 
 rho advertises `promptCapabilities.image`, so ACP clients can attach images
@@ -477,6 +448,23 @@ Tools can return images too: set `ToolOutput::images`.
   }
 }
 ```
+
+## ACP over WebSocket
+
+`rho acp --listen ADDR` serves ACP on `ws://ADDR/` instead of stdio, for
+clients like [acp-ui](https://github.com/formulahendry/acp-ui) (web, phone).
+Each text frame carries one JSON-RPC message (several, split by newlines,
+are accepted too). Every connection gets its own ACP connection to one
+shared agent, so the extensions (memory, MCP, ...) are shared. It replaces
+the earlier web view (ADR 0020); following a session that is open in an
+editor from another device needs one shared rho for both (not yet).
+
+Every client needs the token, also from this machine, since any website can
+open a WebSocket to localhost. It is `RHO_ACP_TOKEN`, else
+`~/.config/rho/acp-token`, created with a random token on first start. Send
+it as `Authorization: Bearer <token>`, or, from browsers, as a
+`bearer.<token>` subprotocol next to `acp.v1` (acp-ui does this for an
+`Authorization` header in its config). Only `acp.v1` is echoed back.
 
 ## Notes on subscription auth
 

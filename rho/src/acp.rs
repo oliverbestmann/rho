@@ -1310,7 +1310,6 @@ fn to_update(
 const MAX_TITLE: usize = 160;
 
 /// Input keys shown in a tool call title, the first present one wins.
-/// Keep in sync with `TITLE_KEYS` in agent/src/web_ui.html.
 const TITLE_KEYS: [&str; 10] = [
     "command", "url", "pattern", "glob", "target", "query", "path", "hash", "id", "action",
 ];

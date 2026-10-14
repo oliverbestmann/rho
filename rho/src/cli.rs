@@ -14,6 +14,7 @@ const USAGE: &str = "\
 usage:
   rho [options] <prompt...>   one-shot: run the prompt, print the answer
   rho acp [options]           serve the Agent Client Protocol on stdio
+  rho acp --listen ADDR       ... on ws://ADDR/ instead, with a bearer token
   rho login [anthropic]       sign in with a Claude Pro/Max subscription
   rho login github-copilot    sign in with GitHub Copilot (Claude and GPT models)
 
@@ -25,6 +26,7 @@ env:
   RHO_AUTH_FILE      credential file
   RHO_COMPACT_MODEL  model for /compact when the cache expired
   RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
+  RHO_ACP_TOKEN      token for `acp --listen`, default from ~/.config/rho/acp-token (created)
 
 files in ~/.config/rho: PREAMBLE_SYSTEM.md (replaces the preamble), APPEND_SYSTEM.md, AGENTS.md,
 project_context.json (approved project AGENTS.md dirs), mcp.json (MCP servers over HTTP);
@@ -113,11 +115,26 @@ pub async fn run(options: Options) -> Result<()> {
             Some(other) => bail!("unknown provider {:?}\n{USAGE}", other.as_str()),
         },
         Some("acp") => {
+            let listen = take_flag(&mut args, "-l", "--listen")?;
             let sessions_db = options.sessions_db.clone();
             let mut agent = make_agent(options, &model, thinking)?;
             agent.sessions_db = sessions_db;
+            let agent = Arc::new(agent);
+            if let Some(addr) = listen {
+                let config_dir = crate::prompt::config_dir();
+                let token = crate::acp_ws::token(&config_dir)?;
+                let listener = tokio::net::TcpListener::bind(&addr)
+                    .await
+                    .with_context(|| format!("listening on {addr}"))?;
+                eprintln!(
+                    "rho acp: ws://{}/ (token from RHO_ACP_TOKEN or {})",
+                    listener.local_addr()?,
+                    config_dir.join(crate::acp_ws::TOKEN_FILE).display()
+                );
+                return crate::acp_ws::serve(agent, listener, token).await;
+            }
             use agent_client_protocol::ConnectTo;
-            crate::acp::agent(Arc::new(agent))
+            crate::acp::agent(agent)
                 .connect_to(agent_client_protocol::Stdio::new())
                 .await
                 .map_err(|e| anyhow::anyhow!("acp: {e}"))

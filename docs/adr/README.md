@@ -27,7 +27,7 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0017](0017-plan-mode-as-extension.md) | Plan mode is an extension with user approval | Accepted |
 | [0018](0018-exact-edit-tool.md) | `Edit` does exact replacements, no fuzzy matching | Accepted |
 | [0019](0019-validate-images-before-history.md) | Validate images before they enter the history | Accepted |
-| [0020](0020-web-view-as-extension.md) | Web view as a hook-only extension; loopback or password | Accepted |
+| [0020](0020-web-view-as-extension.md) | Web view as a hook-only extension; loopback or password | Superseded by 0037 |
 | [0021](0021-background-tasks.md) | Background tasks in process groups, reported with `trigger_turn` | Accepted |
 | [0022](0022-bounded-autonomous-loops.md) | Bound the agent's autonomous loops | Accepted |
 | [0023](0023-layered-system-prompt.md) | System prompt assembled from layered files, fixed per session | Accepted, amended by 0025, 0026, 0027, 0029 |
@@ -44,3 +44,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0034](0034-secret-redaction.md) | Secrets are masked in two stages with the gitleaks rules | Accepted |
 | [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |
 | [0036](0036-skills.md) | Skills as an extension: `ReadSkill` tool and `/skill:<name>` | Accepted |
+| [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted |

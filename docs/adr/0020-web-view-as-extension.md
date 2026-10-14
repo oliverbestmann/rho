@@ -1,6 +1,6 @@
 # 20. Web view as a hook-only extension; loopback or password
 
-- Status: Accepted
+- Status: Superseded by [0037](0037-acp-over-websocket.md)
 - Date: 2026-10-09
 
 ## Context

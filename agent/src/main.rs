@@ -17,7 +17,6 @@ mod ripgrep_find;
 mod secrets;
 mod session_title;
 mod skills;
-mod web_ui;
 
 use std::sync::Arc;
 
@@ -26,8 +25,6 @@ async fn main() -> anyhow::Result<()> {
     let secrets = secrets::Secrets::new();
     rho::run(rho::Options {
         extensions: vec![
-            // First, so it sees every tool call before others can block it.
-            Arc::new(web_ui::WebUi::from_config()),
             Arc::new(rho::sandbox::GrantCommands),
             Arc::new(git_gate::GitGate),
             Arc::new(go_check::GoCheck::default()),
