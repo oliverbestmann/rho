@@ -27,6 +27,7 @@ async fn server() -> String {
     let url = format!("ws://{}/", listener.local_addr().unwrap());
     tokio::spawn(rho::acp_ws::serve(
         Arc::new(agent),
+        Arc::default(),
         listener,
         Some("secret".into()),
     ));
@@ -91,7 +92,12 @@ async fn daemon_socket_through_the_stdio_pump() {
     let (_lock, listener) = rho::acp_ws::bind_daemon(&daemon).unwrap().unwrap();
     // A second daemon finds the lock taken.
     assert!(rho::acp_ws::bind_daemon(&daemon).unwrap().is_none());
-    tokio::spawn(rho::acp_ws::serve(Arc::new(agent()), listener, None));
+    tokio::spawn(rho::acp_ws::serve(
+        Arc::new(agent()),
+        Arc::default(),
+        listener,
+        None,
+    ));
 
     let stream = tokio::net::UnixStream::connect(rho::acp_ws::socket_path(&daemon))
         .await

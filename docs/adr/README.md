@@ -46,3 +46,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0036](0036-skills.md) | Skills as an extension: `ReadSkill` tool and `/skill:<name>` | Accepted |
 | [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted |
 | [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted |
+| [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted |

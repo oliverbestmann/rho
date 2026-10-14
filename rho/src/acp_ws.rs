@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::tungstenite;
 
+use crate::acp::Hub;
 use crate::agent::Agent;
 
 /// In the config dir, unless `RHO_ACP_TOKEN` is set.
@@ -46,19 +47,26 @@ const LOG_FILE: &str = "log";
 
 struct Server {
     agent: Arc<Agent>,
+    hub: Arc<Hub>,
     /// `None` lets everyone in who can reach the listener.
     token: Option<String>,
 }
 
-/// Serves ACP on `/` until the listener fails.
-pub async fn serve<L>(agent: Arc<Agent>, listener: L, token: Option<String>) -> Result<()>
+/// Serves ACP on `/` until the listener fails. Connections share the open
+/// sessions of `hub`.
+pub async fn serve<L>(
+    agent: Arc<Agent>,
+    hub: Arc<Hub>,
+    listener: L,
+    token: Option<String>,
+) -> Result<()>
 where
     L: Listener,
     L::Addr: std::fmt::Debug,
 {
     let app = Router::new()
         .route("/", get(upgrade))
-        .with_state(Arc::new(Server { agent, token }));
+        .with_state(Arc::new(Server { agent, hub, token }));
     axum::serve(listener, app).await.context("acp websocket")
 }
 
@@ -263,7 +271,7 @@ async fn upgrade(
     ws.protocols([SUBPROTOCOL])
         .on_upgrade(async move |socket| {
             eprintln!("rho acp: connection opened");
-            let acp = crate::acp::agent(server.agent.clone());
+            let acp = crate::acp::agent_in(server.agent.clone(), server.hub.clone());
             match acp.connect_to(lines(socket)).await {
                 Ok(()) => eprintln!("rho acp: connection closed"),
                 Err(e) => eprintln!("rho acp: connection ended: {e}"),

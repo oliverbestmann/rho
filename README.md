@@ -45,9 +45,10 @@ A small ACP-native coding agent in Rust. Prototype.
   project waits for the index. Vector search is a full scan, and the model
   is weak on code. Only one session database is searched.
 - ACP over WebSocket: no TLS (put a `wss://` proxy or tunnel in front), one
-  shared token. Sessions belong to their connection (also through the
-  daemon). A dropped connection ends its open sessions and running
-  turns; clients continue them with `session/load`.
+  shared token. A connection that loads a session while a turn runs gets
+  the saved history without tool descriptions, and misses the chunks
+  already streamed of the message in progress. A daemon restart ends all
+  running turns; clients continue with `session/load`.
 - Images: JPEG, PNG, GIF and WebP up to 5 MB.
 
 The reasons behind these are in [docs/adr](docs/adr/README.md).
@@ -463,13 +464,22 @@ environment, not the editor's. A lock file keeps it to one daemon. After a
 rebuild, stop the old one (`pkill -f 'rho daemon'`); the next editor starts
 the new one.
 
+Sessions are shared within the daemon: any connection can `session/load` a
+session that another one has open, gets its history and then every update
+live, including the other clients' prompts. Permission requests and forms go
+to every connection on the session (forms only to clients that support
+them); the first answer counts and the others are withdrawn. A question
+nobody answered waits, also when everyone left: the next client that loads
+the session gets it. A turn keeps running when its connection drops. A session is dropped from memory once no connection has
+it open and nothing runs; `session/close` by the last one cancels its turn.
+
 `rho daemon --listen ADDR` also serves ACP on `ws://ADDR/`, for
 clients like [acp-ui](https://github.com/formulahendry/acp-ui) (web, phone).
 Each text frame carries one JSON-RPC message (several, split by newlines,
 are accepted too). Every connection gets its own ACP connection to one
-shared agent, so the extensions (memory, MCP, ...) are shared. It replaces
-the earlier web view (ADR 0020); following a session that is open in an
-editor from another device needs one shared rho for both (not yet).
+shared agent, so the extensions (memory, MCP, ...) and open sessions are
+shared. It replaces the earlier web view (ADR 0020): to follow a Zed
+session from a phone, load it in acp-ui.
 
 Every client needs the token, also from this machine, since any website can
 open a WebSocket to localhost. It is `RHO_ACP_TOKEN`, else

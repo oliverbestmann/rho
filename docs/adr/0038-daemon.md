@@ -37,9 +37,6 @@ the token, as in ADR 0037 (`rho acp --listen` is gone).
   started it, not of the editor that sent the prompt. Accepted for now; a
   client could later send its environment in `initialize`.
 - Sessions still belong to their connection, so this is one process, not
-  shared sessions yet. Next step: move the session map into a daemon-wide
-  hub, fan updates out to every attached connection, run turns outside the
-  connection so they survive a disconnect, and let `session/load` attach to
-  an open session.
+  shared sessions yet. ADR 0039 shares them.
 - After a rebuild the old daemon keeps running until it is stopped; there is
   no version check. The log grows without rotation.

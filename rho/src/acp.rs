@@ -21,11 +21,15 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectOption, SessionId, SessionInfo as AcpSessionInfo, SessionInfoUpdate,
     SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    StringPropertySchema, Terminal, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage as AcpUsage, UsageUpdate,
+    StringPropertySchema, Terminal, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage as AcpUsage,
+    UsageUpdate,
 };
-use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, Responder};
-use futures::future::{AbortHandle, Abortable};
+use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, JsonRpcRequest, Responder};
+use futures::StreamExt;
+use futures::future::{AbortHandle, AbortRegistration, Abortable};
+use futures::stream::FuturesUnordered;
+use tokio::sync::broadcast;
 
 use crate::agent::{Agent, AgentEvent, Session};
 use crate::edit::EDIT;
@@ -39,6 +43,11 @@ use crate::tools;
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
 
+/// One ACP connection, unique in the process.
+type ConnId = u64;
+
+static NEXT_CONN: AtomicU64 = AtomicU64::new(0);
+
 struct Entry {
     session: SharedSession,
     /// Runs that `session/cancel` aborts: a prompt, and a run for a
@@ -47,6 +56,22 @@ struct Entry {
     /// Reachable while a turn holds the session, e.g. to switch profiles.
     ctx: Context,
     frontend: Arc<AcpFrontend>,
+    /// For connections that attach while a turn holds the session.
+    commands: Vec<AvailableCommand>,
+    watch: AbortHandle,
+}
+
+impl Entry {
+    /// Nobody looks at it and nothing runs: it can go.
+    fn unused(&self) -> bool {
+        self.running.is_empty() && self.frontend.viewers.lock().unwrap().is_empty()
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.watch.abort();
+    }
 }
 
 /// What the client told us in `initialize`.
@@ -58,67 +83,185 @@ struct ClientCaps {
     terminal_output: AtomicBool,
 }
 
+/// The open sessions, shared by the connections that use the same hub (all
+/// connections of `rho daemon`). Every connection that opened a session sees
+/// its updates; a turn keeps running when its connection drops.
 #[derive(Default)]
-struct State {
+pub struct Hub {
     sessions: Mutex<HashMap<SessionId, Entry>>,
     next_run: AtomicU64,
-    caps: ClientCaps,
 }
 
-impl State {
-    fn session(&self, sid: &SessionId) -> Option<(SharedSession, Context, Arc<AcpFrontend>)> {
+impl Hub {
+    /// The session, if `conn` opened it.
+    fn session(
+        &self,
+        sid: &SessionId,
+        conn: ConnId,
+    ) -> Option<(SharedSession, Context, Arc<AcpFrontend>)> {
         let sessions = self.sessions.lock().unwrap();
         let e = sessions.get(sid)?;
-        Some((e.session.clone(), e.ctx.clone(), e.frontend.clone()))
+        e.frontend
+            .viewing(conn)
+            .then(|| (e.session.clone(), e.ctx.clone(), e.frontend.clone()))
+    }
+
+    /// An open session, for a connection that attaches to it.
+    fn open(
+        &self,
+        sid: &SessionId,
+    ) -> Option<(
+        SharedSession,
+        Context,
+        Arc<AcpFrontend>,
+        Vec<AvailableCommand>,
+    )> {
+        let sessions = self.sessions.lock().unwrap();
+        let e = sessions.get(sid)?;
+        Some((
+            e.session.clone(),
+            e.ctx.clone(),
+            e.frontend.clone(),
+            e.commands.clone(),
+        ))
     }
 
     /// Registers a run that a cancel notification should abort, until the
-    /// returned `Run` is dropped.
+    /// returned `Run` is dropped. With `conn`, only if that connection
+    /// opened the session.
     fn start_run(
         self: &Arc<Self>,
         sid: &SessionId,
-    ) -> Option<(SharedSession, Run, futures::future::AbortRegistration)> {
+        conn: Option<ConnId>,
+    ) -> Option<(SharedSession, Arc<AcpFrontend>, Run, AbortRegistration)> {
         let (abort, registration) = AbortHandle::new_pair();
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let mut sessions = self.sessions.lock().unwrap();
         let entry = sessions.get_mut(sid)?;
+        if conn.is_some_and(|c| !entry.frontend.viewing(c)) {
+            return None;
+        }
         entry.running.push((id, abort));
         let run = Run {
-            state: self.clone(),
+            hub: self.clone(),
             sid: sid.clone(),
             id,
         };
-        Some((entry.session.clone(), run, registration))
+        Some((
+            entry.session.clone(),
+            entry.frontend.clone(),
+            run,
+            registration,
+        ))
     }
 
-    /// Aborts the session's runs.
-    fn cancel(&self, sid: &SessionId) {
-        if let Some(entry) = self.sessions.lock().unwrap().get_mut(sid) {
+    /// Aborts the session's runs, if `conn` opened it.
+    fn cancel(&self, sid: &SessionId, conn: ConnId) {
+        if let Some(entry) = self.sessions.lock().unwrap().get_mut(sid)
+            && entry.frontend.viewing(conn)
+        {
             for (_, abort) in entry.running.drain(..) {
                 abort.abort();
             }
         }
     }
+
+    /// `conn` stops looking at `sid` (`session/close`). The last one to go
+    /// cancels the runs.
+    fn close(&self, sid: &SessionId, conn: ConnId) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(entry) = sessions.get_mut(sid) else {
+            return;
+        };
+        let mut viewers = entry.frontend.viewers.lock().unwrap();
+        let before = viewers.len();
+        viewers.retain(|v| v.conn != conn);
+        if viewers.len() == before || !viewers.is_empty() {
+            return;
+        }
+        drop(viewers);
+        for (_, abort) in entry.running.drain(..) {
+            abort.abort();
+        }
+        // A run lets go of it when it ends, see `Run::drop`.
+        if entry.unused() {
+            sessions.remove(sid);
+        }
+    }
+
+    /// The connection ended: it stops looking at all sessions. Their runs
+    /// go on.
+    fn detach(&self, conn: ConnId) {
+        self.sessions.lock().unwrap().retain(|_, e| {
+            e.frontend
+                .viewers
+                .lock()
+                .unwrap()
+                .retain(|v| v.conn != conn);
+            !e.unused()
+        });
+    }
 }
 
-/// A run registered with `State::start_run`.
+/// One connection's view: the shared hub plus what this client can do.
+struct State {
+    hub: Arc<Hub>,
+    conn: ConnId,
+    caps: ClientCaps,
+}
+
+impl State {
+    fn viewer(&self, cx: &ConnectionTo<Client>, ready: bool) -> Viewer {
+        Viewer {
+            conn: self.conn,
+            cx: cx.clone(),
+            forms: self.caps.forms.load(Ordering::Relaxed),
+            terminal: self.caps.terminal_output.load(Ordering::Relaxed),
+            ready,
+        }
+    }
+}
+
+/// The handlers own the state, so it goes when the connection ends.
+impl Drop for State {
+    fn drop(&mut self) {
+        self.hub.detach(self.conn);
+    }
+}
+
+/// A run registered with `Hub::start_run`.
 struct Run {
-    state: Arc<State>,
+    hub: Arc<Hub>,
     sid: SessionId,
     id: u64,
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
-        if let Some(entry) = self.state.sessions.lock().unwrap().get_mut(&self.sid) {
+        let mut sessions = self.hub.sessions.lock().unwrap();
+        if let Some(entry) = sessions.get_mut(&self.sid) {
             entry.running.retain(|(id, _)| *id != self.id);
+            if entry.unused() {
+                sessions.remove(&self.sid);
+            }
         }
     }
 }
 
-/// Builds the ACP agent; connect it to a transport, e.g. `Stdio::new()`.
+/// Builds the ACP agent with its own hub; connect it to a transport, e.g.
+/// `Stdio::new()`.
 pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
-    let state = Arc::new(State::default());
+    agent_in(agent, Arc::default())
+}
+
+/// Builds the ACP agent for one connection; connections on the same `hub`
+/// share open sessions.
+pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
+    let state = Arc::new(State {
+        hub,
+        conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+        caps: ClientCaps::default(),
+    });
     let (init_state, new_state, prompt_state, config_state, cancel_state) = (
         state.clone(),
         state.clone(),
@@ -162,7 +305,9 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         .agent_capabilities(
                             AgentCapabilities::new()
                                 .load_session(saved)
-                                .prompt_capabilities(PromptCapabilities::new().image(true))
+                                .prompt_capabilities(
+                                    PromptCapabilities::new().image(true).embedded_context(true),
+                                )
                                 .session_capabilities(sessions),
                         )
                         .agent_info(Implementation::new("rho", env!("CARGO_PKG_VERSION"))),
@@ -180,7 +325,9 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                 let (agent, state) = (agent.clone(), new_state.clone());
                 // Extension session_start hooks are async; keep them off the dispatch loop.
                 cx.clone().spawn(async move {
-                    let frontend = frontend(&cx, &sid, &state, &req.cwd);
+                    let frontend = AcpFrontend::new(&sid, &req.cwd);
+                    // Ready at once: session_start hooks may ask before the response.
+                    frontend.attach(state.viewer(&cx, true));
                     let started = agent
                         .start_session(id, req.cwd, req.additional_directories, frontend.clone())
                         .await;
@@ -193,7 +340,14 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         commands(&session),
                     );
                     let (ctx, dirs) = (session.ctx.clone(), session.dirs_notice());
-                    register(&agent, &state, &cx, &sid, session, frontend)?;
+                    register(
+                        &agent,
+                        &state.hub,
+                        &sid,
+                        session,
+                        frontend,
+                        commands.clone(),
+                    );
                     responder
                         .respond(NewSessionResponse::new(sid.clone()).config_options(options))?;
                     // After the response: before it the client does not know the session.
@@ -222,9 +376,10 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         true,
                     );
                     match opened.await {
-                        Ok((options, commands)) => {
+                        Ok((frontend, options, commands)) => {
                             responder
                                 .respond(LoadSessionResponse::new().config_options(options))?;
+                            frontend.ready(state.conn);
                             send_commands(&cx, &sid, commands)
                         }
                         Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
@@ -250,9 +405,10 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                         false,
                     );
                     match opened.await {
-                        Ok((options, commands)) => {
+                        Ok((frontend, options, commands)) => {
                             responder
                                 .respond(ResumeSessionResponse::new().config_options(options))?;
+                            frontend.ready(state.conn);
                             send_commands(&cx, &sid, commands)
                         }
                         Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
@@ -279,25 +435,31 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             async move |req: CloseSessionRequest,
                         responder: Responder<CloseSessionResponse>,
                         _cx| {
-                // Dropping the entry ends the session once a running turn lets go.
-                close_state.cancel(&req.session_id);
-                close_state.sessions.lock().unwrap().remove(&req.session_id);
+                close_state.hub.close(&req.session_id, close_state.conn);
                 responder.respond(CloseSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req: PromptRequest,
-                        responder: Responder<PromptResponse>,
-                        cx: ConnectionTo<Client>| {
-                let Some((session, run, registration)) = prompt_state.start_run(&req.session_id)
+            async move |req: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                let conn = prompt_state.conn;
+                let Some((session, frontend, run, registration)) =
+                    prompt_state.hub.start_run(&req.session_id, Some(conn))
                 else {
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));
                 };
+                // The other connections on the session see the prompt too.
+                for block in &req.prompt {
+                    frontend.send_update(
+                        SessionUpdate::UserMessageChunk(ContentChunk::new(block.clone())),
+                        To::Except(conn),
+                    );
+                }
                 let agent = prompt_agent.clone();
-                // The turn runs outside the dispatch loop so cancel notifications get through.
-                cx.spawn(async move {
+                // Not on the connection: the turn goes on if it drops, and
+                // cancel notifications get through.
+                tokio::spawn(async move {
                     let mut session = session.lock().await;
                     let usage_before = session.usage;
                     let turn = async {
@@ -331,7 +493,8 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                     let result = Abortable::new(turn, registration).await;
                     drop(run);
                     let usage = turn_usage(session.usage - usage_before);
-                    match result {
+                    // The connection may be gone; the session is saved anyway.
+                    let _ = match result {
                         Ok(Ok(stop)) => {
                             responder.respond(PromptResponse::new(to_stop(stop)).usage(usage))
                         }
@@ -341,8 +504,9 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
                             responder
                                 .respond(PromptResponse::new(StopReason::Cancelled).usage(usage))
                         }
-                    }
-                })
+                    };
+                });
+                Ok(())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -350,7 +514,9 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
             async move |req: SetSessionConfigOptionRequest,
                         responder: Responder<SetSessionConfigOptionResponse>,
                         cx: ConnectionTo<Client>| {
-                let Some((session, ctx, frontend)) = config_state.session(&req.session_id) else {
+                let Some((session, ctx, frontend)) =
+                    config_state.hub.session(&req.session_id, config_state.conn)
+                else {
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));
                 };
@@ -383,32 +549,11 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
         )
         .on_receive_notification(
             async move |n: CancelNotification, _cx| {
-                cancel_state.cancel(&n.session_id);
+                cancel_state.hub.cancel(&n.session_id, cancel_state.conn);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
         )
-}
-
-fn frontend(
-    cx: &ConnectionTo<Client>,
-    sid: &SessionId,
-    state: &State,
-    cwd: &Path,
-) -> Arc<AcpFrontend> {
-    Arc::new(AcpFrontend {
-        cx: cx.clone(),
-        sid: sid.clone(),
-        notices: AtomicU64::new(0),
-        forms: state.caps.forms.load(Ordering::Relaxed),
-        terminal_cwd: state
-            .caps
-            .terminal_output
-            .load(Ordering::Relaxed)
-            .then(|| cwd.to_path_buf()),
-        shown: Mutex::default(),
-        published: Mutex::default(),
-    })
 }
 
 /// Built-in slash commands plus the extensions'.
@@ -454,29 +599,38 @@ fn send_commands(
 /// Makes an opened session reachable for prompts and triggered messages.
 fn register(
     agent: &Arc<Agent>,
-    state: &Arc<State>,
-    cx: &ConnectionTo<Client>,
+    hub: &Arc<Hub>,
     sid: &SessionId,
     session: Session,
     frontend: Arc<AcpFrontend>,
-) -> Result<SharedSession, Error> {
+    commands: Vec<AvailableCommand>,
+) -> SharedSession {
     let ctx = session.ctx.clone();
     let session = Arc::new(tokio::sync::Mutex::new(session));
-    state.sessions.lock().unwrap().insert(
+    let (watch, registration) = AbortHandle::new_pair();
+    let inbox = watch_inbox(agent.clone(), hub.clone(), sid.clone(), ctx.clone());
+    tokio::spawn(Abortable::new(inbox, registration));
+    // shortcut: two connections resuming the same closed session at once get
+    // one session each and the later one wins the map; fine for one editor per
+    // session, needs a pending-open marker if that changes.
+    hub.sessions.lock().unwrap().insert(
         sid.clone(),
         Entry {
             session: session.clone(),
             running: vec![],
-            ctx: ctx.clone(),
+            ctx,
             frontend,
+            commands,
+            watch,
         },
     );
-    cx.spawn(watch_inbox(agent.clone(), state.clone(), sid.clone(), ctx))?;
-    Ok(session)
+    session
 }
 
-/// `session/load` (with `replay`) and `session/resume`: the open session, or
-/// the stored one continued. Returns its config options and commands.
+/// `session/load` (with `replay`) and `session/resume`: the open session
+/// (also one opened by another connection), or the stored one continued.
+/// Returns its frontend, config options and commands. Call
+/// `AcpFrontend::ready` after the response.
 async fn open_stored(
     agent: &Arc<Agent>,
     state: &Arc<State>,
@@ -485,13 +639,26 @@ async fn open_stored(
     cwd: PathBuf,
     additional_dirs: Vec<PathBuf>,
     replay: bool,
-) -> anyhow::Result<(Vec<SessionConfigOption>, Vec<AvailableCommand>)> {
+) -> anyhow::Result<(
+    Arc<AcpFrontend>,
+    Vec<SessionConfigOption>,
+    Vec<AvailableCommand>,
+)> {
+    let conn = state.conn;
     // An open session takes the new directories after the replay, so the
     // notice follows the history.
-    let (session, frontend, dirs) = match state.session(sid) {
-        Some((session, _, frontend)) => (session, frontend, Some(additional_dirs)),
+    let (session, ctx, frontend, commands, dirs) = match state.hub.open(sid) {
+        Some((session, ctx, frontend, commands)) => {
+            if ctx.cwd() != cwd {
+                anyhow::bail!("session {} belongs to {}", sid.0, ctx.cwd().display());
+            }
+            frontend.attach(state.viewer(cx, false));
+            (session, ctx, frontend, commands, Some(additional_dirs))
+        }
         None => {
-            let frontend = frontend(cx, sid, state, &cwd);
+            let frontend = AcpFrontend::new(sid, &cwd);
+            // Nothing runs yet, and session_start hooks may ask.
+            frontend.attach(state.viewer(cx, true));
             let session = agent
                 .resume_session(
                     &store::SessionId::new(&*sid.0),
@@ -500,29 +667,40 @@ async fn open_stored(
                     frontend.clone(),
                 )
                 .await?;
-            let session = register(agent, state, cx, sid, session, frontend.clone())?;
-            (session, frontend, None)
+            let (ctx, commands) = (session.ctx.clone(), commands(&session));
+            let session = register(
+                agent,
+                &state.hub,
+                sid,
+                session,
+                frontend.clone(),
+                commands.clone(),
+            );
+            (session, ctx, frontend, commands, None)
         }
     };
-    let mut session = session.lock().await;
-    if session.ctx.cwd() != cwd {
-        anyhow::bail!(
-            "session {} belongs to {}",
-            sid.0,
-            session.ctx.cwd().display()
-        );
-    }
+    let stored = match ctx.store() {
+        Some(store) if replay => store.messages(&store::SessionId::new(&*sid.0)).await?,
+        _ => vec![],
+    };
+    let Ok(mut session) = session.try_lock() else {
+        // A turn holds the session: replay what is saved, the live updates
+        // follow. shortcut: no tool descriptions in this replay and the new
+        // directories are not applied; lock-free copies would fix both.
+        if replay {
+            let messages: Vec<_> = stored.into_iter().map(|m| (m.epoch, m.message)).collect();
+            replay_history(&frontend, conn, &ctx, None, &messages);
+        }
+        let options = frontend.options();
+        return Ok((frontend, options, commands));
+    };
     if replay {
         // Compaction keeps older epochs in the store; show them too.
-        let earlier = match session.ctx.store() {
-            Some(store) => store.messages(&store::SessionId::new(&*sid.0)).await?,
-            None => vec![],
-        };
         let epoch = session.epoch();
-        let earlier = earlier.into_iter().filter(|m| m.epoch < epoch);
+        let earlier = stored.into_iter().filter(|m| m.epoch < epoch);
         let mut messages: Vec<_> = earlier.map(|m| (m.epoch, m.message)).collect();
         messages.extend(session.history.iter().map(|m| (epoch, m.clone())));
-        replay_history(cx, sid, &session, &messages)?;
+        replay_history(&frontend, conn, &ctx, Some(&session), &messages);
     }
     if let Some(dirs) = dirs
         && agent.set_additional_dirs(&mut session, dirs)
@@ -532,23 +710,23 @@ async fn open_stored(
     // A new connection has not seen it; the frontend also needs it to
     // republish on a model switch.
     session.emit_usage();
-    Ok((
-        frontend.remember(config_options(agent, &session)),
-        commands(&session),
-    ))
+    let options = frontend.remember(config_options(agent, &session));
+    Ok((frontend, options, commands))
 }
 
-/// Sends `(epoch, message)`s as session updates, as if they were happening
-/// now. A compaction summary (the first text of an epoch after the first)
-/// shows as a notice, like when it was made. Edit diffs are not stored, so
-/// edits show their output only.
+/// Sends `(epoch, message)`s as session updates to `conn`, as if they were
+/// happening now. A compaction summary (the first text of an epoch after the
+/// first) shows as a notice, like when it was made. Edit diffs are not
+/// stored, so edits show their output only. Tool descriptions need the
+/// `session`.
 fn replay_history(
-    cx: &ConnectionTo<Client>,
-    sid: &SessionId,
-    session: &Session,
+    frontend: &AcpFrontend,
+    conn: ConnId,
+    ctx: &Context,
+    session: Option<&Session>,
     messages: &[(i64, provider::Message)],
-) -> Result<(), Error> {
-    let ctx = &session.ctx;
+) {
+    let emit = |ev: AgentEvent<'_>| frontend.send(ev, To::Only(conn));
     let mut epoch = 0;
     for (msg_epoch, msg) in messages {
         let mut user: Vec<ContentBlock> = vec![];
@@ -558,7 +736,11 @@ fn replay_history(
                 && let Content::Text { text } = block
                 && let Some(summary) = crate::compact::summary_of(text)
             {
-                ctx.notify("Compacted", summary, false);
+                emit(AgentEvent::Notice {
+                    title: "Compacted",
+                    text: summary,
+                    is_error: false,
+                });
                 continue;
             }
             match block {
@@ -570,11 +752,13 @@ fn replay_history(
                     _ => user.push(text.as_str().into()),
                 },
                 Content::Image { source } => user.push(image_block(source)),
-                Content::Text { text } => ctx.emit(AgentEvent::Text(text)),
-                Content::Thinking { thinking, .. } => ctx.emit(AgentEvent::Thinking(thinking)),
+                Content::Text { text } => emit(AgentEvent::Text(text)),
+                Content::Thinking { thinking, .. } => emit(AgentEvent::Thinking(thinking)),
                 Content::ToolUse { id, name, input } => {
-                    let description = session.tool(name).and_then(|t| t.describe(input));
-                    ctx.emit(AgentEvent::ToolStart {
+                    let description = session
+                        .and_then(|s| s.tool(name))
+                        .and_then(|t| t.describe(input));
+                    emit(AgentEvent::ToolStart {
                         id,
                         name,
                         input,
@@ -586,7 +770,7 @@ fn replay_history(
                     content,
                     is_error,
                     images,
-                } => ctx.emit(AgentEvent::ToolEnd {
+                } => emit(AgentEvent::ToolEnd {
                     id: tool_use_id,
                     output: content,
                     is_error: *is_error,
@@ -597,16 +781,15 @@ fn replay_history(
             }
         }
         for block in user {
-            cx.send_notification(SessionNotification::new(
-                sid.clone(),
+            frontend.send_update(
                 SessionUpdate::UserMessageChunk(ContentChunk::new(block)),
-            ))?;
+                To::Only(conn),
+            );
         }
     }
     if let Some(title) = ctx.title() {
-        ctx.emit(AgentEvent::Title(&title));
+        emit(AgentEvent::Title(&title));
     }
-    Ok(())
 }
 
 const LIST_PAGE: usize = 100;
@@ -667,20 +850,16 @@ fn rfc3339(ms: i64) -> String {
 
 /// Runs turns for extension messages sent with `trigger_turn` while no
 /// prompt is active. ACP has no agent-initiated prompts, so these runs only
-/// stream `session/update`s (like pi-acp does).
-async fn watch_inbox(
-    agent: Arc<Agent>,
-    state: Arc<State>,
-    sid: SessionId,
-    ctx: Context,
-) -> Result<(), Error> {
+/// stream `session/update`s (like pi-acp does). Aborted when the session is
+/// dropped.
+async fn watch_inbox(agent: Arc<Agent>, hub: Arc<Hub>, sid: SessionId, ctx: Context) {
     loop {
         ctx.wait_inbox().await;
         if !ctx.has_triggered() {
             continue;
         }
-        let Some((session, _run, registration)) = state.start_run(&sid) else {
-            return Ok(());
+        let Some((session, _, _run, registration)) = hub.start_run(&sid, None) else {
+            return;
         };
         let mut session = session.lock().await;
         // A prompt may have consumed the message while we waited for the lock.
@@ -693,21 +872,145 @@ async fn watch_inbox(
     }
 }
 
-struct AcpFrontend {
+/// A connection that opened the session.
+#[derive(Clone)]
+struct Viewer {
+    conn: ConnId,
     cx: ConnectionTo<Client>,
-    sid: SessionId,
-    notices: AtomicU64,
     /// The client can show elicitation forms, see `Frontend::ask`.
     forms: bool,
-    /// The session's cwd if the client shows `Bash` calls as terminals.
-    terminal_cwd: Option<PathBuf>,
+    /// The client shows `Bash` calls as terminals.
+    terminal: bool,
+    /// The client knows the session: it gets confirmations and forms.
+    ready: bool,
+}
+
+/// Which viewers an update goes to.
+#[derive(Clone, Copy)]
+enum To {
+    All,
+    Only(ConnId),
+    Except(ConnId),
+}
+
+impl To {
+    fn includes(self, conn: ConnId) -> bool {
+        match self {
+            To::All => true,
+            To::Only(c) => c == conn,
+            To::Except(c) => c != conn,
+        }
+    }
+}
+
+/// One session's frontend, for every connection that opened it.
+struct AcpFrontend {
+    sid: SessionId,
+    /// For `Bash` calls shown as terminals.
+    cwd: PathBuf,
+    notices: AtomicU64,
+    viewers: Mutex<Vec<Viewer>>,
+    /// Viewers that got ready, for the confirmations and forms waiting for
+    /// an answer.
+    ready: broadcast::Sender<Viewer>,
+    /// The `tool_call` updates (with and without terminal) of the running
+    /// tool calls. A viewer that attaches during a turn replays the store,
+    /// which has them only after the tools ran.
+    running: Mutex<Vec<(ToolCallId, SessionUpdate, SessionUpdate)>>,
     /// How running tool calls were shown, by id. `ToolEnd` replaces the
     /// call's content, so it has to repeat the command or the questions.
+    /// Terminals stay terminals here, see `Shown::for_viewer`.
     shown: Mutex<HashMap<ToolCallId, Shown>>,
     published: Mutex<Published>,
 }
 
 impl AcpFrontend {
+    fn new(sid: &SessionId, cwd: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            sid: sid.clone(),
+            cwd: cwd.to_path_buf(),
+            notices: AtomicU64::new(0),
+            viewers: Mutex::default(),
+            ready: broadcast::channel(16).0,
+            running: Mutex::default(),
+            shown: Mutex::default(),
+            published: Mutex::default(),
+        })
+    }
+
+    /// `viewer` gets the updates from now on.
+    fn attach(&self, viewer: Viewer) {
+        let mut viewers = self.viewers.lock().unwrap();
+        viewers.retain(|v| v.conn != viewer.conn);
+        viewers.push(viewer);
+    }
+
+    fn viewing(&self, conn: ConnId) -> bool {
+        self.viewers.lock().unwrap().iter().any(|v| v.conn == conn)
+    }
+
+    /// `conn` knows the session now: it gets the running tool calls and
+    /// the questions waiting for an answer.
+    fn ready(&self, conn: ConnId) {
+        let mut viewers = self.viewers.lock().unwrap();
+        let Some(v) = viewers.iter_mut().find(|v| v.conn == conn) else {
+            return;
+        };
+        v.ready = true;
+        for (_, terminal, plain) in self.running.lock().unwrap().iter() {
+            let update = if v.terminal { terminal } else { plain };
+            let _ =
+                v.cx.send_notification(SessionNotification::new(self.sid.clone(), update.clone()));
+        }
+        // Nobody waiting is fine.
+        let _ = self.ready.send(v.clone());
+    }
+
+    /// Sends `request` to every ready viewer that `fits`, also to those that
+    /// get ready while it waits. The first answer wins; the other requests
+    /// are dropped, which cancels them. Errors do not count: a client that
+    /// went away does not answer for the others.
+    async fn first_answer<R>(&self, fits: impl Fn(&Viewer) -> bool, request: R) -> R::Response
+    where
+        R: JsonRpcRequest + Clone,
+    {
+        // Under the lock, so a viewer is in the list or in `ready`.
+        let (mut ready, viewers) = {
+            let viewers = self.viewers.lock().unwrap();
+            let fitting: Vec<_> = viewers
+                .iter()
+                .filter(|v| v.ready && fits(v))
+                .cloned()
+                .collect();
+            (self.ready.subscribe(), fitting)
+        };
+        let mut asked: HashMap<ConnId, AbortHandle> = HashMap::new();
+        let mut ask = |v: &Viewer| {
+            let (abort, registration) = AbortHandle::new_pair();
+            // Loaded again: the client may have dropped the old request.
+            if let Some(old) = asked.insert(v.conn, abort) {
+                old.abort();
+            }
+            let answer = v.cx.send_request(request.clone()).block_task();
+            Abortable::new(answer, registration)
+        };
+        let mut pending: FuturesUnordered<_> = viewers.iter().map(&mut ask).collect();
+        loop {
+            tokio::select! {
+                Some(answer) = pending.next() => {
+                    if let Ok(Ok(response)) = answer {
+                        return response;
+                    }
+                }
+                viewer = ready.recv() => {
+                    if let Ok(v) = viewer && fits(&v) {
+                        pending.push(ask(&v));
+                    }
+                }
+            }
+        }
+    }
+
     fn remember(&self, options: Vec<SessionConfigOption>) -> Vec<SessionConfigOption> {
         options.clone_into(&mut self.published.lock().unwrap().options);
         options
@@ -715,6 +1018,73 @@ impl AcpFrontend {
 
     fn options(&self) -> Vec<SessionConfigOption> {
         self.published.lock().unwrap().options.clone()
+    }
+
+    fn send(&self, ev: AgentEvent<'_>, to: To) {
+        // Before session/new answered there are no options to update.
+        if matches!(ev, AgentEvent::Profile(_)) && self.options().is_empty() {
+            return;
+        }
+        let n = self.notices.fetch_add(1, Ordering::Relaxed);
+        let shown = match &ev {
+            AgentEvent::ToolStart {
+                id,
+                name,
+                input,
+                description,
+            } => {
+                let shown = Shown::of(name, input, *description, Some(&self.cwd));
+                if let Some(shown) = &shown {
+                    self.shown
+                        .lock()
+                        .unwrap()
+                        .insert((*id).clone(), shown.clone());
+                }
+                shown
+            }
+            AgentEvent::ToolEnd { id, .. } => self.shown.lock().unwrap().remove(*id),
+            _ => None,
+        };
+        // Built even without viewers: it records what a later one is sent.
+        let mut published = self.published.lock().unwrap();
+        let terminal = to_update(ev, n, shown.as_ref(), &self.cwd, &mut published);
+        let plain = match &shown {
+            Some(s @ Shown::Terminal { .. }) => {
+                to_update(ev, n, Some(&s.for_viewer(false)), &self.cwd, &mut published)
+            }
+            _ => terminal.clone(),
+        };
+        drop(published);
+        // A replay (`To::Only`) shows finished calls.
+        if matches!(to, To::All) {
+            let mut running = self.running.lock().unwrap();
+            match ev {
+                AgentEvent::ToolStart { id, .. } => {
+                    running.push((id.clone(), terminal.clone(), plain.clone()));
+                }
+                AgentEvent::ToolEnd { id, .. } => running.retain(|(r, _, _)| r != id),
+                _ => {}
+            }
+        }
+        for v in self.viewers.lock().unwrap().iter() {
+            if to.includes(v.conn) {
+                let update = if v.terminal { &terminal } else { &plain };
+                // Dropped updates only affect display; the turn continues.
+                let _ = v
+                    .cx
+                    .send_notification(SessionNotification::new(self.sid.clone(), update.clone()));
+            }
+        }
+    }
+
+    fn send_update(&self, update: SessionUpdate, to: To) {
+        for v in self.viewers.lock().unwrap().iter() {
+            if to.includes(v.conn) {
+                let _ = v
+                    .cx
+                    .send_notification(SessionNotification::new(self.sid.clone(), update.clone()));
+            }
+        }
     }
 }
 
@@ -729,37 +1099,8 @@ struct Published {
 
 impl Frontend for AcpFrontend {
     fn event(&self, ev: AgentEvent<'_>) {
-        // Before session/new answered there are no options to update.
-        if matches!(ev, AgentEvent::Profile(_)) && self.options().is_empty() {
-            return;
-        }
-        let n = self.notices.fetch_add(1, Ordering::Relaxed);
-        let shown = match &ev {
-            AgentEvent::ToolStart {
-                id,
-                name,
-                input,
-                description,
-            } => {
-                let shown = Shown::of(name, input, *description, self.terminal_cwd.as_deref());
-                if let Some(shown) = &shown {
-                    self.shown
-                        .lock()
-                        .unwrap()
-                        .insert((*id).clone(), shown.clone());
-                }
-                shown
-            }
-            AgentEvent::ToolEnd { id, .. } => self.shown.lock().unwrap().remove(*id),
-            _ => None,
-        };
-        let update = to_update(ev, n, shown.as_ref(), &mut self.published.lock().unwrap());
-        // Dropped updates only affect display; the turn continues.
-        let _ = self
-            .cx
-            .send_notification(SessionNotification::new(self.sid.clone(), update));
+        self.send(ev, To::All);
     }
-
     fn confirm<'a>(
         &'a self,
         tool_call_id: Option<&'a ToolCallId>,
@@ -790,18 +1131,19 @@ impl Frontend for AcpFrontend {
                     PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
                 ],
             );
-            match self.cx.send_request(request).block_task().await {
-                Ok(r) => {
-                    matches!(r.outcome, RequestPermissionOutcome::Selected(s) if &*s.option_id.0 == "allow")
-                }
-                Err(_) => false,
-            }
+            let r = self.first_answer(|_| true, request).await;
+            matches!(r.outcome, RequestPermissionOutcome::Selected(s) if &*s.option_id.0 == "allow")
         })
     }
 
     fn ask<'a>(&'a self, form: &'a Form) -> BoxFuture<'a, FormReply> {
         Box::pin(async move {
-            if !self.forms {
+            // Without viewers it waits for one.
+            let unsupported = {
+                let viewers = self.viewers.lock().unwrap();
+                !viewers.is_empty() && !viewers.iter().any(|v| v.forms)
+            };
+            if unsupported {
                 return FormReply::Unsupported;
             }
             let request = CreateElicitationRequest::new(
@@ -811,12 +1153,9 @@ impl Frontend for AcpFrontend {
                 ),
                 form.message.clone(),
             );
-            match self.cx.send_request(request).block_task().await {
-                Ok(r) => match r.action {
-                    ElicitationAction::Accept(a) => FormReply::Answers(form_answers(a.content)),
-                    _ => FormReply::Declined,
-                },
-                Err(_) => FormReply::Declined,
+            match self.first_answer(|v| v.forms, request).await.action {
+                ElicitationAction::Accept(a) => FormReply::Answers(form_answers(a.content)),
+                _ => FormReply::Declined,
             }
         })
     }
@@ -1149,6 +1488,16 @@ impl Shown {
     }
 }
 
+impl Shown {
+    /// A terminal as a `sh` block for a client without terminals.
+    fn for_viewer(&self, terminal: bool) -> Self {
+        match self {
+            Self::Terminal { command, .. } if !terminal => Self::Text(command_block(command)),
+            other => other.clone(),
+        }
+    }
+}
+
 /// The command as a fenced `sh` block, so Zed highlights it. The fence is
 /// longer than any backtick run in the command.
 fn command_block(command: &str) -> String {
@@ -1179,10 +1528,25 @@ fn status(is_error: bool) -> ToolCallStatus {
     }
 }
 
+/// The client's icon for a tool. Extension tools by name: rho-agent's,
+/// MCP tools are `Other`.
+fn tool_kind(name: &ToolName) -> ToolKind {
+    match name.as_str() {
+        "Read" | "ReadImage" | "ReadSkill" => ToolKind::Read,
+        "Write" | "Edit" => ToolKind::Edit,
+        "Bash" | "BackgroundTask" => ToolKind::Execute,
+        "Grep" | "GoDoc" | "History" => ToolKind::Search,
+        "FetchUrl" => ToolKind::Fetch,
+        "EnterPlanMode" | "ExitPlanMode" => ToolKind::SwitchMode,
+        _ => ToolKind::Other,
+    }
+}
+
 fn to_update(
     ev: AgentEvent,
     n: u64,
     shown: Option<&Shown>,
+    cwd: &Path,
     published: &mut Published,
 ) -> SessionUpdate {
     let last_usage = &mut published.usage;
@@ -1243,15 +1607,7 @@ fn to_update(
         AgentEvent::ToolStart {
             id, name, input, ..
         } => {
-            let kind = if *name == tools::READ {
-                ToolKind::Read
-            } else if *name == tools::WRITE || *name == EDIT {
-                ToolKind::Edit
-            } else if *name == tools::BASH {
-                ToolKind::Execute
-            } else {
-                ToolKind::Other
-            };
+            let kind = tool_kind(name);
             let call = match shown {
                 Some(Shown::Terminal { cwd, command }) => ToolCall::new(id.to_string(), command)
                     .content(vec![ToolCallContent::Terminal(Terminal::new(
@@ -1264,9 +1620,16 @@ fn to_update(
                     .content(vec![text.as_str().into()]),
                 None => ToolCall::new(id.to_string(), title(name, input)),
             };
+            // Lets the client follow along to the file.
+            let file = [tools::READ, tools::READ_IMAGE, tools::WRITE, EDIT].contains(name);
+            let locations = match input.get("path").and_then(|p| p.as_str()) {
+                Some(path) if file => vec![ToolCallLocation::new(tools::resolve(cwd, path))],
+                _ => vec![],
+            };
             SessionUpdate::ToolCall(
                 call.kind(kind)
                     .status(ToolCallStatus::InProgress)
+                    .locations(locations)
                     .raw_input(input.clone()),
             )
         }
@@ -1349,7 +1712,7 @@ mod tests {
 
     fn update(ev: AgentEvent, shown: Option<&Shown>) -> serde_json::Value {
         let mut last = Published::default();
-        serde_json::to_value(to_update(ev, 0, shown, &mut last)).unwrap()
+        serde_json::to_value(to_update(ev, 0, shown, Path::new("/w"), &mut last)).unwrap()
     }
 
     #[test]
@@ -1396,6 +1759,28 @@ mod tests {
             wire["content"][1],
             json!({"type": "content", "content": {"type": "image", "mimeType": "image/png", "data": "AAAA"}})
         );
+    }
+
+    #[test]
+    fn file_tools_have_a_location() {
+        let start = |name: &str, input: &serde_json::Value| {
+            update(
+                AgentEvent::ToolStart {
+                    id: &ToolCallId::new("t1"),
+                    name: &ToolName::new(name),
+                    input,
+                    description: None,
+                },
+                None,
+            )
+        };
+        let wire = start("Edit", &json!({"path": "src/a.rs"}));
+        assert_eq!(wire["kind"], "edit");
+        assert_eq!(wire["locations"], json!([{"path": "/w/src/a.rs"}]));
+        let wire = start("ReadSkill", &json!({"name": "s", "path": "x.md"}));
+        assert_eq!(wire["kind"], "read");
+        assert_eq!(wire.get("locations"), None);
+        assert_eq!(start("Grep", &json!({}))["kind"], "search");
     }
 
     #[test]
@@ -1548,6 +1933,7 @@ mod tests {
             },
             0,
             None,
+            Path::new("/w"),
             &mut last,
         ))
         .unwrap();
@@ -1572,6 +1958,7 @@ mod tests {
             },
             1,
             None,
+            Path::new("/w"),
             &mut last,
         ))
         .unwrap();

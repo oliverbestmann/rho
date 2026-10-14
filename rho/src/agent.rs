@@ -26,7 +26,7 @@ use crate::tools::DynTool;
 pub type SessionsDb = Arc<dyn Fn(&Path) -> PathBuf + Send + Sync>;
 
 /// What the agent is doing, for frontends (CLI printer, ACP session updates).
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AgentEvent<'a> {
     Text(&'a str),
     Thinking(&'a str),
