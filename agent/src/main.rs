@@ -16,6 +16,7 @@ mod project_context;
 mod ripgrep_find;
 mod secrets;
 mod session_title;
+mod skills;
 mod web_ui;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(ask_user::AskUser),
             Arc::new(plan_mode::PlanMode),
             Arc::new(ponytail::Ponytail),
+            Arc::new(skills::Skills::from_config()),
             // After every extension that adds features, so all are listed.
             Arc::new(rho::feature::FeatureCommands),
             // Last, so the project instructions end the system prompt.

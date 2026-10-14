@@ -43,3 +43,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0033](0033-features.md) | Features: switchable bundles of sandbox access and tools | Accepted |
 | [0034](0034-secret-redaction.md) | Secrets are masked in two stages with the gitleaks rules | Accepted |
 | [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |
+| [0036](0036-skills.md) | Skills as an extension: `ReadSkill` tool and `/skill:<name>` | Accepted |

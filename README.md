@@ -361,6 +361,11 @@ Ports of the other pi extensions:
 - `Mcp` adds the tools of MCP servers over Streamable HTTP from `mcp.json`
   in the config dir (Claude's `mcpServers` format, `type: "http"`, headers
   with `${VAR}` from the environment) as `mcp__<server>__<tool>` (ADR 0031).
+- `Skills` loads [Agent Skills](https://agentskills.io) from `skills` in the
+  config dir and `~/.agents/skills`. The system prompt lists them, the
+  `ReadSkill` tool reads their files without sandbox access, and
+  `/skill:<name> [request]` grants read access to the skill dir and sends the
+  skill to the model (ADR 0036).
 
 `Ponytail` adds the [ponytail](https://github.com/DietrichGebert/ponytail)
 skill ("full" level, vendored in `agent/src/ponytail.md`) to the system prompt.

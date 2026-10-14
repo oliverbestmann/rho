@@ -23,6 +23,7 @@ sqlite-vec = "0.1.9"
 fastembed = { version = "7.1.1", default-features = false, features = ["hf-hub-rustls-tls"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.11.0"
+serde_norway = "0.9.42"
 # Not on crates.io.
 gitleaks-rs = { git = "https://github.com/TeamCadenceAI/gitleaks-rs", rev = "b05165c8de20c97f6b2d62e748f772c6e3bfac4e" }
 
