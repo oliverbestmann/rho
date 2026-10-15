@@ -71,6 +71,11 @@ export class SessionState {
     else this.entries.update((e) => [...e, { kind, text: signal(text) }]);
   }
 
+  /** The tool call with this id, if known. */
+  call(id: string): acp.ToolCall | undefined {
+    return this.tools.get(id)?.();
+  }
+
   /** The tool call with this id; a new one at the end if unknown. */
   private tool(id: string): WritableSignal<acp.ToolCall> {
     let call = this.tools.get(id);

@@ -380,8 +380,8 @@ tasks are killed when the session ends.
 Ports of the other pi extensions:
 
 - `GitGate` asks the user before `Bash` or `BackgroundTask` runs `git commit`,
-  `git push` or `git tag`, with a summary of the command by the session's
-  compaction model (else its model); without a UI (CLI) they are blocked.
+  `git push` or `git tag`, titled with the call's `description` (else the
+  command); without a UI (CLI) they are blocked.
 - `Secrets` masks secrets with the gitleaks rules (`agent/src/gitleaks.toml`,
   copied from gitleaks' `config/gitleaks.toml`) as `REDACTED`: prompts, the
   system prompt and tool output, then every request body again

@@ -10,6 +10,7 @@ import { MatRadioModule } from '@angular/material/radio';
 import { Ask } from '../acp';
 import { MarkdownPipe } from '../markdown';
 import { blockText } from './session-state';
+import { toolBody } from './tool-body';
 
 type Value = string | string[] | boolean;
 
@@ -165,15 +166,19 @@ interface Field {
 })
 export class AskCard {
   readonly ask = input.required<Ask>();
+  /** The tool call the permission request is about, if it is in the transcript. */
+  readonly call = input<acp.ToolCall>();
   protected readonly values = signal<Record<string, Value>>({});
 
-  /** The permission request's tool call content. */
+  /** The permission request's tool call content, else that of the call it is about. */
   protected readonly details = computed(() => {
     const a = this.ask();
     if (a.kind !== 'permission') return '';
-    return (a.request.toolCall.content ?? [])
+    const own = (a.request.toolCall.content ?? [])
       .map((c) => (c.type === 'content' ? blockText(c.content) : ''))
       .join('\n\n');
+    const call = this.call();
+    return own || (call ? toolBody(call) : '');
   });
 
   protected readonly fields = computed<Field[]>(() => {

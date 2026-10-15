@@ -1,11 +1,8 @@
 //! Hard gate on `git commit`, `git push` and `git tag` (pi's git-gate): the
 //! user has to approve them, on top of what AGENTS.md asks. Read-only git
-//! commands pass. Without a UI (CLI) they are blocked. Before the question, a
-//! summary of the command by a cheap model (the first allowed one that
-//! answers, from any provider; else the session's model) is shown as agent
-//! text.
+//! commands pass. Without a UI (CLI) they are blocked. The question is
+//! titled with the call's `description`, else the command.
 
-use rho::agent::AgentEvent;
 use rho::extension::{Context, Decision, Extension, ToolCall};
 use rho::provider::ToolName;
 
@@ -16,20 +13,6 @@ pub struct GitGate;
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
-const SUMMARY_PROMPT: &str = "Say in about 10 to 15 words what this shell command does to the git repository. Name only what matters: what is committed, pushed or tagged, and where. No details on staging or output, no quotes, no markdown. Examples: \"Commits all changes locally.\" \"Pushes main to origin.\" \"Tags HEAD as v1.2 and pushes the tag.\"";
-
-/// What the command does, from the session's compaction model (else its
-/// model), if it answers.
-async fn summarize(ctx: &Context, command: &str) -> Option<String> {
-    let info = ctx.session_info();
-    let text = ctx
-        .complete(info.cheap_model()?, SUMMARY_PROMPT, command)
-        .await
-        .ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -60,15 +43,12 @@ impl Extension for GitGate {
         if !mutates_git(command) {
             return Decision::Allow;
         }
-        // Shown like an agent message, not sent to the model. The blank line
-        // keeps the model's next text from running into it.
-        if let Some(summary) = summarize(ctx, command).await {
-            ctx.emit(AgentEvent::Text(&format!(
-                "{}\n\n",
-                summary.replace('\n', " ")
-            )));
-        }
-        if ctx.confirm(Some(&call.id), command).await {
+        let title = call.input["description"]
+            .as_str()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(command);
+        if ctx.confirm(Some(&call.id), title).await {
             Decision::Allow
         } else {
             Decision::Block("Git operation not approved by the user".into())
@@ -78,7 +58,6 @@ impl Extension for GitGate {
 
 #[cfg(test)]
 mod tests {
-    use rho::provider::ProviderName;
     use rho::provider::ToolCallId;
     use std::sync::{Arc, Mutex};
 
@@ -116,11 +95,7 @@ mod tests {
     struct Approve(Mutex<Vec<String>>);
 
     impl Frontend for Approve {
-        fn event(&self, event: AgentEvent<'_>) {
-            if let AgentEvent::Text(t) = event {
-                self.0.lock().unwrap().push(format!("text: {t}"));
-            }
-        }
+        fn event(&self, _: rho::agent::AgentEvent<'_>) {}
 
         fn confirm<'a>(
             &'a self,
@@ -132,35 +107,11 @@ mod tests {
         }
     }
 
-    /// Always answers `.0`.
-    struct Says(&'static str);
-
-    impl rho::provider::Provider for Says {
-        fn stream(
-            &self,
-            _: rho::provider::Request,
-            _: &dyn Fn(&mut serde_json::Value),
-        ) -> futures::stream::BoxStream<'static, anyhow::Result<rho::provider::Event>> {
-            let text = rho::provider::Event::TextDelta(self.0.into());
-            Box::pin(futures::stream::iter([Ok(text)]))
-        }
-
-        fn models(&self) -> Vec<rho::provider::ModelInfo> {
-            vec![rho::provider::ModelInfo {
-                id: rho::provider::ModelId::new("gpt-6-luna"),
-                name: "GPT-6 Luna".into(),
-                context_window: 1_000_000,
-                price: None,
-                price_above: None,
-            }]
-        }
-    }
-
-    fn call(name: &str, command: &str) -> ToolCall {
+    fn call(name: &str, input: serde_json::Value) -> ToolCall {
         ToolCall {
             id: ToolCallId::new("t1"),
             name: ToolName::new(name),
-            input: json!({ "command": command }),
+            input,
         }
     }
 
@@ -173,60 +124,29 @@ mod tests {
             approve.clone(),
             Default::default(),
         );
-        let mut c = call("Bash", "git push");
-        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
-        let mut c = call("Bash", "git status");
-        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
-        let mut c = call("Write", "git push");
-        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
-        assert_eq!(*approve.0.lock().unwrap(), ["git push"]);
-
-        // A bare context knows no model: no summary.
-        let mut c = call("Bash", "git tag v1");
-        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
-        assert_eq!(
-            approve.0.lock().unwrap().pop().as_deref(),
-            Some("git tag v1")
-        );
-
-        // The compaction model summarizes, else the session's model.
-        for (models, says) in [
+        for (name, input, decision) in [
+            ("Bash", json!({"command": "git push"}), Decision::Allow),
+            ("Bash", json!({"command": "git status"}), Decision::Allow),
+            ("Write", json!({"command": "git push"}), Decision::Allow),
             (
-                r#"{"rules": [{"path": "/", "compact": "cheap/small"}]}"#,
-                "Pushes main to origin.",
+                "Bash",
+                json!({"command": "git tag v1", "description": " Tag v1 "}),
+                Decision::Allow,
             ),
-            (r#"{"rules": []}"#, "Tags v1."),
+            (
+                "Bash",
+                json!({"command": "git tag v2", "description": ""}),
+                Decision::Allow,
+            ),
         ] {
-            let mut agent = rho::agent::Agent::new(
-                Arc::new(Says("Tags v1.")),
-                rho::provider::ModelSpec::new("main", "big"),
-                vec![],
-            );
-            agent
-                .registry
-                .register(ProviderName::new("main"), Arc::new(Says("Tags v1.")));
-            agent.registry.register(
-                ProviderName::new("cheap"),
-                Arc::new(Says("Pushes main to origin.")),
-            );
-            agent.models = rho::models::Config::parse(models, "models.json".as_ref()).unwrap();
-            let session = agent
-                .start_session(SessionId::new("s"), "/tmp", vec![], approve.clone())
-                .await
-                .unwrap();
-            let mut c = call("Bash", "git push origin main");
-            assert_eq!(
-                GitGate.tool_call(&session.ctx, &mut c).await,
-                Decision::Allow
-            );
-            let mut log = approve.0.lock().unwrap();
-            let n = log.len();
-            assert_eq!(
-                log[n - 2..],
-                [format!("text: {says}\n\n"), "git push origin main".into()]
-            );
-            log.clear();
+            let mut c = call(name, input);
+            assert_eq!(GitGate.tool_call(&ctx, &mut c).await, decision);
         }
+        // The description titles the question, else the command.
+        assert_eq!(
+            *approve.0.lock().unwrap(),
+            ["git push", "Tag v1", "git tag v2"]
+        );
 
         // No UI: blocked.
         let ctx = Context::new(
@@ -235,7 +155,7 @@ mod tests {
             Arc::new(NoFrontend),
             Default::default(),
         );
-        let mut c = call("BackgroundTask", "git commit -m x");
+        let mut c = call("BackgroundTask", json!({"command": "git commit -m x"}));
         assert!(matches!(
             GitGate.tool_call(&ctx, &mut c).await,
             Decision::Block(_)

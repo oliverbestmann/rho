@@ -37,9 +37,6 @@
   </mat-menu>
 </mat-toolbar>
 <div class="stream">
-  @if (opened()?.loading() || running()) {
-    <mat-progress-bar mode="indeterminate" class="progress" />
-  }
   <div class="scroller" #scroller>
     <main>
       @if (opened()?.error(); as error) {
@@ -104,10 +101,17 @@
             <div class="chunk-placeholder"></div>
           }
         }
+        <!-- An open question is what the turn waits for, so it shows instead. -->
+        @if (running() && !asks().length) {
+          <div class="working" role="status">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            Working…
+          </div>
+        }
       }
 
       @for (ask of asks(); track ask.id) {
-        <app-ask-card [ask]="ask" />
+        <app-ask-card [ask]="ask" [call]="askedCall(ask)" />
       }
     </main>
   </div>

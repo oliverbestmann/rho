@@ -1,10 +1,12 @@
 import { TestBed } from '@angular/core/testing';
+import type * as acp from '@agentclientprotocol/sdk';
 import { Ask } from '../acp';
 import { AskCard } from './ask-card';
 
-async function render(ask: Ask) {
+async function render(ask: Ask, call?: acp.ToolCall) {
   const fixture = TestBed.createComponent(AskCard);
   fixture.componentRef.setInput('ask', ask);
+  fixture.componentRef.setInput('call', call);
   await fixture.whenStable();
   return { el: fixture.nativeElement as HTMLElement, stable: () => fixture.whenStable() };
 }
@@ -38,6 +40,30 @@ describe('AskCard', () => {
       .find((b) => b.textContent?.includes('Reject'))!
       .click();
     expect(answer).toHaveBeenCalledWith({ outcome: { outcome: 'selected', optionId: 'no' } });
+  });
+
+  it('shows the asked tool call when the request has no content', async () => {
+    const { el } = await render(
+      {
+        kind: 'permission',
+        id: 1,
+        sessionId: 's',
+        answer: vi.fn(),
+        request: {
+          sessionId: 's',
+          toolCall: { toolCallId: 't', title: 'Commit the fix' },
+          options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+        },
+      },
+      {
+        toolCallId: 't',
+        title: 'Commit the fix',
+        kind: 'execute',
+        content: [{ type: 'content', content: { type: 'text', text: '`git commit`' } }],
+      },
+    );
+    expect(el.textContent).toContain('Commit the fix');
+    expect(el.querySelector('code')?.textContent).toBe('git commit');
   });
 
   it('submits a form once the required fields are filled', async () => {

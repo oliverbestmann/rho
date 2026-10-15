@@ -20,6 +20,8 @@ that only allow Copilot. `GitGate` had its own list of model ids to try.
   `History::with_model` are gone.
 - Without any model (a `Context` outside an agent session) `GitGate` shows
   no summary and `History` shows the plain results.
+- (Since 2026-10-15 `GitGate` makes no model call: it titles the question
+  with the `Bash` call's `description`, else the command.)
 
 ## Consequences
 

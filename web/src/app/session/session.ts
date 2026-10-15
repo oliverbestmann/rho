@@ -27,12 +27,11 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatMenuModule } from '@angular/material/menu';
-import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectChange, MatSelectModule } from '@angular/material/select';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
-import { Acp, errorText } from '../acp';
+import { Acp, Ask, errorText } from '../acp';
 import { MarkdownPipe } from '../markdown';
 import { AskCard } from './ask-card';
 import { dir, isRunning, listSessions } from '../sessions/list';
@@ -54,7 +53,6 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
     MatIconModule,
     MatInputModule,
     MatMenuModule,
-    MatProgressBarModule,
     MatProgressSpinnerModule,
     MatSelectModule,
     MatToolbarModule,
@@ -138,6 +136,13 @@ export class Session {
   protected readonly asks = computed(() =>
     this.acp.asks().filter((a) => a.sessionId === this.id()),
   );
+
+  /** The tool call a permission request is about, e.g. a gated `git commit`. */
+  protected askedCall(a: Ask) {
+    return a.kind === 'permission'
+      ? this.opened()?.state.call(a.request.toolCall.toolCallId)
+      : undefined;
+  }
 
   protected readonly title = computed(
     () => this.opened()?.state.title() ?? this.listTitle() ?? 'Session',
