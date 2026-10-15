@@ -60,23 +60,22 @@ interface Field {
         <mat-card-content class="markdown" [innerHTML]="a.request.message | markdown" />
         <mat-card-content class="fields">
           @for (f of fields(); track f.key) {
-            @switch (f.type) {
-              @case ('boolean') {
-                <mat-checkbox [checked]="!!values()[f.key]" (change)="set(f.key, $event.checked)">
+            @if (f.type === 'boolean') {
+              <mat-checkbox [checked]="!!values()[f.key]" (change)="set(f.key, $event.checked)">
+                {{ f.title }}
+              </mat-checkbox>
+            } @else if (f.type === 'choice' || f.type === 'multi') {
+              <div class="choice">
+                <div class="question">
                   {{ f.title }}
-                </mat-checkbox>
-              }
-              @case ('choice') {
-                <div class="choice">
-                  <div class="question">
-                    {{ f.title }}
-                    @if (f.required) {
-                      *
-                    }
-                  </div>
-                  @if (f.description) {
-                    <div class="hint">{{ f.description }}</div>
+                  @if (f.required) {
+                    *
                   }
+                </div>
+                @if (f.description) {
+                  <div class="hint">{{ f.description }}</div>
+                }
+                @if (f.type === 'choice') {
                   <mat-radio-group [value]="values()[f.key]" (change)="set(f.key, $event.value)">
                     @for (o of f.options; track o.value) {
                       <mat-radio-button [value]="o.value">
@@ -87,19 +86,7 @@ interface Field {
                       </mat-radio-button>
                     }
                   </mat-radio-group>
-                </div>
-              }
-              @case ('multi') {
-                <div class="choice">
-                  <div class="question">
-                    {{ f.title }}
-                    @if (f.required) {
-                      *
-                    }
-                  </div>
-                  @if (f.description) {
-                    <div class="hint">{{ f.description }}</div>
-                  }
+                } @else {
                   @for (o of f.options; track o.value) {
                     <mat-checkbox
                       [checked]="picked(f.key, o.value)"
@@ -111,11 +98,20 @@ interface Field {
                       }
                     </mat-checkbox>
                   }
-                </div>
-              }
-              @default {
-                <mat-form-field subscriptSizing="dynamic">
-                  <mat-label>{{ f.title }}</mat-label>
+                }
+              </div>
+            } @else {
+              <mat-form-field subscriptSizing="dynamic">
+                <mat-label>{{ f.title }}</mat-label>
+                @if (f.type === 'number') {
+                  <input
+                    matInput
+                    type="number"
+                    [required]="f.required"
+                    [value]="values()[f.key] ?? ''"
+                    (input)="set(f.key, $any($event.target).value)"
+                  />
+                } @else {
                   <textarea
                     matInput
                     cdkTextareaAutosize
@@ -123,11 +119,11 @@ interface Field {
                     [value]="values()[f.key] ?? ''"
                     (input)="set(f.key, $any($event.target).value)"
                   ></textarea>
-                  @if (f.description) {
-                    <mat-hint>{{ f.description }}</mat-hint>
-                  }
-                </mat-form-field>
-              }
+                }
+                @if (f.description) {
+                  <mat-hint>{{ f.description }}</mat-hint>
+                }
+              </mat-form-field>
             }
           }
         </mat-card-content>
@@ -222,7 +218,9 @@ export class AskCard {
     for (const f of this.fields()) {
       const v = this.values()[f.key];
       if (v == null) continue;
-      content[f.key] = f.type === 'number' && typeof v === 'string' ? Number(v) : v;
+      if (f.type !== 'number') content[f.key] = v;
+      // An empty or partial number input has the value ''.
+      else if (v !== '') content[f.key] = Number(v);
     }
     a.answer({ action: 'accept', content });
   }

@@ -12,9 +12,8 @@ const KEY = 'rho.server';
 export class Settings {
   readonly server = signal<Server | undefined>(load());
 
-  save(server: Server | undefined) {
-    if (server) localStorage.setItem(KEY, JSON.stringify(server));
-    else localStorage.removeItem(KEY);
+  save(server: Server) {
+    localStorage.setItem(KEY, JSON.stringify(server));
     this.server.set(server);
   }
 }

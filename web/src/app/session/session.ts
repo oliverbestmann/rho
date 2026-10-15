@@ -9,8 +9,6 @@ import {
   inject,
   input,
   linkedSignal,
-  Pipe,
-  PipeTransform,
   resource,
   signal,
   untracked,
@@ -18,7 +16,6 @@ import {
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import * as acp from '@agentclientprotocol/sdk';
-import { structuredPatch } from 'diff';
 import { TextFieldModule } from '@angular/cdk/text-field';
 import {
   MatAutocompleteModule,
@@ -38,29 +35,9 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, errorText } from '../acp';
 import { MarkdownPipe } from '../markdown';
 import { AskCard } from './ask-card';
-import { dir, isRunning, listSessions } from '../sessions/sessions';
+import { dir, isRunning, listSessions } from '../sessions/list';
 import { ago } from '../time';
-import { blockText } from './session-state';
-
-const KIND_ICONS: Record<string, string> = {
-  read: 'description',
-  edit: 'edit',
-  delete: 'delete',
-  move: 'drive_file_move',
-  search: 'search',
-  execute: 'terminal',
-  think: 'psychology',
-  fetch: 'language',
-  switch_mode: 'swap_horiz',
-};
-
-/** `toolBody` as a pure pipe, so a diff is only made again when the call changes. */
-@Pipe({ name: 'toolBody' })
-export class ToolBodyPipe implements PipeTransform {
-  transform(call: acp.ToolCall) {
-    return toolBody(call);
-  }
-}
+import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
 
 @Component({
   selector: 'app-session',
@@ -171,20 +148,8 @@ export class Session {
     return u && u.size > 0 ? Math.round((100 * u.used) / u.size) : undefined;
   });
 
+  /** A turn runs, so a send waits in the queue; like `Acp.next`. */
   protected readonly running = computed(
-    () =>
-      this.acp.prompting().has(this.id()) ||
-      !!this.opened()?.state.running() ||
-      (this.opened()?.state.entries() ?? []).some(
-        (e) => e.kind === 'tool' && e.call().status === 'in_progress',
-      ),
-  );
-
-  /**
-   * A send now waits in the queue. Like `Acp.next`, without `running`'s tool
-   * check: a stale running tool card must not hold a message back.
-   */
-  protected readonly busy = computed(
     () => this.acp.prompting().has(this.id()) || !!this.opened()?.state.running(),
   );
 
@@ -230,10 +195,7 @@ export class Session {
     wait(3);
   }
 
-  protected icon(call: acp.ToolCall) {
-    return KIND_ICONS[call.kind ?? ''] ?? 'build';
-  }
-
+  protected readonly icon = toolIcon;
   protected readonly hasBody = hasBody;
 
   protected onKey(e: KeyboardEvent) {
@@ -254,7 +216,7 @@ export class Session {
     const text = this.draft().trim();
     if (!this.ready() || !text) return;
     this.draft.set('');
-    if (this.busy()) {
+    if (this.running()) {
       this.acp.queue(this.id()).update((q) => [...q, text]);
     } else {
       void this.acp.prompt(this.id(), text);
@@ -302,43 +264,4 @@ const CHUNK = 20;
 
 function draftKey(sessionId: string) {
   return `rho.draft.${sessionId}`;
-}
-
-/** Whether a tool card has anything to show; cheap, unlike `toolBody` with its diffs. */
-export function hasBody(call: acp.ToolCall) {
-  return (call.content ?? []).some(
-    (c) => c.type === 'diff' || (c.type === 'content' && !!blockText(c.content)),
-  );
-}
-
-/** A tool call's content as markdown; empty when there is nothing to show. */
-export function toolBody(call: acp.ToolCall) {
-  return (call.content ?? [])
-    .map((c, i) => {
-      if (c.type === 'diff') return fence(diff(c.path, c.oldText ?? '', c.newText), 'diff');
-      if (c.type !== 'content') return '';
-      const text = blockText(c.content);
-      // A shell call's first block is the command, already fenced; then the output.
-      return call.kind === 'execute' && i > 0 && c.content.type === 'text' && text
-        ? fence(text)
-        : text;
-    })
-    .filter((t) => t)
-    .join('\n\n');
-}
-
-/** `text` as a fenced code block, with a fence longer than any backtick run in it. */
-function fence(text: string, lang = '') {
-  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((r) => r.length));
-  const f = '`'.repeat(Math.max(3, longest + 1));
-  return `${f}${lang}\n${text}\n${f}`;
-}
-
-/** The unified diff hunks of an edit, without the file header. */
-function diff(path: string, old: string, next: string) {
-  return structuredPatch(path, path, old, next, '', '', { context: 3 })
-    .hunks.map((h) =>
-      [`@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`, ...h.lines].join('\n'),
-    )
-    .join('\n');
 }

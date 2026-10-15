@@ -43,7 +43,7 @@
   <div class="scroller" #scroller>
     <main>
       @if (opened()?.error(); as error) {
-        <p class="error">{{ error.message }}</p>
+        <p class="error">{{ error }}</p>
       }
 
       <!-- Hidden until loaded, so the replayed history does not fly by. -->
@@ -206,11 +206,11 @@
     }
     <button
       matIconButton
-      [attr.aria-label]="busy() ? 'Queue' : 'Send'"
+      [attr.aria-label]="running() ? 'Queue' : 'Send'"
       [disabled]="!draft().trim() || !ready()"
       (click)="send()"
     >
-      <mat-icon>{{ busy() ? 'schedule_send' : 'send' }}</mat-icon>
+      <mat-icon>{{ running() ? 'schedule_send' : 'send' }}</mat-icon>
     </button>
   </div>
 </footer>

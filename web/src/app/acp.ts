@@ -9,7 +9,7 @@ import { SessionState } from './session/session-state';
 export interface Opened {
   readonly state: SessionState;
   readonly loading: WritableSignal<boolean>;
-  readonly error: WritableSignal<Error | undefined>;
+  readonly error: WritableSignal<string | undefined>;
 }
 
 /** A question from the agent that waits for the user. */
@@ -97,7 +97,7 @@ export class Acp {
       .catch((e: unknown) => {
         // Not kept, so the next visit tries again.
         if (this.opened.get(sessionId) === opened) this.opened.delete(sessionId);
-        opened.error.set(e instanceof Error ? e : new Error(String(e)));
+        opened.error.set(errorText(e));
       })
       .finally(() => {
         opened.loading.set(false);

@@ -23,7 +23,7 @@ describe('Acp.session', () => {
     TestBed.tick(); // the connecting effect, which starts with an empty cache
 
     const first = a.session(agent, 's', '/x');
-    await vi.waitFor(() => expect(first.error()?.message).toBe('gone'));
+    await vi.waitFor(() => expect(first.error()).toBe('gone'));
     expect(a.session(agent, 's', '/x')).not.toBe(first);
   });
 });

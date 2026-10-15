@@ -14,7 +14,7 @@ const buttons = (el: HTMLElement) => [...el.querySelectorAll('button')];
 describe('AskCard', () => {
   it('answers a permission request with the chosen option', async () => {
     const answer = vi.fn();
-    const { el, stable } = await render({
+    const { el } = await render({
       kind: 'permission',
       id: 1,
       sessionId: 's',
@@ -71,5 +71,40 @@ describe('AskCard', () => {
     expect(submit.disabled).toBe(false);
     submit.click();
     expect(answer).toHaveBeenCalledWith({ action: 'accept', content: { name: 'rho' } });
+  });
+
+  it('sends numbers as numbers and leaves out a cleared one', async () => {
+    const answer = vi.fn();
+    const { el, stable } = await render({
+      kind: 'form',
+      id: 3,
+      sessionId: 's',
+      answer,
+      request: {
+        mode: 'form',
+        sessionId: 's',
+        message: 'How many?',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            n: { type: 'integer', title: 'N' },
+            m: { type: 'number', title: 'M' },
+          },
+        },
+      },
+    });
+    const [n, m] = el.querySelectorAll('input[type=number]') as NodeListOf<HTMLInputElement>;
+    for (const [input, value] of [
+      [n, '42'],
+      [m, ''],
+    ] as const) {
+      input.value = value;
+      input.dispatchEvent(new Event('input'));
+    }
+    await stable();
+    buttons(el)
+      .find((b) => b.textContent?.includes('Submit'))!
+      .click();
+    expect(answer).toHaveBeenCalledWith({ action: 'accept', content: { n: 42 } });
   });
 });

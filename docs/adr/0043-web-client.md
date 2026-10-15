@@ -31,7 +31,9 @@ gets no special API.
   3 lines of context (`diff`), computed only when a card is expanded. Diff
   blocks are coloured per line.
 - Busy state per session: this client's pending prompts, running tool
-  calls and `_meta.rho.running` (ADR 0042). Drafts are kept per session in
+  calls and `_meta.rho.running` (ADR 0042). (Since 2026-10-15 without the
+  running tool calls: rho always sends `_meta.rho.running`, and a stale
+  tool card kept the Stop button on.) Drafts are kept per session in
   localStorage.
 - `ng serve` proxies `/dev/acp` to the daemon (`proxy.conf.json`). The
   Node toolchain comes from the flake's dev shell.

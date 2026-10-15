@@ -1,5 +1,5 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { hasBody, toolBody } from './session';
+import { hasBody, toolBody } from './tool-body';
 
 const text = (t: string) => ({
   type: 'content' as const,

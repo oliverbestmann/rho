@@ -1,44 +1,18 @@
 import { Component, computed, inject, resource } from '@angular/core';
 import { Router, RouterLink } from '@angular/router';
-import * as acp from '@agentclientprotocol/sdk';
-import { MatBadgeModule } from '@angular/material/badge';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
-import { Acp } from '../acp';
-import { Settings } from '../settings';
+import { Acp, errorText } from '../acp';
 import { ago } from '../time';
-
-/** All sessions, most recently updated first. */
-export async function listSessions(agent: acp.ClientContext) {
-  const all: acp.SessionInfo[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await agent.request(acp.methods.agent.session.list, { cursor });
-    all.push(...page.sessions);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return all.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
-}
-
-/** A turn runs in the session; rho sends it in `_meta.rho.running`. */
-export function isRunning(s: acp.SessionInfo) {
-  const rho = s._meta?.['rho'];
-  return typeof rho === 'object' && (rho as { running?: unknown }).running === true;
-}
-
-/** The last part of a path, for showing a session's working directory. */
-export function dir(cwd: string) {
-  return cwd.split('/').filter(Boolean).at(-1) ?? cwd;
-}
+import { dir, listSessions } from './list';
 
 @Component({
   selector: 'app-sessions',
   imports: [
     RouterLink,
-    MatBadgeModule,
     MatButtonModule,
     MatIconModule,
     MatListModule,
@@ -59,7 +33,7 @@ export function dir(cwd: string) {
       <mat-progress-bar mode="indeterminate" />
     }
     @if (sessions.error(); as error) {
-      <p class="message error">{{ error.message }}</p>
+      <p class="message error">{{ errorText(error) }}</p>
     }
     <mat-nav-list>
       @for (s of sessions.value(); track s.sessionId) {
@@ -101,10 +75,10 @@ export function dir(cwd: string) {
 })
 export class Sessions {
   private readonly acp = inject(Acp);
-  private readonly settings = inject(Settings);
   private readonly router = inject(Router);
   protected readonly ago = ago;
   protected readonly dir = dir;
+  protected readonly errorText = errorText;
 
   protected readonly sessions = resource({
     params: () => this.acp.agent(),

@@ -41,13 +41,12 @@ export class SessionState {
         this.tool(u.toolCallId).update((c) => ({ ...c, ...set }));
         break;
       }
-      case 'session_info_update':
+      case 'session_info_update': {
         if (u.title) this.title.set(u.title);
-        if (typeof u._meta?.['rho'] === 'object') {
-          const running = (u._meta['rho'] as { running?: unknown }).running;
-          if (typeof running === 'boolean') this.running.set(running);
-        }
+        const running = rhoRunning(u._meta);
+        if (running !== undefined) this.running.set(running);
         break;
+      }
       case 'config_option_update':
         this.options.set(u.configOptions);
         break;
@@ -82,6 +81,14 @@ export class SessionState {
     }
     return call;
   }
+}
+
+/** `_meta.rho.running`, where rho says whether a turn runs; undefined if not sent. */
+export function rhoRunning(meta: { [key: string]: unknown } | null | undefined) {
+  const rho = meta?.['rho'];
+  const running =
+    typeof rho === 'object' && rho ? (rho as { running?: unknown }).running : undefined;
+  return typeof running === 'boolean' ? running : undefined;
 }
 
 /** A content block as markdown. */
