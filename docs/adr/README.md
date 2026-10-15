@@ -47,3 +47,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted |
 | [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted |
 | [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted |
+| [0040](0040-models-by-path.md) | Allowed, default and compaction models by path (`models.json`) | Accepted |

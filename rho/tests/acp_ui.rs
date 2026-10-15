@@ -221,6 +221,78 @@ async fn model_and_thinking_are_session_config_options() {
     assert_eq!(rho["session"]["cacheWrite"], 20);
 }
 
+#[tokio::test]
+async fn models_json_limits_and_defaults_models_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir(&cwd).unwrap();
+    let rules = format!(
+        r#"{{ "rules": [ {{ "path": "{}", "allow": ["fake/small"], "default": "fake/small" }} ] }}"#,
+        dir.path().display()
+    );
+    let models = rho::models::Config::parse(&rules, "models.json".as_ref()).unwrap();
+    let key = format!("model:{}", dir.path().display());
+    let scripted = Scripted::new(vec![vec![text("hi"), Event::Done(StopReason::EndTurn)]]);
+    let mut agent = Arc::into_inner(agent_with(scripted.clone(), vec![])).unwrap();
+    agent.models = models.clone();
+
+    let (cwd2, key2) = (cwd.clone(), key.clone());
+    let client = Client.builder().connect_with(
+        rho::acp::agent(Arc::new(agent)),
+        async |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd2))
+                .block_task()
+                .await?;
+            let sid = session.session_id.clone();
+            // The path default, only allowed models, under the rule's id.
+            let options = session.config_options.expect("config options");
+            assert_eq!(
+                select_value(&options, &key2),
+                ("fake/small".into(), vec!["fake/small".into()])
+            );
+            let set = |id: &str, value: &str| {
+                cx.send_request(SetSessionConfigOptionRequest::new(
+                    sid.clone(),
+                    id.to_string(),
+                    SessionConfigOptionValue::from(value),
+                ))
+                .block_task()
+            };
+            assert!(set(&key2, "fake/big").await.is_err());
+            assert!(set("model", "fake/small").await.is_err());
+            cx.send_request(prompt(&sid, "hi")).block_task().await?;
+            Ok(())
+        },
+    );
+    timed(client).await;
+    assert_eq!(scripted.requests.lock().unwrap()[0].model.as_str(), "small");
+
+    // An explicit (`-m`) model the path forbids: no session.
+    let mut agent = Arc::into_inner(agent_with(Scripted::new(vec![]), vec![])).unwrap();
+    agent.models = models;
+    agent.model_pinned = true;
+    let client = Client.builder().connect_with(
+        rho::acp::agent(Arc::new(agent)),
+        async |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let err = cx
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("not allowed"), "{err:?}");
+            Ok(())
+        },
+    );
+    timed(client).await;
+}
+
 fn bash_run() -> Vec<Vec<Event>> {
     vec![
         vec![

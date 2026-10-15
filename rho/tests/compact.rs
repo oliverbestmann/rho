@@ -37,9 +37,16 @@ async fn compact_after(cache_age: Option<Duration>) -> Run {
     agent
         .registry
         .register(ProviderName::new("cheap"), cheap.clone());
-    agent.compact_model = Some(ModelSpec::new("cheap", "small"));
+    // The `models.json` compaction model wins over the global one.
+    agent.compact_model = Some(ModelSpec::new("cheap", "global"));
+    agent.models = rho::models::Config::parse(
+        r#"{"rules": [{"path": "/", "compact": "cheap/small"}]}"#,
+        "models.json".as_ref(),
+    )
+    .unwrap();
 
-    let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
+    let cwd = std::env::current_dir().unwrap();
+    let (mut session, _log) = common::session(&agent, &cwd).await;
     agent
         .run(&mut session, vec![Content::text("do it")])
         .await

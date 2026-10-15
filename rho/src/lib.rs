@@ -10,6 +10,7 @@ pub mod edit;
 pub mod extension;
 pub mod feature;
 pub mod id;
+pub mod models;
 pub mod openai;
 pub mod prompt;
 pub mod provider;

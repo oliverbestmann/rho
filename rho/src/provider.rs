@@ -319,7 +319,8 @@ pub trait Provider: Send + Sync {
 /// A model as "provider/model", e.g. `anthropic/claude-sonnet-5-5`: the
 /// provider's name in the `Registry` and the id sent in `Request::model`.
 /// Parse user input with `FromStr`; `Display` gives the same form back.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct ModelSpec {
     provider: ProviderName,
     id: ModelId,
@@ -381,24 +382,48 @@ impl std::str::FromStr for ModelSpec {
     }
 }
 
+impl TryFrom<String> for ModelSpec {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> Result<Self> {
+        s.parse()
+    }
+}
+
 impl std::fmt::Display for ModelSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.provider, self.id)
     }
 }
 
-/// Providers by name, see `ModelSpec`.
+/// Providers by name, see `ModelSpec`; optionally limited to some models
+/// (`models.json`).
 #[derive(Default, Clone)]
-pub struct Registry(HashMap<ProviderName, Arc<dyn Provider>>);
+pub struct Registry {
+    providers: HashMap<ProviderName, Arc<dyn Provider>>,
+    allow: Option<Arc<[crate::models::Pattern]>>,
+}
 
 impl Registry {
     pub fn register(&mut self, name: ProviderName, provider: Arc<dyn Provider>) {
-        self.0.insert(name, provider);
+        self.providers.insert(name, provider);
     }
 
-    /// Every provider's models, providers in name order.
+    /// The same providers, limited to the models `allow` matches.
+    pub fn restricted(&self, allow: Option<Arc<[crate::models::Pattern]>>) -> Self {
+        Self {
+            providers: self.providers.clone(),
+            allow,
+        }
+    }
+
+    pub fn allows(&self, spec: &ModelSpec) -> bool {
+        crate::models::allows(self.allow.as_deref(), spec)
+    }
+
+    /// Every allowed model of every provider, providers in name order.
     pub fn models(&self) -> Vec<(ModelSpec, ModelInfo)> {
-        let mut providers: Vec<_> = self.0.iter().collect();
+        let mut providers: Vec<_> = self.providers.iter().collect();
         providers.sort_by_key(|(name, _)| name.as_str());
         providers
             .into_iter()
@@ -408,14 +433,18 @@ impl Registry {
                     .into_iter()
                     .map(move |m| (ModelSpec::of(name.clone(), m.id.clone()), m))
             })
+            .filter(|(spec, _)| self.allows(spec))
             .collect()
     }
 
-    /// The provider serving `spec`.
+    /// The provider serving `spec`; fails if `spec` is not allowed.
     pub fn resolve(&self, spec: &ModelSpec) -> Result<Arc<dyn Provider>> {
+        if !self.allows(spec) {
+            anyhow::bail!("model {spec} is not allowed here (models.json)");
+        }
         let name = spec.provider();
         let provider = self
-            .0
+            .providers
             .get(name)
             .with_context(|| format!("unknown provider {:?}", name.as_str()))?;
         Ok(provider.clone())

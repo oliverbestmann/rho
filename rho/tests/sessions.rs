@@ -143,6 +143,40 @@ async fn sessions_are_saved_and_resumed() {
 }
 
 #[tokio::test]
+async fn resume_falls_back_when_the_stored_model_is_forbidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());
+    let provider = Scripted::new(vec![]);
+    let mut agent = agent(provider.clone(), &db);
+    agent
+        .registry
+        .register(rho::provider::ProviderName::new("test"), provider);
+    drop(
+        agent
+            .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+            .await
+            .unwrap(),
+    );
+
+    let rules = format!(
+        r#"{{"rules": [{{"path": "{}", "allow": ["test/other"], "default": "test/other"}}]}}"#,
+        cwd.display()
+    );
+    agent.models = rho::models::Config::parse(&rules, "models.json".as_ref()).unwrap();
+    let log = Arc::new(common::Log::default());
+    let resumed = agent
+        .resume_session(&SessionId::new("s"), &cwd, vec![], log.clone())
+        .await
+        .unwrap();
+    assert_eq!(resumed.model, ModelSpec::new("test", "other"));
+    assert!(
+        log.lines().iter().any(|l| l.contains("Model unavailable")),
+        "{:?}",
+        log.lines()
+    );
+}
+
+#[tokio::test]
 async fn changed_additional_directories_are_announced() {
     let dir = tempfile::tempdir().unwrap();
     let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());

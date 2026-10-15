@@ -145,6 +145,40 @@ history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` (default
 outputs and with tool arguments cut to 2000 chars. The notice shows which path
 ran and its token usage.
 
+## Models by path
+
+`~/.config/rho/models.json` limits the models a session may use, and sets the
+model it starts with and the compaction model, by the session's cwd
+(`rho/src/models.rs`). It is read at startup; an invalid file stops rho.
+
+```json
+{
+  "rules": [
+    { "path": "~/github", "allow": ["github-copilot/*"],
+      "default": "github-copilot/claude-sonnet-5-5",
+      "compact": "github-copilot/claude-haiku-5-5" },
+    { "path": "~/github/sandbox-repo", "allow": ["*"] }
+  ]
+}
+```
+
+- `allow`: `*`, `provider/*` or `provider/model`. Without a matching rule
+  every model is allowed.
+- `allow`, `default` and `compact` are inherited separately: for each, the
+  longest rule path containing the cwd that sets it wins.
+- `-m` / `RHO_MODEL` and `RHO_COMPACT_MODEL` win over `default` and
+  `compact`; a session whose path forbids them fails to start. At startup rho
+  checks that every rule path allows its non-explicit default and compaction
+  model.
+- Everything goes through the session's restricted `Registry`: the model
+  picker lists only allowed models, switching to others fails, and so do
+  compaction and extension calls (`Context::complete`) with a forbidden model.
+- Resuming a session whose model is forbidden now falls back to the start
+  model, with a notice.
+- The model option's ACP config id is `model:<rule path>` under a rule with
+  `allow` or `default` (else `model`), so Zed's `default_config_options`
+  remember a pick per rule (ADR 0040).
+
 ## Sessions
 
 ACP sessions are saved to SQLite, `~/.config/rho/sessions.db`
@@ -338,9 +372,9 @@ tasks are killed when the session ends.
 Ports of the other pi extensions:
 
 - `GitGate` asks the user before `Bash` or `BackgroundTask` runs `git commit`,
-  `git push` or `git tag`, with a summary of the command by
-  `claude-haiku-5-5` (or `gpt-6-luna` if that fails); without a UI (CLI) they
-  are blocked.
+  `git push` or `git tag`, with a summary of the command by the first allowed
+  `claude-haiku-5-5` or `gpt-6-luna` from any provider (else the session's
+  model); without a UI (CLI) they are blocked.
 - `Secrets` masks secrets with the gitleaks rules (`agent/src/gitleaks.toml`,
   copied from gitleaks' `config/gitleaks.toml`) as `REDACTED`: prompts, the
   system prompt and tool output, then every request body again

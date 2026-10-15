@@ -349,7 +349,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                         Err(e) => return responder.respond_with_internal_error(format!("{e:#}")),
                     };
                     let (options, commands) = (
-                        frontend.remember(config_options(&agent, &session)),
+                        frontend.remember(config_options(&session)),
                         commands(&session),
                     );
                     let (ctx, dirs) = (session.ctx.clone(), session.dirs_notice());
@@ -552,7 +552,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                     session.save().await;
                     match result {
                         Ok(()) => {
-                            let options = frontend.remember(config_options(&agent, &session));
+                            let options = frontend.remember(config_options(&session));
                             // The other viewers' selectors would stay stale.
                             frontend.send_update(
                                 SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(
@@ -735,7 +735,7 @@ async fn open_stored(
     // A new connection has not seen it; the frontend also needs it to
     // republish on a model switch.
     session.emit_usage();
-    let options = frontend.remember(config_options(agent, &session));
+    let options = frontend.remember(config_options(&session));
     Ok((frontend, options, commands))
 }
 
@@ -1286,13 +1286,12 @@ fn form_answers(content: Option<BTreeMap<String, ElicitationContentValue>>) -> A
     answers
 }
 
-const MODEL_OPTION: &str = "model";
 const THINKING_OPTION: &str = "thought_level";
 const PROFILE_OPTION: &str = "mode";
 
 /// The session's profile (if there is a choice), model and thinking level
 /// as ACP config options.
-fn config_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
+fn config_options(session: &Session) -> Vec<SessionConfigOption> {
     let mut options = vec![];
     let profiles = session.ctx.profiles();
     if profiles.len() > 1 {
@@ -1314,13 +1313,14 @@ fn config_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> 
             .description("What the agent may do in this session"),
         );
     }
-    options.extend(model_options(agent, session));
+    options.extend(model_options(session));
     options
 }
 
-fn model_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
-    let mut models: Vec<_> = agent
-        .registry
+fn model_options(session: &Session) -> Vec<SessionConfigOption> {
+    let mut models: Vec<_> = session
+        .ctx
+        .registry()
         .models()
         .into_iter()
         .map(|(spec, m)| {
@@ -1342,7 +1342,8 @@ fn model_options(agent: &Agent, session: &Session) -> Vec<SessionConfigOption> {
             models.insert(0, SessionConfigSelectOption::new(current.clone(), &current));
         }
         options.push(
-            SessionConfigOption::select(MODEL_OPTION, "Model", current, models)
+            // Per `models.json` rule, so clients remember a pick per rule.
+            SessionConfigOption::select(session.model_key.clone(), "Model", current, models)
                 .category(SessionConfigOptionCategory::Model)
                 .description("Model for this session"),
         );
@@ -1382,9 +1383,14 @@ fn set_config(
         anyhow::bail!("expected a string value");
     };
     match &*req.config_id.0 {
-        MODEL_OPTION => {
+        id if id == session.model_key => {
             let spec = value.parse()?;
-            let listed = agent.registry.models().iter().any(|(m, _)| *m == spec);
+            let listed = session
+                .ctx
+                .registry()
+                .models()
+                .iter()
+                .any(|(m, _)| *m == spec);
             if !listed && spec != session.model {
                 anyhow::bail!("unknown model {value:?}");
             }

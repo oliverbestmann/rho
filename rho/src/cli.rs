@@ -31,7 +31,8 @@ env:
   RHO_ACP_TOKEN      token for `daemon --listen`, default from ~/.config/rho/acp-token (created)
 
 files in ~/.config/rho: PREAMBLE_SYSTEM.md (replaces the preamble), APPEND_SYSTEM.md, AGENTS.md,
-project_context.json (approved project AGENTS.md dirs), mcp.json (MCP servers over HTTP);
+project_context.json (approved project AGENTS.md dirs), mcp.json (MCP servers over HTTP),
+models.json (allowed, default and compaction models by path);
 the first two are created on startup if missing (the preamble written out),
 and empty files are ignored";
 
@@ -104,11 +105,10 @@ pub async fn run(options: Options) -> Result<()> {
     if let Some(t) = &thinking_flag {
         daemon_args.extend(["--thinking".to_string(), t.clone()]);
     }
-    let model = model_flag
+    let model: Option<ModelSpec> = model_flag
         .or_else(|| std::env::var("RHO_MODEL").ok())
         .map(|m| m.parse())
-        .transpose()?
-        .unwrap_or_else(|| options.model.clone());
+        .transpose()?;
     let thinking: Thinking = thinking_flag
         .or_else(|| std::env::var("RHO_THINKING").ok())
         .map(|t| t.parse())
@@ -131,7 +131,7 @@ pub async fn run(options: Options) -> Result<()> {
                 let dir = crate::prompt::config_dir().join(crate::acp_ws::DAEMON_DIR);
                 return crate::acp_ws::connect_stdio(&dir, &daemon_args).await;
             }
-            let agent = Arc::new(acp_agent(options, &model, thinking)?);
+            let agent = Arc::new(acp_agent(options, model, thinking)?);
             use agent_client_protocol::ConnectTo;
             crate::acp::agent(agent)
                 .connect_to(agent_client_protocol::Stdio::new())
@@ -147,7 +147,7 @@ pub async fn run(options: Options) -> Result<()> {
                 return Ok(());
             };
             eprintln!("rho daemon: {}", crate::acp_ws::socket_path(&dir).display());
-            let agent = Arc::new(acp_agent(options, &model, thinking)?);
+            let agent = Arc::new(acp_agent(options, model, thinking)?);
             // One hub: editors and acp-ui see the same sessions.
             let hub = Arc::new(crate::acp::Hub::default());
             let unix = crate::acp_ws::serve(agent.clone(), hub.clone(), socket, None);
@@ -166,7 +166,7 @@ pub async fn run(options: Options) -> Result<()> {
             let tcp = crate::acp_ws::serve(agent, hub, listener, Some(token));
             tokio::try_join!(unix, tcp).map(|_| ())
         }
-        Some(_) => one_shot(make_agent(options, &model, thinking)?, args.join(" ")).await,
+        Some(_) => one_shot(make_agent(options, model, thinking)?, args.join(" ")).await,
     }
 }
 
@@ -183,27 +183,40 @@ fn take_flag(args: &mut Vec<String>, short: &str, long: &str) -> Result<Option<S
 }
 
 /// An agent that saves sessions, for ACP.
-fn acp_agent(options: Options, model: &ModelSpec, thinking: Thinking) -> Result<Agent> {
+fn acp_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) -> Result<Agent> {
     let sessions_db = options.sessions_db.clone();
     let mut agent = make_agent(options, model, thinking)?;
     agent.sessions_db = sessions_db;
     Ok(agent)
 }
 
-fn make_agent(options: Options, model: &ModelSpec, thinking: Thinking) -> Result<Agent> {
-    let provider = options.providers.resolve(model)?;
-    let mut agent = Agent::new(provider, model.clone(), options.tools);
+/// `model`: from `-m` / `RHO_MODEL`, it wins over `models.json` defaults.
+fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) -> Result<Agent> {
+    let model_pinned = model.is_some();
+    let model = model.unwrap_or(options.model);
+    let provider = options.providers.resolve(&model)?;
+    let mut agent = Agent::new(provider, model, options.tools);
     agent.thinking = thinking;
+    agent.model_pinned = model_pinned;
     agent.registry = options.providers;
     let config_dir = crate::prompt::config_dir();
     crate::prompt::ensure_files(&config_dir);
     agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
     agent.features = crate::feature::load(&config_dir)?;
+    agent.models = crate::models::Config::load(&config_dir)?;
     agent.config_dir = Some(config_dir);
-    agent.compact_model = Some(match std::env::var("RHO_COMPACT_MODEL") {
-        Ok(m) => m.parse().context("RHO_COMPACT_MODEL")?,
+    let compact = match std::env::var("RHO_COMPACT_MODEL") {
+        Ok(m) => {
+            agent.compact_pinned = true;
+            m.parse().context("RHO_COMPACT_MODEL")?
+        }
         Err(_) => options.compact_model,
-    });
+    };
+    agent.models.check(
+        (!agent.model_pinned).then_some(&agent.model),
+        (!agent.compact_pinned).then_some(&compact),
+    )?;
+    agent.compact_model = Some(compact);
     agent.extensions = options.extensions;
     Ok(agent)
 }

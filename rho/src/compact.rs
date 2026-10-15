@@ -85,9 +85,9 @@ impl Agent {
         let warm = session
             .last_request
             .is_some_and(|t| t.elapsed() + CACHE_MARGIN < CACHE_TTL);
-        let (provider, request, label) = match &self.compact_model {
+        let (provider, request, label) = match &session.compact_model {
             Some(cheap) if !warm => {
-                let provider = self.registry.resolve(cheap)?;
+                let provider = session.ctx.registry().resolve(cheap)?;
                 let text = format!(
                     "<conversation>\n{}\n</conversation>\n\n{instructions}",
                     serialize(&session.history)

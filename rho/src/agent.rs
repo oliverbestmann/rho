@@ -84,6 +84,12 @@ pub struct Agent {
     pub config_dir: Option<PathBuf>,
     /// Cheaper model for compacting when the prompt cache expired.
     pub compact_model: Option<ModelSpec>,
+    /// `model` / `compact_model` were given explicitly: they win over the
+    /// `models.json` defaults, and a session fails if its path forbids them.
+    pub model_pinned: bool,
+    pub compact_pinned: bool,
+    /// Allowed, default and compaction models by cwd, from `models.json`.
+    pub models: crate::models::Config,
     pub tools: Vec<Arc<dyn DynTool>>,
     pub extensions: Vec<Arc<dyn DynExtension>>,
     /// Available to extensions through `Context::complete`.
@@ -105,6 +111,10 @@ pub struct Session {
     pub ctx: Context,
     pub provider: Arc<dyn Provider>,
     pub model: ModelSpec,
+    /// For compacting when the prompt cache expired.
+    pub compact_model: Option<ModelSpec>,
+    /// Config id of the model option, see `models::Policy::key`.
+    pub model_key: String,
     pub thinking: Thinking,
     /// Usage of all requests so far, see `AgentEvent::Usage`.
     pub usage: Usage,
@@ -569,6 +579,9 @@ impl Agent {
             system: crate::prompt::PREAMBLE.into(),
             config_dir: None,
             compact_model: None,
+            model_pinned: false,
+            compact_pinned: false,
+            models: Default::default(),
             tools,
             extensions: vec![],
             registry: Registry::default(),
@@ -603,7 +616,7 @@ impl Agent {
         let mut roots = vec![cwd.into()];
         roots.extend(additional_dirs);
         let store = self.open_store(&roots[0]).await?;
-        let mut session = self.setup(id, roots, frontend, store, false).await;
+        let mut session = self.setup(id, roots, frontend, store, false).await?;
         session.try_save().await.context("saving the new session")?;
         Ok(session)
     }
@@ -634,7 +647,7 @@ impl Agent {
         let dirs_changed = info.additional_dirs != roots[1..];
         let mut session = self
             .setup(id.clone(), roots, frontend, Some(store), true)
-            .await;
+            .await?;
         if dirs_changed {
             notify_dirs_changed(&session);
         }
@@ -687,8 +700,24 @@ impl Agent {
         frontend: Arc<dyn Frontend>,
         store: Option<Store>,
         resumed: bool,
-    ) -> Session {
-        let ctx = Context::new(id, roots[0].clone(), frontend, self.registry.clone());
+    ) -> Result<Session> {
+        let policy = self.models.policy(&roots[0]);
+        let registry = self.registry.restricted(policy.allow);
+        let model = match policy.default {
+            Some(default) if !self.model_pinned => default,
+            _ => self.model.clone(),
+        };
+        let compact_model = match policy.compact {
+            Some(compact) if !self.compact_pinned => Some(compact),
+            _ => self.compact_model.clone(),
+        };
+        // `self.provider` also serves agents without a registry (tests).
+        let provider = if model == self.model && registry.allows(&model) {
+            self.provider.clone()
+        } else {
+            registry.resolve(&model)?
+        };
+        let ctx = Context::new(id, roots[0].clone(), frontend, registry);
         ctx.set_sandbox(self.sandbox.policy(&roots));
         ctx.set_extensions(self.extensions.clone());
         if let Some(store) = &store {
@@ -717,8 +746,10 @@ impl Agent {
         ) + &setup.system;
         let session = Session {
             ctx,
-            provider: self.provider.clone(),
-            model: self.model.clone(),
+            provider,
+            model,
+            compact_model,
+            model_key: policy.key,
             thinking: self.thinking,
             usage: Usage::default(),
             last_usage: Usage::default(),
@@ -745,7 +776,7 @@ impl Agent {
             }),
         };
         session.publish_info();
-        session
+        Ok(session)
     }
 
     /// Replaces the additional directories of an open session: its sandbox,
@@ -792,7 +823,7 @@ impl Agent {
     /// Switches the session to `spec`, for the next run. The new model
     /// starts with a cold prompt cache.
     pub fn set_model(&self, session: &mut Session, spec: &ModelSpec) -> Result<()> {
-        session.provider = self.registry.resolve(spec)?;
+        session.provider = session.ctx.registry().resolve(spec)?;
         session.model = spec.clone();
         session.last_request = None;
         session.publish_info();

@@ -1,12 +1,13 @@
 //! Hard gate on `git commit`, `git push` and `git tag` (pi's git-gate): the
 //! user has to approve them, on top of what AGENTS.md asks. Read-only git
 //! commands pass. Without a UI (CLI) they are blocked. Before the question, a
-//! summary of the command by a cheap model (the first that answers) is shown
-//! as agent text.
+//! summary of the command by a cheap model (the first allowed one that
+//! answers, from any provider; else the session's model) is shown as agent
+//! text.
 
 use rho::agent::AgentEvent;
 use rho::extension::{Context, Decision, Extension, ToolCall};
-use rho::provider::{ModelSpec, ToolName};
+use rho::provider::ToolName;
 
 use crate::background_task::BACKGROUND_TASK;
 
@@ -15,17 +16,23 @@ pub struct GitGate;
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
-/// Tried in order; a missing provider or a failed request tries the next.
-const SUMMARY_MODELS: [ModelSpec; 2] = [
-    ModelSpec::from_static("anthropic", "claude-haiku-5-5"),
-    ModelSpec::from_static("openai", "gpt-6-luna"),
-];
+/// Model ids, tried in order at every provider that lists them (and the
+/// session's `models.json` rules allow); a failed request tries the next.
+const SUMMARY_MODELS: [&str; 2] = ["claude-haiku-5-5", "gpt-6-luna"];
 const SUMMARY_PROMPT: &str = "Say in about 10 to 15 words what this shell command does to the git repository. Name only what matters: what is committed, pushed or tagged, and where. No details on staging or output, no quotes, no markdown. Examples: \"Commits all changes locally.\" \"Pushes main to origin.\" \"Tags HEAD as v1.2 and pushes the tag.\"";
 
-/// The first summary a model in `SUMMARY_MODELS` gives, if any.
+/// The first summary a model in `SUMMARY_MODELS`, or else the session's
+/// model, gives, if any.
 async fn summarize(ctx: &Context, command: &str) -> Option<String> {
-    for model in &SUMMARY_MODELS {
-        if let Ok(text) = ctx.complete(model, SUMMARY_PROMPT, command).await
+    let listed = ctx.registry().models();
+    let mut models: Vec<_> = SUMMARY_MODELS
+        .iter()
+        .flat_map(|id| listed.iter().filter(move |(m, _)| m.id().as_str() == *id))
+        .map(|(m, _)| m.clone())
+        .collect();
+    models.extend(ctx.session_info().model);
+    for model in models {
+        if let Ok(text) = ctx.complete(&model, SUMMARY_PROMPT, command).await
             && !text.trim().is_empty()
         {
             return Some(text.trim().to_string());
@@ -136,7 +143,7 @@ mod tests {
         }
     }
 
-    /// A model that always answers `.0`.
+    /// Lists `gpt-6-luna`, which always answers `.0`.
     struct Says(&'static str);
 
     impl rho::provider::Provider for Says {
@@ -147,6 +154,16 @@ mod tests {
         ) -> futures::stream::BoxStream<'static, anyhow::Result<rho::provider::Event>> {
             let text = rho::provider::Event::TextDelta(self.0.into());
             Box::pin(futures::stream::iter([Ok(text)]))
+        }
+
+        fn models(&self) -> Vec<rho::provider::ModelInfo> {
+            vec![rho::provider::ModelInfo {
+                id: rho::provider::ModelId::new("gpt-6-luna"),
+                name: "GPT-6 Luna".into(),
+                context_window: 1_000_000,
+                price: None,
+                price_above: None,
+            }]
         }
     }
 
@@ -178,9 +195,20 @@ mod tests {
         // With a summary from the first model that is available.
         let mut registry = rho::provider::Registry::default();
         registry.register(
-            ProviderName::new("openai"),
+            ProviderName::new("github-copilot"),
             Arc::new(Says("Pushes main to origin.")),
         );
+        // A path that forbids it: no summary.
+        let only = rho::models::Pattern::try_from("anthropic/*".to_string()).unwrap();
+        let restricted = registry.restricted(Some(Arc::new([only])));
+        let ctx = Context::new(SessionId::new("s"), "/tmp", approve.clone(), restricted);
+        let mut c = call("Bash", "git tag v1");
+        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
+        assert_eq!(
+            approve.0.lock().unwrap().pop().as_deref(),
+            Some("git tag v1")
+        );
+
         let ctx = Context::new(SessionId::new("s"), "/tmp", approve.clone(), registry);
         let mut c = call("Bash", "git push origin main");
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
@@ -188,6 +216,35 @@ mod tests {
         assert_eq!(
             approve.0.lock().unwrap()[1..],
             ["text: Pushes main to origin.\n\n", "git push origin main"]
+        );
+
+        // Neither is allowed here: the session's model summarizes.
+        let mut agent = rho::agent::Agent::new(
+            Arc::new(Says("Tags v1.")),
+            rho::provider::ModelSpec::new("github-copilot", "main"),
+            vec![],
+        );
+        agent.registry.register(
+            ProviderName::new("github-copilot"),
+            Arc::new(Says("Tags v1.")),
+        );
+        agent.models = rho::models::Config::parse(
+            r#"{"rules": [{"path": "/", "allow": ["github-copilot/main"]}]}"#,
+            "models.json".as_ref(),
+        )
+        .unwrap();
+        let session = agent
+            .start_session(SessionId::new("s"), "/tmp", vec![], approve.clone())
+            .await
+            .unwrap();
+        let mut c = call("Bash", "git tag v1");
+        assert_eq!(
+            GitGate.tool_call(&session.ctx, &mut c).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            approve.0.lock().unwrap()[3..],
+            ["text: Tags v1.\n\n", "git tag v1"]
         );
 
         // No UI: blocked.
