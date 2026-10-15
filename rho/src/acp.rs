@@ -1599,7 +1599,7 @@ fn tool_kind(name: &ToolName) -> ToolKind {
         "Bash" | "BackgroundTask" => ToolKind::Execute,
         "Glob" | "Grep" | "GoDoc" | "History" => ToolKind::Search,
         "FetchUrl" => ToolKind::Fetch,
-        "EnterPlanMode" | "ExitPlanMode" => ToolKind::SwitchMode,
+        "EnterPlanMode" | "PresentPlan" => ToolKind::SwitchMode,
         _ => ToolKind::Other,
     }
 }

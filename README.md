@@ -445,7 +445,7 @@ history gets a note, appended to the next user message (prompt or tool
 results): the new profile, which tools not to call now and which can be
 called again, whether the sandbox is read-only, and the profile's
 instructions. A new session gets one on its first request if its profile
-restricts anything (with `PlanMode`, `write` hides `ExitPlanMode`). Calls to
+restricts anything (e.g. `plan`). Calls to
 hidden tools fail. `read_only` turns every read-write sandbox rule into a
 read-only one (except `/dev/null` and friends), for `Bash`, `Write`,
 background tasks and anything else using `ctx.run_sandboxed` /
@@ -455,12 +455,13 @@ saved with the session.
 
 `PlanMode` (in the `rho` binary) adds `plan`, like Claude Code's plan mode:
 `Write` and `Edit` are hidden and the sandbox is read-only. The model can
-enter it with `EnterPlanMode`. It leaves with `ExitPlanMode { plan }`: the
-plan is shown on the tool call and the user is asked to approve it
-(`session/request_permission`). Approved: back to `write`, the model starts
-implementing. Rejected: the session stays in plan mode and the run stops, so
-the user can say what to change. Picking `write` in the selector needs no
-approval.
+enter it with `EnterPlanMode`. `PresentPlan { plan }` works in every
+profile: the plan is shown on the tool call and the user gets a form with
+Approve / Revise and a feedback text field. Approved: from `plan` back to
+`write`, the model starts implementing (with the feedback as notes).
+Feedback without approval: the model gets it and revises the plan. Neither:
+the profile stays and the run stops. Picking `write` in the selector needs
+no approval (ADR 0047).
 
 ## Images
 

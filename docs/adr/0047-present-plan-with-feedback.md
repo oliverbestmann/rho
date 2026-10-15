@@ -15,7 +15,9 @@ e.g. when the model wants sign-off before a large change in `write`.
 `EnterPlanMode` and the `plan` profile stay as in ADR 0017. `ExitPlanMode`
 becomes `PresentPlan { plan }`, available in every profile:
 
-- The plan is shown on the tool call (`Tool::describe`), as before.
+- The plan is the form's message, so it shows inside the approval box;
+  Zed and the web client collapse the tool call card. It also stays on the
+  tool call (`Tool::describe`) for the transcript.
 - The user gets a form (`ctx.ask`): an Approve / Revise pick and an
   optional free-text feedback field.
 - Approved: in `plan` the session switches to `write`; in other profiles it
