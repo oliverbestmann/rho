@@ -19,16 +19,6 @@ const CONTEXT_FILES: [&str; 5] = [
     "CLAUDE.MD",
 ];
 
-/// `$XDG_CONFIG_HOME/rho`, else `~/.config/rho`.
-pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        })
-        .join("rho")
-}
-
 /// Creates `PREAMBLE_SYSTEM.md` (with `PREAMBLE`) and an empty
 /// `APPEND_SYSTEM.md` in `config_dir` if missing, to be edited. Best effort.
 pub fn ensure_files(config_dir: &Path) {

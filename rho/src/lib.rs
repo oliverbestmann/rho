@@ -18,4 +18,16 @@ pub mod sandbox;
 pub mod store;
 pub mod tools;
 
+use std::path::PathBuf;
+
 pub use cli::{Options, run};
+
+/// `$XDG_CONFIG_HOME/rho`, else `~/.config/rho`.
+pub fn config_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+        })
+        .join("rho")
+}

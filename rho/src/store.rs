@@ -185,7 +185,7 @@ pub(crate) struct Loaded {
 pub fn default_path() -> PathBuf {
     std::env::var_os("RHO_SESSIONS_DB")
         .map(PathBuf::from)
-        .unwrap_or_else(|| crate::prompt::config_dir().join("sessions.db"))
+        .unwrap_or_else(|| crate::config_dir().join("sessions.db"))
 }
 
 crate::id_type! {

@@ -57,7 +57,7 @@ pub struct Mcp {
 
 impl Mcp {
     pub fn from_config() -> Self {
-        Self::load(&rho::prompt::config_dir())
+        Self::load(&rho::config_dir())
     }
 
     fn load(dir: &Path) -> Self {

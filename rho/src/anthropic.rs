@@ -15,16 +15,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use futures::stream::{self, BoxStream};
-use futures::{StreamExt, TryStreamExt};
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::auth::AuthStore;
 use crate::provider::{
-    Content, Event, ImageSource, Message, ModelId, ModelInfo, Price, Provider, ProviderName,
-    Request, Role, StopReason, Thinking, ToolCallId, ToolName, ToolSpec, Usage,
+    Content, Event, ImageSource, Message, ModelId, ModelInfo, Provider, ProviderName, Request,
+    Role, StopReason, Thinking, ToolCallId, ToolName, ToolSpec, Usage, sse,
 };
 
 /// Claude Code version we claim to be; keep in sync with pi-ai.
@@ -121,15 +120,6 @@ const MODELS: &[ModelRow] = &[
     ),
 ];
 
-pub fn price([input, output, cache_read, cache_write]: [f64; 4]) -> Price {
-    Price {
-        input,
-        output,
-        cache_read,
-        cache_write,
-    }
-}
-
 #[derive(Clone)]
 pub struct Anthropic {
     http: reqwest::Client,
@@ -171,43 +161,6 @@ impl Anthropic {
     }
 }
 
-/// Events of a streamed response; `send` makes the request, `feed` parses
-/// the body chunks (e.g. `SseParser::feed`).
-pub fn events(
-    send: impl Future<Output = Result<reqwest::Response>> + Send + 'static,
-    mut feed: impl FnMut(&[u8]) -> Vec<Result<Event>> + Send + 'static,
-) -> BoxStream<'static, Result<Event>> {
-    stream::once(send)
-        .map_ok(|resp| resp.bytes_stream().map_err(anyhow::Error::from))
-        .try_flatten()
-        .flat_map(move |chunk| {
-            stream::iter(match chunk {
-                Ok(bytes) => feed(&bytes),
-                Err(e) => vec![Err(e)],
-            })
-        })
-        .boxed()
-}
-
-/// The `data:` payloads of the complete server-sent event lines in `buf`.
-pub fn sse_data(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
-    buf.extend_from_slice(bytes);
-    let mut out = Vec::new();
-    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-        let line: Vec<u8> = buf.drain(..=pos).collect();
-        if let Some(data) = String::from_utf8_lossy(&line)
-            .trim_end()
-            .strip_prefix("data:")
-            .map(str::trim)
-            // OpenAI's end marker; Copilot sends it on Messages streams too.
-            .filter(|data| *data != "[DONE]")
-        {
-            out.push(data.to_string());
-        }
-    }
-    out
-}
-
 impl Provider for Anthropic {
     fn stream(
         &self,
@@ -218,7 +171,7 @@ impl Provider for Anthropic {
         before_send(&mut body);
         add_billing(&mut body);
         let mut parser = SseParser::default();
-        events(self.clone().send(body), move |b| parser.feed(b))
+        sse::events(self.clone().send(body), move |b| parser.feed(b))
     }
 
     fn models(&self) -> Vec<ModelInfo> {
@@ -228,8 +181,8 @@ impl Provider for Anthropic {
                 id: ModelId::from_static(id),
                 name: name.into(),
                 context_window,
-                price: Some(price(prices)),
-                price_above: above.map(|p| (100_000, price(p))),
+                price: Some(prices.into()),
+                price_above: above.map(|p| (100_000, p.into())),
             })
             .collect()
     }
@@ -608,7 +561,7 @@ pub struct SseParser {
 impl SseParser {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Result<Event>> {
         let mut out = Vec::new();
-        for data in sse_data(&mut self.buf, bytes) {
+        for data in sse::data(&mut self.buf, bytes) {
             if let Err(e) = self.handle(&data, &mut out) {
                 out.push(Err(e));
             }
@@ -964,15 +917,5 @@ mod tests {
                 .to_string()
                 .contains("overloaded")
         );
-    }
-
-    #[test]
-    fn done_marker_is_ignored() {
-        let mut buf = vec![];
-        let data = sse_data(
-            &mut buf,
-            b"data: {\"type\":\"message_stop\"}\n\ndata: [DONE]\n",
-        );
-        assert_eq!(data, [r#"{"type":"message_stop"}"#]);
     }
 }

@@ -79,7 +79,7 @@ impl Skills {
     pub fn from_config() -> Self {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         Self::load(&[
-            rho::prompt::config_dir().join("skills"),
+            rho::config_dir().join("skills"),
             home.join(".agents/skills"),
         ])
     }

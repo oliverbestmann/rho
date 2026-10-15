@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::memory;
+use crate::index;
 
 pub const MARKER: &str = ".rho-project-root";
 /// `/history <query>`: the user searches; the results are not shown to the model.
@@ -91,8 +91,8 @@ struct Inner {
 impl Default for History {
     fn default() -> Self {
         History::new(
-            memory::cache_dir().join("history.db"),
-            Box::new(memory::embed),
+            index::cache_dir().join("history.db"),
+            Box::new(index::embed),
         )
     }
 }
@@ -335,7 +335,7 @@ impl Inner {
     fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.conn.lock().unwrap();
         if conn.is_none() {
-            *conn = Some(memory::open(&self.path, SCHEMA)?);
+            *conn = Some(index::open(&self.path, SCHEMA)?);
         }
         f(conn.as_mut().unwrap())
     }
@@ -344,7 +344,7 @@ impl Inner {
     /// contain `phrase`. Returns their number.
     fn redact(&self, phrase: &str) -> Result<usize> {
         self.with_conn(|c| {
-            memory::purge(c, |tx| {
+            index::purge(c, |tx| {
                 let ids: Vec<String> = tx
                     .prepare(
                         "SELECT session_id FROM chunks WHERE instr(text, ?1) > 0
@@ -430,7 +430,7 @@ impl Inner {
         if !missing.is_empty() {
             let texts: Vec<String> = missing.iter().map(|&n| embedded[n].clone()).collect();
             for (n, v) in missing.iter().zip((self.embed)(&texts)?) {
-                known.insert(hashes[*n].clone(), memory::blob(&v));
+                known.insert(hashes[*n].clone(), index::blob(&v));
             }
         }
         self.with_conn(|c| {
@@ -488,7 +488,7 @@ impl Inner {
         }
         let embedding = match mode {
             Mode::Keyword => None,
-            _ => Some(memory::blob(&(self.embed)(&[query.to_string()])?.remove(0))),
+            _ => Some(index::blob(&(self.embed)(&[query.to_string()])?.remove(0))),
         };
         self.with_conn(|c| {
             let scope = "(s.cwd = ?1 OR substr(s.cwd, 1, length(?2)) = ?2)

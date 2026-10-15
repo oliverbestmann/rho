@@ -25,7 +25,7 @@ pub struct ProjectContext {
 impl Default for ProjectContext {
     fn default() -> Self {
         Self {
-            prefs: rho::prompt::config_dir().join("project_context.json"),
+            prefs: rho::config_dir().join("project_context.json"),
             sessions: Default::default(),
         }
     }

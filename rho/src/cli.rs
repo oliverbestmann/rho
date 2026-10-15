@@ -129,7 +129,7 @@ pub async fn run(options: Options) -> Result<()> {
         },
         Some("acp") => {
             if args.iter().any(|a| a == "--daemon") {
-                let dir = crate::prompt::config_dir().join(crate::acp_ws::DAEMON_DIR);
+                let dir = crate::config_dir().join(crate::acp_ws::DAEMON_DIR);
                 let result = crate::acp_ws::connect_stdio(&dir, &daemon_args).await;
                 // Tokio's stdin reader blocks in a thread that cannot be
                 // cancelled, so the runtime would wait for the editor forever.
@@ -148,7 +148,7 @@ pub async fn run(options: Options) -> Result<()> {
         }
         Some("daemon") => {
             let listen = take_flag(&mut args, "-l", "--listen")?;
-            let config_dir = crate::prompt::config_dir();
+            let config_dir = crate::config_dir();
             let dir = config_dir.join(crate::acp_ws::DAEMON_DIR);
             let Some((_lock, socket)) = crate::acp_ws::bind_daemon(&dir)? else {
                 eprintln!("rho daemon: already running");
@@ -207,7 +207,7 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     agent.thinking = thinking;
     agent.model_pinned = model_pinned;
     agent.registry = options.providers;
-    let config_dir = crate::prompt::config_dir();
+    let config_dir = crate::config_dir();
     crate::prompt::ensure_files(&config_dir);
     agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
     agent.features = crate::feature::load(&config_dir)?;

@@ -24,7 +24,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::auth::{AuthStore, ClientId, CredentialKind, Credentials, Secret};
-use crate::provider::{Content, Event, ModelId, ModelInfo, Provider, ProviderName, Request, Role};
+use crate::provider::{
+    Content, Event, ModelId, ModelInfo, Provider, ProviderName, Request, Role, sse,
+};
 use crate::{anthropic, openai};
 
 /// Key in the credential file and `rho login` argument.
@@ -289,10 +291,10 @@ impl Provider for Copilot {
         let send = self.clone().send(request, body);
         if claude {
             let mut parser = anthropic::SseParser::default();
-            anthropic::events(send, move |b| parser.feed(b))
+            sse::events(send, move |b| parser.feed(b))
         } else {
             let mut parser = openai::SseParser::default();
-            anthropic::events(send, move |b| parser.feed(b))
+            sse::events(send, move |b| parser.feed(b))
         }
     }
 
@@ -303,8 +305,8 @@ impl Provider for Copilot {
                 id: ModelId::from_static(id),
                 name: name.into(),
                 context_window,
-                price: Some(anthropic::price(prices)),
-                price_above: above.map(|(tokens, p)| (tokens, anthropic::price(p))),
+                price: Some(prices.into()),
+                price_above: above.map(|(tokens, p)| (tokens, p.into())),
             })
             .collect()
     }

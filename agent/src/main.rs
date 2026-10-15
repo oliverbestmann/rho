@@ -8,6 +8,7 @@ mod git_gate;
 mod go_check;
 mod go_doc;
 mod history;
+mod index;
 mod mcp;
 mod memory;
 mod plan_mode;

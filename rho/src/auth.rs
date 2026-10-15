@@ -242,7 +242,7 @@ impl AuthStore {
         if let Some(p) = std::env::var_os("RHO_AUTH_FILE") {
             return p.into();
         }
-        crate::prompt::config_dir().join("auth.json")
+        crate::config_dir().join("auth.json")
     }
 
     pub fn path(&self) -> &Path {

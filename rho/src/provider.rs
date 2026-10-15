@@ -11,6 +11,8 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod sse;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -219,6 +221,18 @@ impl Price {
             + usage.cache_read as f64 * self.cache_read
             + usage.cache_write as f64 * self.cache_write)
             / 1e6
+    }
+}
+
+/// From `[input, output, cache read, cache write]`.
+impl From<[f64; 4]> for Price {
+    fn from([input, output, cache_read, cache_write]: [f64; 4]) -> Self {
+        Self {
+            input,
+            output,
+            cache_read,
+            cache_write,
+        }
     }
 }
 

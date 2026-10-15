@@ -22,7 +22,7 @@ use rho::tools::DynTool;
 use serde_json::{Value, json};
 
 const RULES: &str = include_str!("gitleaks.toml");
-const MARKER: &str = "REDACTED";
+
 /// JSON blocks sent back unchanged: thinking is signed, reasoning encrypted,
 /// images are base64.
 const OPAQUE: [&str; 5] = [
@@ -99,7 +99,7 @@ impl Secrets {
 }
 
 fn markers(text: &str) -> usize {
-    text.matches(MARKER).count()
+    text.matches(rho::store::MASK).count()
 }
 
 /// Why a Write or Edit is blocked: it adds `REDACTED` to the file.
@@ -363,7 +363,7 @@ mod tests {
             decide(EDIT, edit("k=1", "k=REDACTED")).await,
             Decision::Block(_)
         ));
-        let mut allowed = write("new", &format!("k={MARKER}"));
+        let mut allowed = write("new", &format!("k={}", rho::store::MASK));
         allowed["allowMasked"] = true.into();
         assert_eq!(decide(WRITE, allowed).await, Decision::Allow);
         assert_eq!(

@@ -36,7 +36,7 @@ model compacts, ADR 0040), sessions in `RHO_SESSIONS_DB` or
 
 - Adding or removing an extension is a rebuild, not a config change.
 - Extensions use only the public API (`rho::extension`, `rho::tools`,
-  `rho::provider`, `rho::store` read access, `rho::prompt::config_dir`),
+  `rho::provider`, `rho::store` read access, `rho::config_dir`),
   which keeps that API honest; anything an extension needs has to be
   exposed deliberately (e.g. `tools::truncate`).
 - A different personal setup is a different small binary crate.

@@ -138,7 +138,7 @@ pub struct SseParser {
 impl SseParser {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Result<Event>> {
         let mut out = Vec::new();
-        for data in crate::anthropic::sse_data(&mut self.buf, bytes) {
+        for data in crate::provider::sse::data(&mut self.buf, bytes) {
             if let Err(e) = self.handle(&data, &mut out) {
                 out.push(Err(e));
             }
