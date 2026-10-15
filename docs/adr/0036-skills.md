@@ -1,6 +1,6 @@
 # 36. Skills as an extension
 
-- Status: Accepted
+- Status: Accepted, amended by 0052
 - Date: 2026-10-15
 
 ## Context
@@ -22,7 +22,8 @@ follows pi's model.
   `name`, else the dir name; it may use letters, digits, `-` and `_`. The
   first skill of a name wins.
 - Broken skills (no frontmatter, no description, bad name, duplicate) are
-  skipped and reported once per session as a notification.
+  skipped and reported once per session as a notification (since ADR
+  0052 when the session starts, before that with the first prompt).
 - The system prompt lists name and description of every skill, except those
   with `disable-model-invocation: true`.
 - The `ReadSkill` tool returns SKILL.md without its frontmatter, or another

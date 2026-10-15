@@ -1,6 +1,6 @@
 # 31. MCP servers over Streamable HTTP, from mcp.json
 
-- Status: Accepted
+- Status: Accepted, amended by 0052
 - Date: 2026-10-11
 
 ## Context
@@ -24,7 +24,8 @@ dir, in Claude's format (`mcpServers`, `type: "http"`, `url`, `headers`).
 - Each tool is `mcp__<server>__<tool>`. Calls run without approval, like
   the built-in tools.
 - Config and connect problems are shown with the session's first prompt,
-  because notices during `session/new` do not reach the client.
+  because notices during `session/new` do not reach the client. (Since
+  ADR 0052 they are shown when the session starts.)
 
 ## Consequences
 

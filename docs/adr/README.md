@@ -38,15 +38,15 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0028](0028-preamble-written-to-disk.md) | `PREAMBLE_SYSTEM.md` created with the built-in preamble | Accepted |
 | [0029](0029-project-context-needs-consent.md) | Project context files are read only with the user's consent | Accepted |
 | [0030](0030-local-memory-store.md) | Memories stored locally with embeddings in SQLite | Accepted |
-| [0031](0031-mcp-over-http.md) | MCP servers over Streamable HTTP, from mcp.json | Accepted |
+| [0031](0031-mcp-over-http.md) | MCP servers over Streamable HTTP, from mcp.json | Accepted, amended by 0052 |
 | [0032](0032-project-history-search.md) | Project history search | Accepted, amended by 0049 |
 | [0033](0033-features.md) | Features: switchable bundles of sandbox access and tools | Accepted |
 | [0034](0034-secret-redaction.md) | Secrets are masked in two stages with the gitleaks rules | Accepted |
 | [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |
-| [0036](0036-skills.md) | Skills as an extension | Accepted |
+| [0036](0036-skills.md) | Skills as an extension | Accepted, amended by 0052 |
 | [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted, amended by 0038, 0039 |
 | [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted, amended by 0039 |
-| [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted, amended by 0042 |
+| [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted, amended by 0042, 0052 |
 | [0040](0040-models-by-path.md) | Allowed, default and compaction models by path | Accepted, amended by 0049 |
 | [0041](0041-edit-diffs-kept-for-replay.md) | Edit diffs are stored for 7 days and replayed | Accepted |
 | [0042](0042-busy-state-in-rho-meta.md) | Clients learn that a turn runs from `_meta.rho.running` | Accepted |
@@ -59,3 +59,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0049](0049-helpers-use-the-compaction-model.md) | Extension helpers use the session's compaction model | Accepted |
 | [0050](0050-tools-describe-their-cards.md) | Tools say how their calls are shown | Accepted |
 | [0051](0051-per-session-extension-state.md) | Per-session extension state in the `Context` | Accepted |
+| [0052](0052-hold-notices-until-the-session-is-known.md) | Hold a starting session's notices until the client knows it | Accepted |

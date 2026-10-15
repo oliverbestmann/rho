@@ -125,3 +125,53 @@ async fn daemon_socket_through_the_stdio_pump() {
     ids.sort();
     assert_eq!(ids, [1, 2]);
 }
+
+struct Greeter;
+
+impl rho::extension::Extension for Greeter {
+    async fn session_start(&self, s: &mut rho::extension::SessionSetup) {
+        s.ctx.notify("hello", "from session_start", false);
+    }
+}
+
+#[tokio::test]
+async fn session_start_notices_follow_the_new_session_response() {
+    let mut agent = agent();
+    agent.extensions = vec![Arc::new(Greeter)];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/", listener.local_addr().unwrap());
+    tokio::spawn(rho::acp_ws::serve(
+        Arc::new(agent),
+        Arc::default(),
+        listener,
+        None,
+    ));
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+
+    let cwd = std::env::current_dir().unwrap();
+    let new = json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": cwd, "mcpServers": []}});
+    ws.send(Message::text(format!("{}\n{new}\n", initialize(1))))
+        .await
+        .unwrap();
+    let mut sid = None;
+    let read = async {
+        loop {
+            let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+                continue;
+            };
+            let msg: Value = serde_json::from_str(&text).unwrap();
+            if msg["id"] == 2 {
+                sid = Some(msg["result"]["sessionId"].clone());
+            } else if msg["method"] == "session/update"
+                && msg["params"]["update"]["title"] == "hello"
+            {
+                assert_eq!(sid.as_ref(), Some(&msg["params"]["sessionId"]), "{msg}");
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), read)
+        .await
+        .expect("no notice");
+}

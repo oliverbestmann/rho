@@ -36,6 +36,10 @@ pub(super) struct Viewer {
     pub(super) terminal: bool,
     /// The client knows the session: it gets confirmations and forms.
     pub(super) ready: bool,
+    /// Updates held while the session starts, until `ready`: a client does
+    /// not know a new session before the `session/new` response. Replays
+    /// (`To::Only`) are not held.
+    pub(super) held: Option<Vec<SessionUpdate>>,
 }
 
 /// Which viewers an update goes to.
@@ -116,24 +120,28 @@ impl AcpFrontend {
         self.viewers.lock().unwrap().iter().any(|v| v.conn == conn)
     }
 
-    /// `conn` knows the session now: it gets the running tool calls and
-    /// the questions waiting for an answer.
+    /// `conn` knows the session now: it gets the held updates (or the
+    /// running tool calls) and the questions waiting for an answer.
     pub(super) fn ready(&self, conn: ConnId) {
         let mut viewers = self.viewers.lock().unwrap();
         let Some(v) = viewers.iter_mut().find(|v| v.conn == conn) else {
             return;
         };
         v.ready = true;
-        for (_, terminal, plain) in self.running.lock().unwrap().iter() {
-            let update = if v.terminal { terminal } else { plain };
-            let _ =
-                v.cx.send_notification(SessionNotification::new(self.sid.clone(), update.clone()));
+        let held = v.held.take();
+        // With these it got the running tool calls and the busy state.
+        let caught_up = held.is_some();
+        for update in held.into_iter().flatten() {
+            self.deliver(v, update, To::Only(conn));
         }
-        if self.busy.load(Ordering::Relaxed) {
-            let _ = v.cx.send_notification(SessionNotification::new(
-                self.sid.clone(),
-                busy_update(true),
-            ));
+        if !caught_up {
+            for (_, terminal, plain) in self.running.lock().unwrap().iter() {
+                let update = if v.terminal { terminal } else { plain };
+                self.deliver(v, update.clone(), To::Only(conn));
+            }
+            if self.busy.load(Ordering::Relaxed) {
+                self.deliver(v, busy_update(true), To::Only(conn));
+            }
         }
         // Nobody waiting is fine.
         let _ = self.ready.send(v.clone());
@@ -240,23 +248,30 @@ impl AcpFrontend {
                 _ => {}
             }
         }
-        for v in self.viewers.lock().unwrap().iter() {
+        for v in self.viewers.lock().unwrap().iter_mut() {
             if to.includes(v.conn) {
                 let update = if v.terminal { &terminal } else { &plain };
-                // Dropped updates only affect display; the turn continues.
-                let _ = v
-                    .cx
-                    .send_notification(SessionNotification::new(self.sid.clone(), update.clone()));
+                self.deliver(v, update.clone(), to);
             }
         }
     }
 
     pub(super) fn send_update(&self, update: SessionUpdate, to: To) {
-        for v in self.viewers.lock().unwrap().iter() {
+        for v in self.viewers.lock().unwrap().iter_mut() {
             if to.includes(v.conn) {
-                let _ = v
-                    .cx
-                    .send_notification(SessionNotification::new(self.sid.clone(), update.clone()));
+                self.deliver(v, update.clone(), to);
+            }
+        }
+    }
+
+    /// Sends `update` to `v`, or holds it while the session starts.
+    fn deliver(&self, v: &mut Viewer, update: SessionUpdate, to: To) {
+        match &mut v.held {
+            Some(held) if !matches!(to, To::Only(_)) => held.push(update),
+            // Dropped updates only affect display; the turn continues.
+            _ => {
+                let _ =
+                    v.cx.send_notification(SessionNotification::new(self.sid.clone(), update));
             }
         }
     }

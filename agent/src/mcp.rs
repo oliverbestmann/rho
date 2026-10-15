@@ -12,7 +12,7 @@
 //! cache) stays the same. Problems are shown with the first prompt: notices
 //! sent during `session/new` do not reach the client.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,9 +20,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use rho::extension::{Context, Extension, PromptSetup, SessionSetup, ToolOutput};
+use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
 use rho::provider::{ImageSource, ToolName, ToolSpec};
-use rho::store::SessionId;
 use rho::tools::{Tool, truncate};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -51,8 +50,6 @@ pub struct Mcp {
     servers: Vec<Arc<Server>>,
     /// Config problems, shown in every session.
     problems: Vec<String>,
-    /// Problems per session id, shown with its first prompt.
-    pending: Mutex<HashMap<SessionId, Vec<String>>>,
 }
 
 impl Mcp {
@@ -79,11 +76,7 @@ impl Mcp {
             }
             Err(e) => problems.push(e),
         }
-        Self {
-            servers,
-            problems,
-            pending: Mutex::default(),
-        }
+        Self { servers, problems }
     }
 }
 
@@ -114,20 +107,8 @@ impl Extension for Mcp {
                 Err(e) => problems.push(format!("MCP server {}: {e:#}", server.name)),
             }
         }
-        if !problems.is_empty() {
-            let id = session.ctx.session_id().clone();
-            self.pending.lock().unwrap().insert(id, problems);
-        }
-    }
-
-    fn session_end(&self, ctx: &Context) {
-        self.pending.lock().unwrap().remove(ctx.session_id());
-    }
-
-    async fn before_prompt(&self, ctx: &Context, _prompt: &mut PromptSetup) {
-        let problems = self.pending.lock().unwrap().remove(ctx.session_id());
-        for p in problems.into_iter().flatten() {
-            ctx.notify("MCP", &p, true);
+        for p in problems {
+            session.ctx.notify("MCP", &p, true);
         }
     }
 }
@@ -453,6 +434,7 @@ mod tests {
     use axum::http::{HeaderMap as Headers, StatusCode, header};
     use axum::response::{IntoResponse, Response};
     use rho::extension::NoFrontend;
+    use rho::store::SessionId;
 
     #[test]
     fn expands_env_vars() {

@@ -1,6 +1,6 @@
 # 39. Open sessions are shared by the connections of one process
 
-- Status: Accepted, amended by 0042
+- Status: Accepted, amended by 0042, 0052
 - Date: 2026-10-14
 
 ## Context
@@ -35,6 +35,8 @@ the TCP server. `acp::agent` (stdio) makes its own hub.
   that are running (the store has them only after they ran) and every
   question that waits. A viewer of a newly opened session is ready at
   once, since `session_start` hooks may ask before the response.
+  (Since ADR 0052 it is ready after the response too, and gets the
+  updates held until then.)
 - Turns run on `tokio::spawn`, not as tasks of the connection, so they
   finish and are saved after the connection drops.
 - A connection only prompts, configures or cancels sessions it opened.

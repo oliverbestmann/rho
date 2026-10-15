@@ -63,13 +63,16 @@ struct State {
 }
 
 impl State {
-    fn viewer(&self, cx: &ConnectionTo<Client>, ready: bool) -> Viewer {
+    /// A viewer for `cx`, ready after the response (`AcpFrontend::ready`).
+    /// While the session `starts`, its updates are held until then.
+    fn viewer(&self, cx: &ConnectionTo<Client>, starts: bool) -> Viewer {
         Viewer {
             conn: self.conn,
             cx: cx.clone(),
             forms: self.caps.forms.load(Ordering::Relaxed),
             terminal: self.caps.terminal_output.load(Ordering::Relaxed),
-            ready,
+            ready: false,
+            held: starts.then(Vec::new),
         }
     }
 }
@@ -159,7 +162,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                 // Extension session_start hooks are async; keep them off the dispatch loop.
                 cx.clone().spawn(async move {
                     let frontend = AcpFrontend::new(&sid, &req.cwd);
-                    // Ready at once: session_start hooks may ask before the response.
+                    // session_start hooks must not ask: questions wait for the response.
                     frontend.attach(state.viewer(&cx, true));
                     let started = agent
                         .start_session(id, req.cwd, req.additional_directories, frontend.clone())
@@ -172,21 +175,20 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                         frontend.remember(config_options(&session)),
                         commands(&session),
                     );
-                    let (ctx, dirs) = (session.ctx.clone(), session.dirs_notice());
+                    if let Some(dirs) = session.dirs_notice() {
+                        session.ctx.notify("Additional directories", &dirs, false);
+                    }
                     register(
                         &agent,
                         &state.hub,
                         &sid,
                         session,
-                        frontend,
+                        frontend.clone(),
                         commands.clone(),
                     );
                     responder
                         .respond(NewSessionResponse::new(sid.clone()).config_options(options))?;
-                    // After the response: before it the client does not know the session.
-                    if let Some(dirs) = dirs {
-                        ctx.notify("Additional directories", &dirs, false);
-                    }
+                    frontend.ready(state.conn);
                     send_commands(&cx, &sid, commands)
                 })
             },
@@ -500,7 +502,7 @@ async fn open_stored(
         }
         None => {
             let frontend = AcpFrontend::new(sid, &cwd);
-            // Nothing runs yet, and session_start hooks may ask.
+            // The notices of session_start hooks follow the replay.
             frontend.attach(state.viewer(cx, true));
             let session = agent
                 .resume_session(

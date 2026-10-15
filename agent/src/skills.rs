@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use rho::extension::{
-    CommandName, Context, Extension, PromptSetup, SessionSetup, SlashCommand, ToolOutput,
-};
+use rho::extension::{CommandName, Context, Extension, SessionSetup, SlashCommand, ToolOutput};
 use rho::provider::{Content, Request, ToolName, ToolSpec};
 use rho::sandbox::Access;
 use rho::tools::{REQUEST_ACCESS, Tool, input_schema, parse, truncate};
@@ -64,7 +62,6 @@ struct Frontmatter {
 /// In the session's `Context::state`.
 #[derive(Default)]
 struct SessionState {
-    problems_shown: bool,
     /// Skills whose SKILL.md was in the latest request.
     in_context: HashSet<String>,
 }
@@ -211,6 +208,9 @@ fn escape(s: &str) -> String {
 
 impl Extension for Skills {
     async fn session_start(&self, session: &mut SessionSetup) {
+        for p in &self.problems {
+            session.ctx.notify("Skills", p, true);
+        }
         if self.skills.is_empty() {
             return;
         }
@@ -239,18 +239,6 @@ impl Extension for Skills {
                 description: s.description.lines().next().unwrap_or_default().into(),
                 hint: Some("optional request".into()),
             });
-        }
-    }
-
-    async fn before_prompt(&self, ctx: &Context, _prompt: &mut PromptSetup) {
-        let show = {
-            let state = ctx.state::<Mutex<SessionState>>();
-            !std::mem::replace(&mut state.lock().unwrap().problems_shown, true)
-        };
-        if show {
-            for p in &self.problems {
-                ctx.notify("Skills", p, true);
-            }
         }
     }
 
