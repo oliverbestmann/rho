@@ -141,11 +141,15 @@ impl Agent {
             bail!("model returned no summary");
         }
 
+        let mut summary = summary.trim().to_string();
+        // The call that set it is gone with the history.
+        if let Some(title) = session.ctx.title() {
+            summary += &format!("\n\nThe current title of the session is: {title}");
+        }
         session.history = vec![Message {
             role: Role::User,
             content: vec![Content::text(format!(
-                "{SUMMARY_START}{}{SUMMARY_END}",
-                summary.trim()
+                "{SUMMARY_START}{summary}{SUMMARY_END}"
             ))],
         }];
         // The new prefix is not cached yet.

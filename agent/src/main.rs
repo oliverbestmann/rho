@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(mcp::Mcp::from_config()),
             Arc::new(memory::Memory::default()),
             Arc::new(history::History::default()),
-            Arc::new(session_title::SessionTitle::default()),
+            Arc::new(session_title::SessionTitle),
             Arc::new(background_task::BackgroundTasks::default()),
             Arc::new(context_notice::ContextNotice),
             Arc::new(ask_user::AskUser),

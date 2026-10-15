@@ -1,71 +1,64 @@
-//! Names the session from its first prompt with a cheap model (pi's
-//! session-title). Runs in the background, so it does not delay the run.
+//! Lets the model name the session with the `SetSessionTitle` tool: once at
+//! the start and again when the conversation drifts. Compaction tells the
+//! model the current title (see `rho::compact`).
 
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::Arc;
 
-use rho::extension::{Context, Extension, PromptSetup, SessionSetup};
-use rho::provider::{Content, ModelSpec};
-use rho::store::SessionId;
+use anyhow::{Result, bail};
+use rho::extension::{Context, Extension, PromptSetup, SessionSetup, ToolOutput};
+use rho::provider::{Content, ToolName, ToolSpec};
+use rho::tools::{Tool, input_schema, parse};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
-pub const MODEL: ModelSpec = ModelSpec::from_static("anthropic", "claude-haiku-5-5");
-const CONTEXT_LIMIT: usize = 800;
-const SYSTEM: &str = "Write a concise 3-7 word session title for a conversation that starts with the following user message. Return only the title, with no quotes, markdown, label, or punctuation at the end.";
+const NAME: ToolName = ToolName::from_static("SetSessionTitle");
+const SYSTEM: &str = "\n\n<session-title>\nYou must call the SetSessionTitle tool to set an initial title as soon as possible. \
+    Update the title whenever the conversation drifts too far from it.\n</session-title>";
+const REMINDER: &str = "<system-reminder>\nThe session has no title yet. Call the SetSessionTitle tool to set one.\n</system-reminder>";
 
-#[derive(Default)]
-pub struct SessionTitle {
-    /// Sessions that already had their first prompt.
-    seen: Mutex<HashSet<SessionId>>,
-}
+pub struct SessionTitle;
 
 impl Extension for SessionTitle {
     async fn session_start(&self, session: &mut SessionSetup) {
-        // A resumed session keeps its title.
-        if session.resumed {
-            let id = session.ctx.session_id().clone();
-            self.seen.lock().unwrap().insert(id);
-        }
+        session.system += SYSTEM;
+        session.tools.push(Arc::new(SetSessionTitle));
     }
 
+    /// After the first turn, every input reminds the model until it sets a title.
     async fn before_prompt(&self, ctx: &Context, prompt: &mut PromptSetup) {
-        if !self.seen.lock().unwrap().insert(ctx.session_id().clone()) {
-            return;
+        if ctx.session_info().requests > 0 && ctx.title().is_none() {
+            prompt.content.push(Content::text(REMINDER));
         }
-        let text: String = prompt
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                Content::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(CONTEXT_LIMIT)
-            .collect();
-        if text.trim().is_empty() {
-            return;
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Input {
+    /// Concise 3-7 word title, no quotes or markdown.
+    title: String,
+}
+
+struct SetSessionTitle;
+
+impl Tool for SetSessionTitle {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: NAME,
+            description: "Set the title of this session, shown to the user in the session list."
+                .into(),
+            input_schema: input_schema::<Input>(),
         }
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            match ctx.complete(&MODEL, SYSTEM, &text).await {
-                Ok(reply) => {
-                    let title = clean_title(&reply);
-                    if !title.is_empty() {
-                        ctx.set_title(&title);
-                    }
-                }
-                Err(e) => ctx.notify(
-                    "session title",
-                    &format!("Could not generate session title: {e:#}"),
-                    true,
-                ),
-            }
-        });
     }
 
-    fn session_end(&self, ctx: &Context) {
-        self.seen.lock().unwrap().remove(ctx.session_id());
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
+        let input: Input = parse(input)?;
+        let title = clean_title(&input.title);
+        if title.is_empty() {
+            bail!("title is empty");
+        }
+        ctx.set_title(&title);
+        Ok(format!("Title set to: {title}").into())
     }
 }
 
@@ -89,7 +82,52 @@ fn clean_title(reply: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_title;
+    use super::*;
+    use futures::stream::{self, BoxStream, StreamExt};
+    use rho::agent::Agent;
+    use rho::extension::NoFrontend;
+    use rho::provider::{Event, ModelSpec, Provider, Request, StopReason};
+    use rho::store::SessionId;
+    use serde_json::json;
+
+    struct Echo;
+
+    impl Provider for Echo {
+        fn stream(&self, _: Request, _: &dyn Fn(&mut Value)) -> BoxStream<'static, Result<Event>> {
+            let events = [
+                Event::TextDelta("ok".into()),
+                Event::Done(StopReason::EndTurn),
+            ];
+            stream::iter(events.map(Ok)).boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn reminds_after_the_first_turn_until_titled() {
+        let mut agent = Agent::new(Arc::new(Echo), ModelSpec::new("test", "m"), vec![]);
+        agent.extensions.push(Arc::new(SessionTitle));
+        let mut s = agent
+            .start_session(SessionId::new("s"), "/tmp", vec![], Arc::new(NoFrontend))
+            .await
+            .unwrap();
+        let reminded = |s: &rho::agent::Session| {
+            let last_prompt = &s.history[s.history.len() - 2];
+            last_prompt.content.contains(&Content::text(REMINDER))
+        };
+        agent.run(&mut s, vec![Content::text("hi")]).await.unwrap();
+        assert!(!reminded(&s));
+        agent
+            .run(&mut s, vec![Content::text("more")])
+            .await
+            .unwrap();
+        assert!(reminded(&s));
+        s.ctx.set_title("Greeting");
+        agent
+            .run(&mut s, vec![Content::text("again")])
+            .await
+            .unwrap();
+        assert!(!reminded(&s));
+    }
 
     #[test]
     fn cleans_titles() {
@@ -101,5 +139,27 @@ mod tests {
         assert_eq!(clean_title("**Fix the build**"), "Fix the build");
         assert_eq!(clean_title(&"a".repeat(100)).len(), 80);
         assert_eq!(clean_title(""), "");
+    }
+
+    #[tokio::test]
+    async fn sets_the_title() {
+        let ctx = Context::new(
+            SessionId::new("s"),
+            "/tmp",
+            Arc::new(NoFrontend),
+            Default::default(),
+        );
+        let out = SetSessionTitle
+            .run(json!({"title": " **Fix the build** "}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.output, "Title set to: Fix the build");
+        assert_eq!(ctx.title().as_deref(), Some("Fix the build"));
+        assert!(
+            SetSessionTitle
+                .run(json!({"title": "  "}), &ctx)
+                .await
+                .is_err()
+        );
     }
 }

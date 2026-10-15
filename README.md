@@ -175,8 +175,7 @@ their WAL. Other open sessions keep the phrase in memory until reopened
 
 Extensions read the database through `ctx.store()` (`session`, `list`,
 `history`, `messages` for all epochs); writing is up to rho. `SessionSetup::resumed` tells
-`session_start` that a stored session continues (`SessionTitle` keeps its
-title then).
+`session_start` that a stored session continues.
 
 ## Sandbox
 
@@ -328,8 +327,10 @@ the window.
 questions in one form, each a pick list with a text field for an answer of
 the user's own.
 
-`SessionTitle` names the session from the first prompt with haiku, in the
-background. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
+`SessionTitle` adds `SetSessionTitle`: the system prompt tells the model to
+set a title right away and update it when the conversation drifts. After the
+first turn, every input reminds the model while there is no title. A
+compaction summary ends with the current title. `BackgroundTasks` adds `BackgroundTask`, `BackgroundTaskList` and
 `BackgroundTaskCancel`: commands run sandboxed in their own process group, the
 result (exit status + last 10 lines) is sent with `trigger_turn`, and running
 tasks are killed when the session ends.

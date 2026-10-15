@@ -28,7 +28,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::memory;
-use crate::session_title::MODEL;
+
+/// Answers searches with `summarizeOver` by default.
+const MODEL: ModelSpec = ModelSpec::from_static("anthropic", "claude-haiku-5-5");
 
 pub const MARKER: &str = ".rho-project-root";
 /// `/history <query>`: the user searches; the results are not shown to the model.
