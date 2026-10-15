@@ -152,8 +152,23 @@ pub(crate) mod tests {
     pub(crate) fn mock_go(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("go");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ \"$1\" = __probe ] && exit 0\n{body}"),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A process forked by another test thread may still hold our write fd
+        // until it execs, so running the script fails with ETXTBSY. Our fd is
+        // closed now, so once one exec works it keeps working.
+        loop {
+            match std::process::Command::new(&path).arg("__probe").status() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(1))
+                }
+                status => break assert!(status.unwrap().success()),
+            }
+        }
         path
     }
 
