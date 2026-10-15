@@ -28,9 +28,7 @@ impl Extension for RipgrepFind {
 #[serde(rename_all = "camelCase")]
 struct Input {
     /// Regex pattern to search file contents for
-    // Required for the model; older calls without it list files.
-    #[schemars(required, with = "String")]
-    pattern: Option<String>,
+    pattern: String,
     /// Glob to filter filenames, e.g. '*.go' or 'src/**/*.ts'
     glob: Option<String>,
     /// Directory to search (default: cwd)
@@ -150,24 +148,17 @@ async fn rg(args: Vec<String>, max: Option<usize>, ctx: &Context) -> Result<Tool
 }
 
 fn args(i: &Input) -> Vec<String> {
-    let mut args = vec![];
-    let pattern = i.pattern.as_ref().filter(|p| !p.is_empty());
-    match pattern {
-        // `--regexp` so a pattern starting with `-` is not taken for a flag.
-        Some(p) => args.extend(["--regexp".into(), p.clone()]),
-        _ => args.push("--files".into()),
-    }
+    // `--regexp` so a pattern starting with `-` is not taken for a flag.
+    let mut args = vec!["--regexp".into(), i.pattern.clone()];
     if let Some(glob) = i.glob.as_ref().filter(|g| !g.is_empty()) {
         args.extend(["--glob".into(), glob.clone()]);
     }
-    if pattern.is_some() {
-        match i.output_mode {
-            OutputMode::FilesWithMatches => args.push("--files-with-matches".into()),
-            OutputMode::Count => args.push("--count".into()),
-            OutputMode::Content => {
-                if let Some(n) = i.context.filter(|n| *n > 0) {
-                    args.extend(["--context".into(), n.to_string()]);
-                }
+    match i.output_mode {
+        OutputMode::FilesWithMatches => args.push("--files-with-matches".into()),
+        OutputMode::Count => args.push("--count".into()),
+        OutputMode::Content => {
+            if let Some(n) = i.context.filter(|n| *n > 0) {
+                args.extend(["--context".into(), n.to_string()]);
             }
         }
     }
@@ -218,10 +209,7 @@ mod tests {
 
     #[test]
     fn builds_rg_arguments() {
-        assert_eq!(
-            args_of(json!({"glob": "*.go"})),
-            ["--files", "--glob", "*.go", "--color", "never", "--", "."]
-        );
+        assert!(parse::<Input>(json!({"glob": "*.go"})).is_err());
         assert_eq!(
             args_of(
                 json!({"pattern": "-x", "outputMode": "content", "context": 2, "path": "@src"})
@@ -238,10 +226,6 @@ mod tests {
             ]
         );
         // Context only applies to content searches.
-        assert_eq!(
-            args_of(json!({"context": 2})),
-            ["--files", "--color", "never", "--", "."]
-        );
         assert_eq!(
             args_of(json!({"pattern": "x", "context": 2})),
             [
