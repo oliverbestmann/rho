@@ -44,7 +44,7 @@ outside the project.
   ranked by its best chunk, with the overlap removed. `limit` (default 10,
   at most 50) applies to the merged results.
 - With `summarizeOver: n` and more than n results, a cheap model
-  (`History::with_model`, default `SessionTitle`'s Haiku) answers the query from the results and cites
+  (`History::with_model`, default `anthropic/claude-haiku-5-5`) answers the query from the results and cites
   session and seq; the agent gets only the answer. If the call fails, the
   results are shown.
 - `read` shows ten messages of a session from a given `seq` on, with tool

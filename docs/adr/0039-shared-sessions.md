@@ -1,6 +1,6 @@
 # 39. Open sessions are shared by the connections of one process
 
-- Status: Accepted
+- Status: Accepted, amended by 0042
 - Date: 2026-10-14
 
 ## Context

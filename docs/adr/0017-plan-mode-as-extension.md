@@ -1,6 +1,6 @@
 # 17. Plan mode is an extension with user approval
 
-- Status: Accepted
+- Status: Superseded by [0047](0047-present-plan-with-feedback.md)
 - Date: 2026-10-09
 
 ## Context

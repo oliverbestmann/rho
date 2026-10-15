@@ -21,10 +21,10 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0011](0011-history-stays-valid-under-cancellation.md) | History stays valid when a run is cancelled or fails | Accepted |
 | [0012](0012-landlock-sandbox.md) | Deny-by-default Landlock sandbox per session | Accepted |
 | [0013](0013-user-approval-fails-closed.md) | Escalations need user approval and fail closed without a UI | Accepted |
-| [0014](0014-sqlite-session-store.md) | Sessions in SQLite | Accepted |
+| [0014](0014-sqlite-session-store.md) | Sessions in SQLite | Accepted, amended by 0041 |
 | [0015](0015-compaction-epochs-and-cache-aware-model.md) | Compaction keeps old messages and picks the model by cache state | Accepted |
 | [0016](0016-profiles-via-history-notes.md) | Profiles restrict tools and sandbox, told to the model in the history | Accepted |
-| [0017](0017-plan-mode-as-extension.md) | Plan mode is an extension with user approval | Accepted |
+| [0017](0017-plan-mode-as-extension.md) | Plan mode is an extension with user approval | Superseded by 0047 |
 | [0018](0018-exact-edit-tool.md) | `Edit` does exact replacements, no fuzzy matching | Accepted |
 | [0019](0019-validate-images-before-history.md) | Validate images before they enter the history | Accepted |
 | [0020](0020-web-view-as-extension.md) | Web view as a hook-only extension; loopback or password | Superseded by 0037 |
@@ -46,5 +46,12 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0036](0036-skills.md) | Skills as an extension: `ReadSkill` tool and `/skill:<name>` | Accepted |
 | [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted |
 | [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted |
-| [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted |
+| [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted, amended by 0042 |
 | [0040](0040-models-by-path.md) | Allowed, default and compaction models by path (`models.json`) | Accepted |
+| [0041](0041-edit-diffs-kept-for-replay.md) | Edit diffs are stored for 7 days and replayed | Accepted |
+| [0042](0042-busy-state-in-rho-meta.md) | Clients learn that a turn runs from `_meta.rho.running` | Accepted |
+| [0043](0043-web-client.md) | A web client in `web/`, for the phone | Accepted |
+| [0044](0044-tool-call-descriptions.md) | The model titles its tool calls with a `description` argument | Accepted |
+| [0045](0045-glob-and-grep.md) | `Glob` and `Grep` split like Claude Code's | Accepted |
+| [0046](0046-model-sets-session-title.md) | The model sets the session title with `SetSessionTitle` | Accepted |
+| [0047](0047-present-plan-with-feedback.md) | `PresentPlan` replaces `ExitPlanMode` and takes feedback | Accepted |
