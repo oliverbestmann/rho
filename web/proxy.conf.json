@@ -1,0 +1,8 @@
+{
+  "/dev/acp": {
+    "target": "http://localhost:8766",
+    "ws": true,
+    "changeOrigin": true,
+    "pathRewrite": { "^/dev/acp/?": "/" }
+  }
+}

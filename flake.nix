@@ -54,6 +54,8 @@
               rustfmt
               rust-analyzer
               onnxruntime
+              # web/ (Angular ACP client)
+              nodejs_26
             ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";

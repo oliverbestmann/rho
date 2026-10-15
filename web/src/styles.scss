@@ -1,0 +1,120 @@
+@use '@angular/material' as mat;
+
+html {
+  height: 100%;
+  color-scheme: light dark;
+  @include mat.theme(
+    (
+      color: (
+        primary: mat.$violet-palette,
+        tertiary: mat.$orange-palette,
+      ),
+      typography: Roboto,
+      density: 0,
+    )
+  );
+
+  // Pill-shaped filled fields without the underline.
+  @include mat.form-field-overrides(
+    (
+      filled-container-shape: var(--mat-sys-corner-extra-large),
+      filled-active-indicator-height: 0,
+      filled-focus-active-indicator-height: 0,
+    )
+  );
+}
+
+// The filled field rounds only its top corners by default.
+.mat-mdc-form-field .mdc-text-field--filled {
+  border-radius: var(--mat-sys-corner-extra-large);
+}
+
+// Without the underline, focus needs another cue.
+.mat-focused .mdc-text-field--filled {
+  outline: 2px solid var(--mat-sys-primary);
+  outline-offset: -2px;
+}
+
+body {
+  background-color: var(--mat-sys-surface);
+  color: var(--mat-sys-on-surface);
+  font: var(--mat-sys-body-large);
+  margin: 0;
+  height: 100%;
+}
+
+// App shell: the page never scrolls, each view scrolls inside itself.
+app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+
+  // The routed view: router-outlet inserts it as the last child.
+  > :last-child {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+}
+
+.markdown {
+  overflow-wrap: anywhere;
+
+  pre {
+    overflow-x: auto;
+    padding: 12px;
+    border-radius: var(--mat-sys-corner-small);
+    background: var(--mat-sys-surface-container-highest);
+    font-size: 13px;
+  }
+
+  code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  // Diff lines, one block each; `min-height` keeps empty lines.
+  .language-diff {
+    display: block;
+    width: max-content;
+    min-width: 100%;
+
+    span {
+      display: block;
+      min-height: 1lh;
+    }
+
+    .add {
+      background: color-mix(in srgb, #2e7d32 25%, transparent);
+    }
+
+    .del {
+      background: color-mix(in srgb, var(--mat-sys-error) 25%, transparent);
+    }
+
+    .hunk {
+      color: var(--mat-sys-outline);
+    }
+  }
+
+  table {
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    border: 1px solid var(--mat-sys-outline-variant);
+    padding: 4px 8px;
+  }
+
+  a {
+    color: var(--mat-sys-primary);
+  }
+
+  img {
+    display: block;
+    max-width: 100%;
+    max-height: 60vh;
+    margin: 8px 0;
+    border-radius: var(--mat-sys-corner-medium);
+  }
+}

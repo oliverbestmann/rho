@@ -1,0 +1,191 @@
+@use '@angular/material' as mat;
+
+// A fixed column: only the message list scrolls, so the composer growing or
+// the keyboard opening shrinks the list instead of covering it.
+:host {
+  display: flex;
+  flex-direction: column;
+}
+
+.stream {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+// Reversed, so the browser keeps it at the end; see `Session.scroller`.
+.scroller {
+  display: flex;
+  flex-direction: column-reverse;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage {
+  font: var(--mat-sys-label-large);
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.switch-busy {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 12px;
+}
+
+.switch-time {
+  margin-left: 12px;
+  font: var(--mat-sys-body-small);
+  color: var(--mat-sys-on-surface-variant);
+}
+
+// Over the list, so showing it does not shift anything.
+.progress {
+  position: absolute;
+  top: 0;
+  z-index: 2;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 900px;
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 2px 16px;
+  border-radius: var(--mat-sys-corner-large);
+  background: var(--mat-sys-primary-container);
+  color: var(--mat-sys-on-primary-container);
+}
+
+.agent {
+  align-self: flex-start;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 2px 16px;
+  border-radius: var(--mat-sys-corner-large);
+  background: var(--mat-sys-tertiary-container);
+  color: var(--mat-sys-on-tertiary-container);
+}
+
+// About 10 lines; column-reverse keeps it pinned to the newest line, like the list.
+.thought-scroll {
+  max-height: 10lh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.thought .markdown {
+  color: var(--mat-sys-on-surface-variant);
+  font-style: italic;
+}
+
+// Material 3 "filled" card: no elevation, just a tinted surface.
+.tool {
+  --mat-expansion-container-background-color: var(--mat-sys-surface-container);
+  --mat-expansion-container-shape: var(--mat-sys-corner-medium);
+  --mat-expansion-header-collapsed-state-height: 44px;
+  --mat-expansion-header-expanded-state-height: 44px;
+  // Disabled only means "nothing to expand", so it should not look greyed out.
+  --mat-expansion-header-disabled-state-text-color: var(--mat-sys-on-surface);
+  box-shadow: none !important;
+  color: var(--mat-sys-on-surface);
+
+  mat-panel-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    font: var(--mat-sys-body-medium);
+  }
+
+  .tool-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status {
+    flex: none;
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+    color: var(--mat-sys-on-surface-variant);
+  }
+
+  &.failed .status {
+    color: var(--mat-sys-error);
+  }
+}
+
+.error {
+  color: var(--mat-sys-error);
+}
+
+// Floats over the end of the list, right-aligned.
+.to-end {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2;
+}
+
+footer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
+  background: var(--mat-sys-surface-container);
+
+  .options {
+    display: flex;
+    gap: 8px;
+    @include mat.form-field-density(-4);
+
+    mat-form-field {
+      flex: none;
+      width: 112px;
+    }
+
+    .model {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+
+  .compose {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    .composer {
+      flex: 1;
+    }
+  }
+}
+
+.slash-name {
+  font: var(--mat-sys-body-small);
+  font-weight: bold;
+  margin-right: 12px;
+}
+
+.slash-description {
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}

@@ -1,0 +1,193 @@
+<mat-toolbar class="top">
+  <a matIconButton routerLink="/" aria-label="Back">
+    <mat-icon>arrow_back</mat-icon>
+  </a>
+  <span class="title">{{ title() }}</span>
+  @if (usage() !== undefined) {
+    <span class="usage" title="Context used">{{ usage() }}%</span>
+  }
+  <button
+    matIconButton
+    aria-label="Switch session"
+    [matMenuTriggerFor]="switcher"
+    (menuOpened)="sessions.reload()"
+  >
+    <mat-icon>swap_horiz</mat-icon>
+  </button>
+  <mat-menu #switcher xPosition="before">
+    @for (s of recent(); track s.sessionId) {
+      <a
+        mat-menu-item
+        [routerLink]="['/session', s.sessionId]"
+        [queryParams]="{ cwd: s.cwd, title: s.title }"
+      >
+        <span class="switch-title">{{ s.title || 'Untitled' }}</span>
+        @if (isRunning(s)) {
+          <mat-spinner class="switch-busy" diameter="16" aria-label="Running" />
+        }
+        <span class="switch-time">{{ ago(s.updatedAt) }}</span>
+      </a>
+    } @empty {
+      <button mat-menu-item disabled>
+        {{ sessions.isLoading() ? 'Loading…' : 'No other sessions' }}
+      </button>
+    }
+  </mat-menu>
+</mat-toolbar>
+<div class="stream">
+  @if (session.isLoading() || running()) {
+    <mat-progress-bar mode="indeterminate" class="progress" />
+  }
+  <div class="scroller" #scroller>
+    <main>
+      @if (session.error(); as error) {
+        <p class="error">{{ error.message }}</p>
+      }
+
+      @if (session.value(); as state) {
+        @for (entry of state.entries(); track $index) {
+          @switch (entry.kind) {
+            @case ('user') {
+              <div class="user markdown" [innerHTML]="entry.text() | markdown"></div>
+            }
+            @case ('agent') {
+              <div class="agent markdown" [innerHTML]="entry.text() | markdown"></div>
+            }
+            @case ('thought') {
+              <mat-expansion-panel class="tool thought" hideToggle expanded>
+                <mat-expansion-panel-header>
+                  <mat-panel-title>
+                    <mat-icon class="status">psychology</mat-icon>
+                    <span class="tool-title">Thinking</span>
+                  </mat-panel-title>
+                </mat-expansion-panel-header>
+                <div class="thought-scroll">
+                  <div class="markdown" [innerHTML]="entry.text() | markdown"></div>
+                </div>
+              </mat-expansion-panel>
+            }
+            @case ('tool') {
+              @let call = entry.call();
+              <mat-expansion-panel
+                class="tool"
+                hideToggle
+                [disabled]="!hasBody(call)"
+                [class.failed]="call.status === 'failed'"
+              >
+                <mat-expansion-panel-header>
+                  <mat-panel-title>
+                    @if (call.status === 'in_progress' || call.status === 'pending') {
+                      <mat-spinner class="status" diameter="20" />
+                    } @else if (call.status === 'failed') {
+                      <mat-icon class="status">error</mat-icon>
+                    } @else {
+                      <mat-icon class="status">{{ icon(call) }}</mat-icon>
+                    }
+                    <span class="tool-title">{{ call.title }}</span>
+                  </mat-panel-title>
+                </mat-expansion-panel-header>
+                <ng-template matExpansionPanelContent>
+                  <div class="markdown" [innerHTML]="call | toolBody | markdown"></div>
+                </ng-template>
+              </mat-expansion-panel>
+            }
+          }
+        }
+      }
+
+      @for (ask of asks(); track ask.id) {
+        <app-ask-card [ask]="ask" />
+      }
+    </main>
+  </div>
+  @if (!atBottom()) {
+    <button matFab class="to-end" aria-label="Jump to end" (click)="scrollToEnd()">
+      <mat-icon>arrow_downward</mat-icon>
+    </button>
+  }
+</div>
+
+<footer>
+  @if (showOptions()) {
+    <div class="options" id="session-options">
+      @for (option of session.value()?.options(); track option.id) {
+        @if (option.type === 'select') {
+          <mat-form-field subscriptSizing="dynamic" [class]="option.category">
+            <mat-select
+              [aria-label]="option.name"
+              [panelWidth]="null"
+              [value]="option.currentValue"
+              (selectionChange)="setOption(option, $event)"
+            >
+              @for (group of groups(option); track group.group) {
+                @if (group.name) {
+                  <mat-optgroup [label]="group.name">
+                    @for (o of group.options; track o.value) {
+                      <mat-option [value]="o.value" [title]="o.description ?? ''">{{
+                        o.name
+                      }}</mat-option>
+                    }
+                  </mat-optgroup>
+                } @else {
+                  @for (o of group.options; track o.value) {
+                    <mat-option [value]="o.value" [title]="o.description ?? ''">{{
+                      o.name
+                    }}</mat-option>
+                  }
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+        }
+      }
+    </div>
+  }
+  <div class="compose">
+    <button
+      matIconButton
+      aria-label="Session settings"
+      aria-controls="session-options"
+      [attr.aria-expanded]="showOptions()"
+      (click)="showOptions.update((v) => !v)"
+    >
+      <mat-icon>{{ showOptions() ? 'expand_more' : 'tune' }}</mat-icon>
+    </button>
+    <mat-form-field subscriptSizing="dynamic" class="composer">
+      <textarea
+        matInput
+        cdkTextareaAutosize
+        cdkAutosizeMaxRows="8"
+        placeholder="Message"
+        aria-label="Message"
+        [matAutocomplete]="slash"
+        [value]="draft()"
+        (input)="draft.set($any($event.target).value)"
+        (keydown)="onKey($event)"
+      ></textarea>
+      <mat-autocomplete #slash autoActiveFirstOption (optionSelected)="pick($event)">
+        @for (c of suggestions(); track c.name) {
+          <mat-option [value]="c">
+            <span class="slash-name">/{{ c.name }}</span>
+            <span class="slash-description">{{
+              c.description.length > 120 ? c.description.slice(0, 120) + '…' : c.description
+            }}</span>
+          </mat-option>
+        }
+      </mat-autocomplete>
+    </mat-form-field>
+    @if (running()) {
+      <button matIconButton aria-label="Stop" (click)="cancel()">
+        <mat-icon>stop</mat-icon>
+      </button>
+    } @else {
+      <button
+        matIconButton
+        aria-label="Send"
+        [disabled]="!draft().trim() || !session.hasValue()"
+        (click)="send()"
+      >
+        <mat-icon>send</mat-icon>
+      </button>
+    }
+  </div>
+</footer>
