@@ -1,6 +1,6 @@
 # 9. Extension hooks as native `async fn` traits with object-safe twins
 
-- Status: Accepted
+- Status: Accepted, amended by 0051
 - Date: 2026-10-09
 
 ## Context
@@ -42,7 +42,9 @@ would box every future and makes signatures harder to read.
 - No `async-trait` dependency; one boxed future per hook call.
 - Extension state is per process, not per session; extensions keep their
   own maps by `session_id` and clean them up in `session_end` (e.g.
-  `GoCheck`, `BackgroundTasks`, `Skills`).
+  `GoCheck`, `BackgroundTasks`, `Skills`). (Since ADR 0051 per-session
+  state lives in `Context::state`; `BackgroundTasks` keeps its map, it
+  kills its processes in `session_end`.)
 - Hooks do not see the streamed text, only whole turns (`turn_end`). This
   limited the old web view (ADR 0020); frontends now get the stream through
   ACP (ADR 0037).

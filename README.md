@@ -352,6 +352,8 @@ async fn main() -> anyhow::Result<()> {
   pi `input` -> `handled`), after `before_request` (request not sent), between
   tool calls (rest skipped; with `Decision::Block` this is pi's `terminate`)
   and before continuing. The run returns `StopReason::Stopped` (ACP: `cancelled`).
+- `state::<T>()` - the session's `T` (created with `Default`, dropped with the
+  session), for per-session extension state; use a type private to the extension.
 
 `GoCheck` continues the run at most 3 times in a row per prompt; pi's
 go-check has no limit (neither pi nor rho limits the turns of a run).

@@ -7,12 +7,10 @@
 //! `~/.cache` in `sandbox.json`). Not in a read-only profile: nothing could
 //! have changed there, and `go` could not write its cache.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rho::extension::{Context, Extension, PromptSetup, Settle};
-use rho::store::SessionId;
 
 /// Failed checks in a row (per session) before giving back to the user.
 pub const MAX_FAILURES: u32 = 3;
@@ -20,16 +18,15 @@ pub const MAX_FAILURES: u32 = 3;
 pub struct GoCheck {
     /// The `go` binary; tests use a mock.
     go: PathBuf,
-    /// Failures in a row, by session id.
-    failures: Mutex<HashMap<SessionId, u32>>,
 }
+
+/// Failed checks in a row, in the session's `Context::state`.
+#[derive(Default)]
+struct Failures(AtomicU32);
 
 impl Default for GoCheck {
     fn default() -> Self {
-        Self {
-            go: "go".into(),
-            failures: Default::default(),
-        }
+        Self { go: "go".into() }
     }
 }
 
@@ -38,11 +35,7 @@ const CHECKS: [[&str; 2]; 2] = [["test", "./..."], ["vet", "./..."]];
 impl Extension for GoCheck {
     /// A new prompt means the user is back in the loop: allow retries again.
     async fn before_prompt(&self, ctx: &Context, _prompt: &mut PromptSetup) {
-        self.failures.lock().unwrap().remove(ctx.session_id());
-    }
-
-    fn session_end(&self, ctx: &Context) {
-        self.failures.lock().unwrap().remove(ctx.session_id());
+        ctx.state::<Failures>().0.store(0, Ordering::Relaxed);
     }
 
     async fn before_settle(&self, ctx: &Context, settle: &Settle<'_>) -> Option<String> {
@@ -85,15 +78,12 @@ impl Extension for GoCheck {
         let summary = results.join("\n\n");
         ctx.notify("go test ./... && go vet ./...", &summary, failed);
 
-        let failures = {
-            let mut map = self.failures.lock().unwrap();
-            let n = map.entry(ctx.session_id().clone()).or_default();
-            *n = if failed { *n + 1 } else { 0 };
-            *n
-        };
+        let count = &ctx.state::<Failures>().0;
         if !failed {
+            count.store(0, Ordering::Relaxed);
             return None;
         }
+        let failures = count.fetch_add(1, Ordering::Relaxed) + 1;
         if failures > MAX_FAILURES {
             ctx.notify(
                 "go check",
@@ -116,6 +106,7 @@ pub(crate) mod tests {
     use super::*;
     use rho::extension::{NoFrontend, Profile};
     use rho::provider::StopReason;
+    use rho::store::SessionId;
 
     /// Sandboxed with the base policy (system dirs and `dir`).
     fn sandboxed(dir: &std::path::Path) -> Context {
@@ -202,7 +193,6 @@ pub(crate) mod tests {
         let probe = outside.path().join("probe");
         let go = GoCheck {
             go: mock_go(dir.path(), &format!("touch '{}'\n", probe.display())),
-            ..Default::default()
         };
         // The base policy grants only the cwd, so writing elsewhere fails.
         let msg = check_in(&go, &sandboxed(dir.path()), &["Write"]).await;
@@ -222,21 +212,23 @@ pub(crate) mod tests {
                 bin.path(),
                 "echo \"$@\" >> calls\n[ -f fail ] && cat fail && exit 1\nexit 0\n",
             ),
-            ..Default::default()
         };
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
+        let ctx = ctx(dir);
         // Not a Go module: nothing to do.
-        assert_eq!(check(&go, dir, &["Write"]).await, None);
+        assert_eq!(check_in(&go, &ctx, &["Write"]).await, None);
 
         let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
         w("go.mod", "module example.com/m\n\ngo 1.21\n");
         w("fail", "--- FAIL: TestAdd\n    bad add\n");
         // Read-only runs are not checked.
-        assert_eq!(check(&go, dir, &["Read"]).await, None);
+        assert_eq!(check_in(&go, &ctx, &["Read"]).await, None);
         assert!(!dir.join("calls").exists());
 
-        let msg = check(&go, dir, &["Write"]).await.expect("should continue");
+        let msg = check_in(&go, &ctx, &["Write"])
+            .await
+            .expect("should continue");
         assert!(
             msg.contains("❌ go test ./...")
                 && msg.contains("bad add")
@@ -250,20 +242,20 @@ pub(crate) mod tests {
 
         // Gives up after MAX_FAILURES in a row ...
         for _ in 1..MAX_FAILURES {
-            assert!(check(&go, dir, &["Write"]).await.is_some());
+            assert!(check_in(&go, &ctx, &["Write"]).await.is_some());
         }
-        assert_eq!(check(&go, dir, &["Write"]).await, None);
+        assert_eq!(check_in(&go, &ctx, &["Write"]).await, None);
         // ... until the user prompts again.
         let mut prompt = PromptSetup {
             content: vec![],
             system: String::new(),
         };
-        go.before_prompt(&ctx(dir), &mut prompt).await;
-        assert!(check(&go, dir, &["Write"]).await.is_some());
+        go.before_prompt(&ctx, &mut prompt).await;
+        assert!(check_in(&go, &ctx, &["Write"]).await.is_some());
 
         // Passing resets the count too.
         std::fs::remove_file(dir.join("fail")).unwrap();
-        assert_eq!(check(&go, dir, &["Write"]).await, None);
-        assert_eq!(go.failures.lock().unwrap()[&SessionId::new("t")], 0);
+        assert_eq!(check_in(&go, &ctx, &["Write"]).await, None);
+        assert_eq!(ctx.state::<Failures>().0.load(Ordering::Relaxed), 0);
     }
 }

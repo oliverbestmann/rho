@@ -7,7 +7,7 @@
 //! and starts a run with the skill's SKILL.md (unless it is already in the
 //! context) and the args. See ADR 0036.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,6 @@ use rho::extension::{
 };
 use rho::provider::{Content, Request, ToolName, ToolSpec};
 use rho::sandbox::Access;
-use rho::store::SessionId;
 use rho::tools::{REQUEST_ACCESS, Tool, input_schema, parse, truncate};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -62,6 +61,7 @@ struct Frontmatter {
     disable_model_invocation: bool,
 }
 
+/// In the session's `Context::state`.
 #[derive(Default)]
 struct SessionState {
     problems_shown: bool,
@@ -72,7 +72,6 @@ struct SessionState {
 pub struct Skills {
     skills: Arc<Vec<Skill>>,
     problems: Vec<String>,
-    sessions: Mutex<HashMap<SessionId, SessionState>>,
 }
 
 impl Skills {
@@ -92,7 +91,6 @@ impl Skills {
         Self {
             skills: Arc::new(skills),
             problems,
-            sessions: Mutex::default(),
         }
     }
 
@@ -102,12 +100,12 @@ impl Skills {
 
     /// What `/skill:<name> args` sends to the model.
     fn message(&self, ctx: &Context, skill: &Skill, args: &str) -> Result<String> {
-        let in_context = self
-            .sessions
+        let in_context = ctx
+            .state::<Mutex<SessionState>>()
             .lock()
             .unwrap()
-            .get(ctx.session_id())
-            .is_some_and(|s| s.in_context.contains(&skill.name));
+            .in_context
+            .contains(&skill.name);
         let mut msg = format!(
             "The user invoked the skill {}. Its files are in {}; you may read them and run its scripts with Bash.",
             skill.name,
@@ -244,15 +242,10 @@ impl Extension for Skills {
         }
     }
 
-    fn session_end(&self, ctx: &Context) {
-        self.sessions.lock().unwrap().remove(ctx.session_id());
-    }
-
     async fn before_prompt(&self, ctx: &Context, _prompt: &mut PromptSetup) {
         let show = {
-            let mut sessions = self.sessions.lock().unwrap();
-            let state = sessions.entry(ctx.session_id().clone()).or_default();
-            !std::mem::replace(&mut state.problems_shown, true)
+            let state = ctx.state::<Mutex<SessionState>>();
+            !std::mem::replace(&mut state.lock().unwrap().problems_shown, true)
         };
         if show {
             for p in &self.problems {
@@ -281,10 +274,9 @@ impl Extension for Skills {
                 }
             }
         }
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions
-            .entry(ctx.session_id().clone())
-            .or_default()
+        ctx.state::<Mutex<SessionState>>()
+            .lock()
+            .unwrap()
             .in_context = found;
     }
 
@@ -368,6 +360,7 @@ mod tests {
     use super::*;
     use rho::extension::{NoFrontend, Profile};
     use rho::provider::{Message, Role, Thinking};
+    use rho::store::SessionId;
     use serde_json::json;
 
     fn write(path: &Path, text: &str) {

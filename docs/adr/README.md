@@ -16,7 +16,7 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0006](0006-subscription-oauth-and-request-shaping.md) | Claude subscription OAuth with Claude Code request shaping | Accepted |
 | [0007](0007-keep-the-prompt-cache-prefix-stable.md) | Keep the request prefix stable for the prompt cache | Accepted |
 | [0008](0008-adaptive-thinking-only.md) | Adaptive thinking only | Accepted |
-| [0009](0009-extension-hooks-with-native-async-traits.md) | Extension hooks as native `async fn` traits with object-safe twins | Accepted |
+| [0009](0009-extension-hooks-with-native-async-traits.md) | Extension hooks as native `async fn` traits with object-safe twins | Accepted, amended by 0051 |
 | [0010](0010-context-inbox-steering-and-cooperative-stop.md) | `Context`: message inbox, steering and cooperative stop | Accepted |
 | [0011](0011-history-stays-valid-under-cancellation.md) | History stays valid when a run is cancelled or fails | Accepted |
 | [0012](0012-landlock-sandbox.md) | Deny-by-default Landlock sandbox per session | Accepted |
@@ -58,3 +58,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0048](0048-github-copilot-provider.md) | GitHub Copilot as a second provider | Accepted |
 | [0049](0049-helpers-use-the-compaction-model.md) | Extension helpers use the session's compaction model | Accepted |
 | [0050](0050-tools-describe-their-cards.md) | Tools say how their calls are shown | Accepted |
+| [0051](0051-per-session-extension-state.md) | Per-session extension state in the `Context` | Accepted |

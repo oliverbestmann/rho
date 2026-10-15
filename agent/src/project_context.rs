@@ -5,28 +5,28 @@
 //! `~/.config/rho/project_context.json`. The approved files go at the end
 //! of the system prompt, fixed for the session.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use rho::extension::{
     Choice, ChoiceValue, Context, Extension, Field, FieldKey, FieldKind, Form, FormReply,
     PromptSetup,
 };
-use rho::store::SessionId;
 
 pub struct ProjectContext {
     /// Directory -> read its context file.
     prefs: PathBuf,
-    /// Session id -> what to append to the system prompt.
-    sessions: Mutex<HashMap<SessionId, String>>,
 }
+
+/// What to append to the system prompt, in the session's `Context::state`.
+#[derive(Default)]
+struct Section(OnceLock<String>);
 
 impl Default for ProjectContext {
     fn default() -> Self {
         Self {
             prefs: rho::config_dir().join("project_context.json"),
-            sessions: Default::default(),
         }
     }
 }
@@ -133,8 +133,8 @@ fn choice(value: ChoiceValue, title: &str) -> Choice {
 
 impl Extension for ProjectContext {
     async fn before_prompt(&self, ctx: &Context, prompt: &mut PromptSetup) {
-        let cached = self.sessions.lock().unwrap().get(ctx.session_id()).cloned();
-        let section = match cached {
+        let state = ctx.state::<Section>();
+        let section = match state.0.get() {
             Some(section) => section,
             None => {
                 let files = self.approved(ctx).await;
@@ -146,18 +146,10 @@ impl Extension for ProjectContext {
                         rho::prompt::context_text(&files)
                     )
                 };
-                self.sessions
-                    .lock()
-                    .unwrap()
-                    .insert(ctx.session_id().clone(), section.clone());
-                section
+                state.0.get_or_init(|| section)
             }
         };
-        prompt.system += &section;
-    }
-
-    fn session_end(&self, ctx: &Context) {
-        self.sessions.lock().unwrap().remove(ctx.session_id());
+        prompt.system += section;
     }
 }
 
@@ -167,6 +159,7 @@ mod tests {
 
     use super::*;
     use rho::extension::NoFrontend;
+    use rho::store::SessionId;
 
     #[tokio::test]
     async fn reads_only_approved_directories() {
@@ -189,7 +182,6 @@ mod tests {
 
         let ext = ProjectContext {
             prefs: prefs.clone(),
-            sessions: Default::default(),
         };
         // NoFrontend has no forms and denies confirmations.
         let ctx = Context::new(

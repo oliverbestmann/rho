@@ -4,6 +4,8 @@
 //!
 //! Modeled on pi's extension events; see `docs` in the README for the mapping.
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -412,6 +414,8 @@ struct Inner {
     info: Mutex<SessionInfo>,
     /// Their `before_send` hooks run in `Context::stream`.
     extensions: OnceLock<Vec<Arc<dyn DynExtension>>>,
+    /// Extension state by type, see `Context::state`.
+    states: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
 impl Context {
@@ -437,6 +441,7 @@ impl Context {
             features: Mutex::default(),
             info: Mutex::default(),
             extensions: OnceLock::new(),
+            states: Mutex::default(),
         }))
     }
 
@@ -567,6 +572,17 @@ impl Context {
     /// Sets the title without showing or saving it (restored sessions).
     pub(crate) fn restore_title(&self, title: Option<String>) {
         *self.0.title.lock().unwrap() = title;
+    }
+
+    /// The session's `T`, created with `T::default()` on first use and
+    /// dropped with the session. Extensions keep per-session state here; use
+    /// a type private to the extension, so no other one gets the same slot.
+    pub fn state<T: Default + Send + Sync + 'static>(&self) -> Arc<T> {
+        let mut states = self.0.states.lock().unwrap();
+        let state = states
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(T::default()));
+        state.clone().downcast().expect("slots are keyed by type")
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -748,5 +764,32 @@ impl Context {
         } else {
             vec![]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Count(AtomicU32);
+
+    #[test]
+    fn state_is_per_session_and_type() {
+        let ctx = |id| {
+            Context::new(
+                SessionId::new(id),
+                "/",
+                Arc::new(NoFrontend),
+                Default::default(),
+            )
+        };
+        let (a, b) = (ctx("a"), ctx("b"));
+        a.state::<Count>().0.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(a.state::<Count>().0.load(Ordering::Relaxed), 1);
+        assert_eq!(b.state::<Count>().0.load(Ordering::Relaxed), 0);
+        assert_eq!(*a.state::<Mutex<u32>>().lock().unwrap(), 0);
     }
 }
