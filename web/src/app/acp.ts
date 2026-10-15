@@ -1,5 +1,6 @@
 import { effect, inject, Injectable, signal, untracked, WritableSignal } from '@angular/core';
 import * as acp from '@agentclientprotocol/sdk';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client';
 import { Server, Settings } from './settings';
 import { SessionState } from './session/session-state';
@@ -30,6 +31,12 @@ export type Ask =
 
 type Status = 'offline' | 'connecting' | 'online';
 
+/** An error with the JSON-RPC `data` rho puts the cause in. */
+export function errorText(e: unknown) {
+  if (e instanceof acp.RequestError && typeof e.data === 'string') return `${e.message}: ${e.data}`;
+  return e instanceof Error ? e.message : String(e);
+}
+
 /**
  * The one ACP connection to the rho daemon. Reconnects on its own; whoever
  * reads `agent()` reloads when it changes.
@@ -37,6 +44,7 @@ type Status = 'offline' | 'connecting' | 'online';
 @Injectable({ providedIn: 'root' })
 export class Acp {
   private readonly settings = inject(Settings);
+  private readonly snackBar = inject(MatSnackBar);
 
   readonly status = signal<Status>('offline');
   readonly error = signal<string | undefined>(undefined);
@@ -49,6 +57,10 @@ export class Acp {
 
   /** Sessions loaded over this connection; rho keeps sending their updates. */
   private readonly opened = new Map<string, Opened>();
+  /** Messages typed while a turn ran, sent one by one after it; kept over reconnects. */
+  private readonly queues = new Map<string, WritableSignal<string[]>>();
+  /** Sessions whose queue waits for the next turn to end: stopped or failed. */
+  private readonly held = new Set<string>();
   private connection?: acp.ClientConnection;
   private retries = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -87,8 +99,88 @@ export class Acp {
         if (this.opened.get(sessionId) === opened) this.opened.delete(sessionId);
         opened.error.set(e instanceof Error ? e : new Error(String(e)));
       })
-      .finally(() => opened.loading.set(false));
+      .finally(() => {
+        opened.loading.set(false);
+        // A turn may have ended while we were away.
+        this.next(sessionId);
+      });
     return opened;
+  }
+
+  /** The messages queued for the session, see `next`. */
+  queue(sessionId: string): WritableSignal<string[]> {
+    let queue = this.queues.get(sessionId);
+    if (!queue) {
+      queue = signal<string[]>([]);
+      this.queues.set(sessionId, queue);
+    }
+    return queue;
+  }
+
+  /** Sends a prompt to an opened session; when its turn ends, the next queued one. */
+  async prompt(sessionId: string, text: string) {
+    const agent = this.agent();
+    const opened = this.opened.get(sessionId);
+    if (!agent || !opened) return;
+    const prompting = (on: boolean) =>
+      this.prompting.update((s) => {
+        const next = new Set(s);
+        if (on) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+    this.held.delete(sessionId);
+    opened.state.addUser(text);
+    prompting(true);
+    let ended = false;
+    try {
+      const res = await agent.request(acp.methods.agent.session.prompt, {
+        sessionId,
+        prompt: [{ type: 'text', text }],
+      });
+      ended = res.stopReason === 'end_turn';
+      if (!ended && res.stopReason !== 'cancelled') {
+        this.snackBar.open(`Stopped: ${res.stopReason}`, 'OK', { duration: 5000 });
+      }
+    } catch (e) {
+      this.snackBar.open(errorText(e), 'OK');
+    } finally {
+      prompting(false);
+    }
+    // A failing turn should not use up the queue.
+    if (ended) this.next(sessionId);
+    else this.held.add(sessionId);
+  }
+
+  /** Stops the session's turns; the queue waits for the next turn to end. */
+  cancel(sessionId: string) {
+    this.held.add(sessionId);
+    this.agent()?.notify(acp.methods.agent.session.cancel, { sessionId });
+  }
+
+  /** Sends the first queued message, if the session is idle and not held. */
+  private next(sessionId: string) {
+    const opened = this.opened.get(sessionId);
+    const queue = this.queues.get(sessionId);
+    if (!opened || opened.loading() || opened.error() || !queue?.().length) return;
+    if (this.held.has(sessionId) || this.prompting().has(sessionId) || opened.state.running()) {
+      return;
+    }
+    const [text, ...rest] = queue();
+    queue.set(rest);
+    void this.prompt(sessionId, text);
+  }
+
+  /** Applies an update; a turn starting ends the hold, one ending sends the queue. */
+  private update(params: acp.SessionNotification) {
+    const { sessionId } = params;
+    const opened = this.opened.get(sessionId);
+    if (!opened) return;
+    const was = opened.state.running();
+    opened.state.apply(params.update);
+    const now = opened.state.running();
+    if (now && !was) this.held.delete(sessionId);
+    if (was && !now) this.next(sessionId);
   }
 
   /** No connection: rho forgot what we viewed, the next visit loads again. */
@@ -115,9 +207,7 @@ export class Acp {
     });
     const conn = acp
       .client({ name: 'rho-web' })
-      .onNotification(acp.methods.client.session.update, ({ params }) =>
-        this.opened.get(params.sessionId)?.state.apply(params.update),
-      )
+      .onNotification(acp.methods.client.session.update, ({ params }) => this.update(params))
       .onRequest(acp.methods.client.session.requestPermission, ({ params, signal }) =>
         this.ask<acp.RequestPermissionResponse>(signal, (id, answer) => ({
           kind: 'permission',

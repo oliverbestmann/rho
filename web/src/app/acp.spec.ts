@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import type * as acp from '@agentclientprotocol/sdk';
+import * as acp from '@agentclientprotocol/sdk';
 import { Acp } from './acp';
 
 describe('Acp.session', () => {
@@ -25,5 +25,65 @@ describe('Acp.session', () => {
     const first = a.session(agent, 's', '/x');
     await vi.waitFor(() => expect(first.error()?.message).toBe('gone'));
     expect(a.session(agent, 's', '/x')).not.toBe(first);
+  });
+});
+
+describe('Acp queue', () => {
+  /** An Acp with a loaded session `s`; prompts wait until `end` is called. */
+  async function setup() {
+    const prompts: { text: string; end(stopReason: string): void }[] = [];
+    const request = vi.fn((method: string, params: { prompt?: { text: string }[] }) =>
+      method === acp.methods.agent.session.prompt
+        ? new Promise((end) =>
+            prompts.push({
+              text: params.prompt![0].text,
+              end: (stopReason) => end({ stopReason }),
+            }),
+          )
+        : Promise.resolve({ configOptions: [] }),
+    );
+    const agent = { request, notify: vi.fn() } as unknown as acp.ClientContext;
+    const a = TestBed.inject(Acp);
+    TestBed.tick(); // the connecting effect, which starts with an empty cache
+    a.agent.set(agent);
+    const opened = a.session(agent, 's', '/x');
+    await vi.waitFor(() => expect(opened.loading()).toBe(false));
+    const running = (on: boolean) =>
+      (a as unknown as { update(p: acp.SessionNotification): void }).update({
+        sessionId: 's',
+        update: { sessionUpdate: 'session_info_update', _meta: { rho: { running: on } } },
+      });
+    return { a, prompts, running };
+  }
+
+  it('sends the next message when a turn ends', async () => {
+    const { a, prompts } = await setup();
+    void a.prompt('s', 'one');
+    a.queue('s').set(['two']);
+    prompts[0].end('end_turn');
+    await vi.waitFor(() => expect(prompts.map((p) => p.text)).toEqual(['one', 'two']));
+    expect(a.queue('s')()).toEqual([]);
+  });
+
+  it('holds the queue after a stop until the next turn ends', async () => {
+    const { a, prompts } = await setup();
+    void a.prompt('s', 'one');
+    a.queue('s').set(['two']);
+    a.cancel('s');
+    prompts[0].end('cancelled');
+    await vi.waitFor(() => expect(a.prompting().size).toBe(0));
+    expect(prompts.length).toBe(1);
+
+    void a.prompt('s', 'three');
+    prompts[1].end('end_turn');
+    await vi.waitFor(() => expect(prompts.map((p) => p.text)).toEqual(['one', 'three', 'two']));
+  });
+
+  it('sends after a turn of another client', async () => {
+    const { a, prompts, running } = await setup();
+    running(true);
+    a.queue('s').set(['one']);
+    running(false);
+    expect(prompts.map((p) => p.text)).toEqual(['one']);
   });
 });

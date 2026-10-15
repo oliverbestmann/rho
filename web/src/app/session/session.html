@@ -153,6 +153,19 @@
       }
     </div>
   }
+  @if (queued().length) {
+    <ul class="queued" aria-label="Queued messages">
+      @for (text of queued(); track $index) {
+        <li>
+          <mat-icon class="queued-icon">schedule</mat-icon>
+          <span class="queued-text">{{ text }}</span>
+          <button matIconButton aria-label="Remove queued message" (click)="unqueue($index)">
+            <mat-icon>close</mat-icon>
+          </button>
+        </li>
+      }
+    </ul>
+  }
   <div class="compose">
     <button
       matIconButton
@@ -190,15 +203,14 @@
       <button matIconButton aria-label="Stop" (click)="cancel()">
         <mat-icon>stop</mat-icon>
       </button>
-    } @else {
-      <button
-        matIconButton
-        aria-label="Send"
-        [disabled]="!draft().trim() || !ready()"
-        (click)="send()"
-      >
-        <mat-icon>send</mat-icon>
-      </button>
     }
+    <button
+      matIconButton
+      [attr.aria-label]="busy() ? 'Queue' : 'Send'"
+      [disabled]="!draft().trim() || !ready()"
+      (click)="send()"
+    >
+      <mat-icon>{{ busy() ? 'schedule_send' : 'send' }}</mat-icon>
+    </button>
   </div>
 </footer>

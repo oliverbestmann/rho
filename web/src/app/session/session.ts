@@ -35,7 +35,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectChange, MatSelectModule } from '@angular/material/select';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
-import { Acp } from '../acp';
+import { Acp, errorText } from '../acp';
 import { MarkdownPipe } from '../markdown';
 import { AskCard } from './ask-card';
 import { dir, isRunning, listSessions } from '../sessions/sessions';
@@ -155,6 +155,9 @@ export class Session {
     return chunks;
   });
 
+  /** Typed while a turn ran; sent after it, see `Acp.prompt`. */
+  protected readonly queued = computed(() => this.acp.queue(this.id())());
+
   protected readonly asks = computed(() =>
     this.acp.asks().filter((a) => a.sessionId === this.id()),
   );
@@ -175,6 +178,14 @@ export class Session {
       (this.opened()?.state.entries() ?? []).some(
         (e) => e.kind === 'tool' && e.call().status === 'in_progress',
       ),
+  );
+
+  /**
+   * A send now waits in the queue. Like `Acp.next`, without `running`'s tool
+   * check: a stale running tool card must not hold a message back.
+   */
+  protected readonly busy = computed(
+    () => this.acp.prompting().has(this.id()) || !!this.opened()?.state.running(),
   );
 
   /** Shows the jump button when false. */
@@ -238,38 +249,21 @@ export class Session {
     this.draft.set(`/${name} `);
   }
 
-  protected async send() {
-    const agent = this.acp.agent();
-    const opened = this.opened();
+  /** Sends the draft, or queues it while a turn runs. */
+  protected send() {
     const text = this.draft().trim();
-    if (!agent || !opened || !this.ready() || !text) return;
-    const state = opened.state;
-    // The component stays when the switcher changes the id, so keep this one.
-    const sessionId = this.id();
-    const prompting = (on: boolean) =>
-      this.acp.prompting.update((s) => {
-        const next = new Set(s);
-        if (on) next.add(sessionId);
-        else next.delete(sessionId);
-        return next;
-      });
+    if (!this.ready() || !text) return;
     this.draft.set('');
-    state.addUser(text);
-    this.scrollToEnd();
-    prompting(true);
-    try {
-      const res = await agent.request(acp.methods.agent.session.prompt, {
-        sessionId,
-        prompt: [{ type: 'text', text }],
-      });
-      if (res.stopReason !== 'end_turn' && res.stopReason !== 'cancelled') {
-        this.snackBar.open(`Stopped: ${res.stopReason}`, 'OK', { duration: 5000 });
-      }
-    } catch (e) {
-      this.snackBar.open(errorText(e), 'OK');
-    } finally {
-      prompting(false);
+    if (this.busy()) {
+      this.acp.queue(this.id()).update((q) => [...q, text]);
+    } else {
+      void this.acp.prompt(this.id(), text);
+      this.scrollToEnd();
     }
+  }
+
+  protected unqueue(index: number) {
+    this.acp.queue(this.id()).update((q) => q.filter((_, i) => i !== index));
   }
 
   protected async setOption(option: acp.SessionConfigOption, change: MatSelectChange<string>) {
@@ -299,7 +293,7 @@ export class Session {
   }
 
   protected cancel() {
-    this.acp.agent()?.notify(acp.methods.agent.session.cancel, { sessionId: this.id() });
+    this.acp.cancel(this.id());
   }
 }
 
@@ -331,12 +325,6 @@ export function toolBody(call: acp.ToolCall) {
     })
     .filter((t) => t)
     .join('\n\n');
-}
-
-/** An error with the JSON-RPC `data` rho puts the cause in. */
-function errorText(e: unknown) {
-  if (e instanceof acp.RequestError && typeof e.data === 'string') return `${e.message}: ${e.data}`;
-  return e instanceof Error ? e.message : String(e);
 }
 
 /** `text` as a fenced code block, with a fence longer than any backtick run in it. */

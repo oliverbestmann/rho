@@ -185,6 +185,36 @@ footer {
     }
   }
 
+  // One line per queued message, cut off at the end.
+  .queued {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+
+    li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 12px;
+      color: var(--mat-sys-on-surface-variant);
+      font: var(--mat-sys-body-medium);
+    }
+
+    .queued-icon {
+      flex: none;
+      font-size: 20px;
+      width: 20px;
+      height: 20px;
+    }
+
+    .queued-text {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
   .compose {
     display: flex;
     align-items: center;
