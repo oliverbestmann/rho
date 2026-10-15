@@ -23,7 +23,7 @@ use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, JsonRpcRespo
 use futures::future::{AbortHandle, Abortable};
 
 use crate::agent::{Agent, AgentEvent, Session};
-use crate::extension::{CommandName, Context, ProfileId};
+use crate::extension::{Context, ProfileId};
 use crate::provider::{self, Content, ImageSource, Role, Thinking, ToolCallId};
 use crate::store::{self, Store};
 use crate::tools;
@@ -173,7 +173,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                     };
                     let (options, commands) = (
                         frontend.remember(config_options(&session)),
-                        commands(&session),
+                        commands(&agent, &session),
                     );
                     if let Some(dirs) = session.dirs_notice() {
                         session.ctx.notify("Additional directories", &dirs, false);
@@ -272,32 +272,14 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                     let mut session = session.lock().await;
                     let usage_before = session.usage;
                     let turn = async {
-                        match slash_command(&req.prompt) {
-                            Some(("compact", focus)) => agent
-                                .compact(&mut session, &focus)
-                                .await
-                                .map(|()| provider::StopReason::EndTurn),
-                            Some(("redact", phrase)) => agent
-                                .redact(&mut session, &phrase)
-                                .await
-                                .map(|()| provider::StopReason::EndTurn),
-                            Some(("usage", _)) => {
-                                session.ctx.emit(AgentEvent::Text(&session.usage_report()));
-                                Ok(provider::StopReason::EndTurn)
-                            }
-                            Some((name, args))
-                                if session.commands.iter().any(|c| c.name.as_str() == name) =>
-                            {
-                                agent
-                                    .command(&session, &CommandName::new(name), &args)
-                                    .await;
-                                Ok(provider::StopReason::EndTurn)
-                            }
-                            _ => match to_content(req.prompt.clone()) {
-                                Ok(content) => agent.run(&mut session, content).await,
-                                Err(e) => Err(e),
-                            },
+                        if let Some((name, args)) = slash_command(&req.prompt)
+                            && let Some(done) = agent.slash_command(&mut session, name, &args).await
+                        {
+                            return done.map(|()| provider::StopReason::EndTurn);
                         }
+                        agent
+                            .run(&mut session, to_content(req.prompt.clone())?)
+                            .await
                     };
                     let result = Abortable::new(turn, registration).await;
                     drop(run);
@@ -375,32 +357,19 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
 }
 
 /// Built-in slash commands plus the extensions'.
-fn commands(session: &Session) -> Vec<AvailableCommand> {
-    let mut commands = vec![
-        AvailableCommand::new("compact", "Summarize the conversation to free up context").input(
-            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
-                "optional focus for the summary",
-            )),
-        ),
-        AvailableCommand::new("usage", "Show token, cache and cost usage of this session"),
-        AvailableCommand::new(
-            "redact",
-            "Mask a phrase in all saved sessions, the history index and memories",
-        )
-        .input(AvailableCommandInput::Unstructured(
-            UnstructuredCommandInput::new("exact phrase"),
-        )),
-    ];
-    for c in &session.commands {
-        let mut command = AvailableCommand::new(c.name.to_string(), &c.description);
-        if let Some(hint) = &c.hint {
-            command = command.input(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new(hint),
-            ));
-        }
-        commands.push(command);
-    }
+fn commands(agent: &Agent, session: &Session) -> Vec<AvailableCommand> {
+    let commands = agent.commands(session).into_iter();
     commands
+        .map(|c| {
+            let command = AvailableCommand::new(c.name.to_string(), c.description);
+            match c.hint {
+                Some(hint) => command.input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new(hint),
+                )),
+                None => command,
+            }
+        })
+        .collect()
 }
 
 fn send_commands(
@@ -512,7 +481,7 @@ async fn open_stored(
                     frontend.clone(),
                 )
                 .await?;
-            let (ctx, commands) = (session.ctx.clone(), commands(&session));
+            let (ctx, commands) = (session.ctx.clone(), commands(agent, &session));
             let session = register(
                 agent,
                 &state.hub,

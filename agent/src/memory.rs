@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
-use rho::extension::{CommandName, Context, Extension, SessionSetup, ToolOutput};
+use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
 use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -79,12 +79,8 @@ impl Extension for Memory {
         session.tools.push(Arc::new(MemoryTool(self.0.clone())));
     }
 
-    /// `/redact` (run by the core for every extension): deletes memories
-    /// containing the phrase.
-    async fn command(&self, _ctx: &Context, name: &CommandName, phrase: &str) -> Option<String> {
-        if name.as_str() != "redact" {
-            return None;
-        }
+    /// Deletes memories containing the phrase.
+    async fn redact(&self, _ctx: &Context, phrase: &str) -> Option<String> {
         let (inner, phrase) = (self.0.clone(), phrase.to_string());
         let n = tokio::task::spawn_blocking(move || inner.redact(&phrase)).await;
         Some(match n.map_err(anyhow::Error::from).and_then(|n| n) {
@@ -651,13 +647,8 @@ mod tests {
         ] {
             tool.run(v, &ctx).await.unwrap();
         }
-        let redact = CommandName::from_static("redact");
-        let out = memory.command(&ctx, &redact, "s3\"cr").await;
+        let out = memory.redact(&ctx, "s3\"cr").await;
         assert_eq!(out.as_deref(), Some("Memories: 2 deleted"));
-        let other = memory
-            .command(&ctx, &CommandName::from_static("x"), "q")
-            .await;
-        assert_eq!(other, None);
         let out = tool.run(json!({"action": "health"}), &ctx).await.unwrap();
         assert!(
             out.output.starts_with("Memory store: 1 memories"),

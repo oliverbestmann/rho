@@ -13,8 +13,8 @@ use agent_client_protocol::{Client, Responder, SessionMessage};
 use anyhow::Result;
 use rho::agent::Agent;
 use rho::extension::{
-    CommandName, Context, Decision, Extension, Profile, PromptSetup, RunEnd, SessionSetup, Settle,
-    ToolCall, ToolOutput, TurnEnd,
+    Context, Decision, Extension, Profile, PromptSetup, RunEnd, SessionSetup, Settle, ToolCall,
+    ToolOutput, TurnEnd,
 };
 use rho::provider::{
     Content, Event, Message, ModelSpec, ProviderName, Registry, Request, Role, StopReason,
@@ -692,16 +692,14 @@ async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
     assert_eq!(names, ["grant-read", "grant-write", "sandbox"]);
 
     let path = other.path().canonicalize().unwrap();
+    let grant = agent.slash_command(&mut session, "grant-write", path.to_str().unwrap());
+    assert!(grant.await.is_some_and(|r| r.is_ok()));
     assert!(
         agent
-            .command(
-                &session,
-                &CommandName::new("grant-write"),
-                path.to_str().unwrap()
-            )
+            .slash_command(&mut session, "nope", "")
             .await
+            .is_none()
     );
-    assert!(!agent.command(&session, &CommandName::new("nope"), "").await);
     let rule = rho::sandbox::Rule {
         path: path.clone(),
         access: rho::sandbox::Access::ReadWrite,

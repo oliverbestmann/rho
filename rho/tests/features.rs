@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use rho::agent::Agent;
-use rho::extension::{CommandName, NoFrontend};
+use rho::extension::NoFrontend;
 use rho::feature::{Feature, FeatureCommands, FeatureId};
 use rho::provider::{Content, Event, ModelSpec, Request, StopReason, ToolCallId, ToolName};
 use rho::store::SessionId;
@@ -81,8 +81,8 @@ async fn features_unlock_tools_and_sandbox_until_turned_off() {
         .run(&mut session, vec![Content::text("go")])
         .await
         .unwrap();
-    let enable = CommandName::new("enable");
-    assert!(agent.command(&session, &enable, "files nope").await);
+    let enable = agent.slash_command(&mut session, "enable", "files nope");
+    assert!(enable.await.is_some_and(|r| r.is_ok()));
     assert!(
         !session
             .ctx
@@ -122,11 +122,8 @@ async fn features_unlock_tools_and_sandbox_until_turned_off() {
         .await
         .unwrap();
     assert_eq!(session.ctx.active_features(), [FeatureId::new("files")]);
-    assert!(
-        agent
-            .command(&session, &CommandName::new("disable"), "files")
-            .await
-    );
+    let disable = agent.slash_command(&mut session, "disable", "files");
+    assert!(disable.await.is_some_and(|r| r.is_ok()));
     agent
         .run(&mut session, vec![Content::text("stop")])
         .await

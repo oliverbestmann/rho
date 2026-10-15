@@ -134,21 +134,21 @@ impl Extension for History {
         }
     }
 
-    /// `/redact` (run by the core for every extension, after the session
-    /// store): drops the index of every session with the phrase; the next
-    /// sync rebuilds it from the redacted store.
-    async fn command(&self, ctx: &Context, name: &CommandName, phrase: &str) -> Option<String> {
-        if *name == HISTORY {
-            let root = project_root(ctx.cwd())?;
-            if phrase.trim().is_empty() {
-                return Some("Usage: /history <query>".into());
-            }
-            let found = self.0.find(ctx, &root, phrase, Mode::Hybrid, 10).await;
-            return Some(found.map_or_else(|e| format!("{e:#}"), |(_, results)| results));
-        }
-        if name.as_str() != "redact" {
+    async fn command(&self, ctx: &Context, name: &CommandName, query: &str) -> Option<String> {
+        if *name != HISTORY {
             return None;
         }
+        let root = project_root(ctx.cwd())?;
+        if query.trim().is_empty() {
+            return Some("Usage: /history <query>".into());
+        }
+        let found = self.0.find(ctx, &root, query, Mode::Hybrid, 10).await;
+        Some(found.map_or_else(|e| format!("{e:#}"), |(_, results)| results))
+    }
+
+    /// Runs after the session store is redacted: drops the index of every
+    /// session with the phrase; the next sync rebuilds it from the store.
+    async fn redact(&self, _ctx: &Context, phrase: &str) -> Option<String> {
         let (inner, phrase) = (self.0.clone(), phrase.to_string());
         let n = tokio::task::spawn_blocking(move || inner.redact(&phrase)).await;
         Some(match n.map_err(anyhow::Error::from).and_then(|n| n) {

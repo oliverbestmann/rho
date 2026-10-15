@@ -203,7 +203,7 @@ text and tool calls as plain text, ready for full-text search.
 
 `/redact <phrase>` replaces an exact phrase with the secrets marker
 (`store::MASK`) in every stored session (all epochs, titles), in the open
-session, and through each extension's `redact` command in the `History`
+session, and through each extension's `redact` hook in the `History`
 index (dropped, rebuilt on the next search) and `Memory` (matching memories
 are deleted). Thinking blocks with the phrase are dropped, since their
 signature covers the text. The databases zero deleted bytes and truncate
@@ -333,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
 | `run_end(&RunEnd)` | `agent_end` | the run (prompt until the model stops) ended; `before` has the session info at its start |
 | `before_settle(&Settle) -> Option<String>` | `agent_before_settle` / `agent_settled` | continue the run with a message |
 | `command(name, args) -> Option<String>` | `registerCommand` | handle a `/name` the extension pushed to `SessionSetup::commands` (advertised over ACP); the reply goes to the user only |
+| `redact(&Context, phrase) -> Option<String>` | - | `/redact`: remove the phrase from the extension's own stores; the reply is a line of the summary |
 
 `Context` is passed to hooks and tools and can be cloned into background tasks:
 

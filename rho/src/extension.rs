@@ -149,6 +149,12 @@ pub trait Extension: Send + Sync {
     ) -> impl Future<Output = Option<String>> + Send {
         async { None }
     }
+
+    /// The user ran `/redact phrase`: remove the phrase from the extension's
+    /// own stores. Return a line for the summary, `None` if it has none.
+    fn redact(&self, _ctx: &Context, _phrase: &str) -> impl Future<Output = Option<String>> + Send {
+        async { None }
+    }
 }
 
 /// Object-safe form of [`Extension`], implemented for every extension.
@@ -189,6 +195,7 @@ pub trait DynExtension: Send + Sync {
         name: &'a CommandName,
         args: &'a str,
     ) -> BoxFuture<'a, Option<String>>;
+    fn redact<'a>(&'a self, ctx: &'a Context, phrase: &'a str) -> BoxFuture<'a, Option<String>>;
 }
 
 impl<T: Extension> DynExtension for T {
@@ -250,6 +257,9 @@ impl<T: Extension> DynExtension for T {
         args: &'a str,
     ) -> BoxFuture<'a, Option<String>> {
         Box::pin(Extension::command(self, ctx, name, args))
+    }
+    fn redact<'a>(&'a self, ctx: &'a Context, phrase: &'a str) -> BoxFuture<'a, Option<String>> {
+        Box::pin(Extension::redact(self, ctx, phrase))
     }
 }
 

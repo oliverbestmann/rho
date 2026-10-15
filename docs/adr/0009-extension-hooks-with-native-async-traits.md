@@ -1,6 +1,6 @@
 # 9. Extension hooks as native `async fn` traits with object-safe twins
 
-- Status: Accepted, amended by 0051
+- Status: Accepted, amended by 0051, 0053
 - Date: 2026-10-09
 
 ## Context
@@ -17,7 +17,8 @@ would box every future and makes signatures harder to read.
   `session_start`, `session_end` (sync, from `Drop`), `before_prompt`,
   `before_request`, `tool_call -> Decision`, `tool_result`, `turn_end`
   (per model request), `before_settle -> Option<String>`, `run_end` (per
-  run, after the turn report), `command -> Option<String>`.
+  run, after the turn report), `command -> Option<String>` (since ADR
+  0053 also `redact -> Option<String>`).
   `Tool::run` is an `async fn` too.
 - For storage, rho has object-safe twins `DynExtension` and `DynTool` that
   return `BoxFuture`s, with blanket impls for every `Extension` / `Tool`,

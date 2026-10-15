@@ -1,6 +1,6 @@
 # 35. `/redact` masks a phrase in every store
 
-- Status: Accepted
+- Status: Accepted, amended by 0053
 - Date: 2026-10-15
 
 ## Context
@@ -25,7 +25,8 @@ session mutably and writes rows only the core may write.
 - `Store::redact` updates all sessions in the database, all epochs and
   titles, and sets `updated_at` so `History` re-indexes them.
 - Then the core runs the `redact` command of every extension (not only the
-  first that answers) and shows all replies. `History` drops the index of
+  first that answers) and shows all replies. (Since ADR 0053 it runs the
+  `redact` hook instead.) `History` drops the index of
   matching sessions, `Memory` deletes matching memories.
 - Every write runs with `secure_delete` and ends with
   `wal_checkpoint(TRUNCATE)`; the FTS index is optimized. Old text does not

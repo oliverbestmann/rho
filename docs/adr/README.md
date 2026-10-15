@@ -16,7 +16,7 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0006](0006-subscription-oauth-and-request-shaping.md) | Claude subscription OAuth with Claude Code request shaping | Accepted |
 | [0007](0007-keep-the-prompt-cache-prefix-stable.md) | Keep the request prefix stable for the prompt cache | Accepted |
 | [0008](0008-adaptive-thinking-only.md) | Adaptive thinking only | Accepted |
-| [0009](0009-extension-hooks-with-native-async-traits.md) | Extension hooks as native `async fn` traits with object-safe twins | Accepted, amended by 0051 |
+| [0009](0009-extension-hooks-with-native-async-traits.md) | Extension hooks as native `async fn` traits with object-safe twins | Accepted, amended by 0051, 0053 |
 | [0010](0010-context-inbox-steering-and-cooperative-stop.md) | `Context`: message inbox, steering and cooperative stop | Accepted |
 | [0011](0011-history-stays-valid-under-cancellation.md) | History stays valid when a run is cancelled or fails | Accepted |
 | [0012](0012-landlock-sandbox.md) | Deny-by-default Landlock sandbox per session | Accepted |
@@ -42,7 +42,7 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0032](0032-project-history-search.md) | Project history search | Accepted, amended by 0049 |
 | [0033](0033-features.md) | Features: switchable bundles of sandbox access and tools | Accepted |
 | [0034](0034-secret-redaction.md) | Secrets are masked in two stages with the gitleaks rules | Accepted |
-| [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |
+| [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted, amended by 0053 |
 | [0036](0036-skills.md) | Skills as an extension | Accepted, amended by 0052 |
 | [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted, amended by 0038, 0039 |
 | [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted, amended by 0039 |
@@ -60,3 +60,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0050](0050-tools-describe-their-cards.md) | Tools say how their calls are shown | Accepted |
 | [0051](0051-per-session-extension-state.md) | Per-session extension state in the `Context` | Accepted |
 | [0052](0052-hold-notices-until-the-session-is-known.md) | Hold a starting session's notices until the client knows it | Accepted |
+| [0053](0053-commands-in-the-agent-and-a-redact-hook.md) | Slash commands run in the agent; extensions redact through a hook | Accepted |
