@@ -4,7 +4,6 @@
 //!
 //! Modeled on pi's extension events; see `docs` in the README for the mapping.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -15,6 +14,8 @@ use serde_json::Value;
 
 use crate::agent::AgentEvent;
 use crate::feature::{Feature, FeatureId};
+pub use crate::form::{Answers, Choice, ChoiceValue, Field, FieldKey, FieldKind, Form, FormReply};
+pub use crate::profile::{Profile, ProfileId};
 use crate::provider::{
     Content, Event, Message, ModelSpec, Provider, Registry, Request, StopReason, Thinking,
     ToolCallId, ToolName, Usage,
@@ -270,67 +271,8 @@ pub struct SessionSetup {
 }
 
 crate::id_type! {
-    /// A `Profile`'s id, e.g. `write` or `plan`; stored with the session.
-    pub ProfileId
-}
-
-/// `Profile::WRITE`, the profile every session has.
-impl Default for ProfileId {
-    fn default() -> Self {
-        Profile::WRITE
-    }
-}
-
-/// A way of working the user (or an extension, `Context::set_profile`) can
-/// switch to during a session, e.g. a read-only "plan" profile. Switching
-/// tells the model which tools appeared or disappeared, and the profile's
-/// instructions.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Profile {
-    pub id: ProfileId,
-    pub name: String,
-    pub description: String,
-    /// Tools the model does not get in this profile; calls to them fail.
-    pub hidden_tools: Vec<ToolName>,
-    /// Sandboxed tools can only read: read-write rules apply as read-only.
-    pub read_only: bool,
-    /// Told to the model when the session switches to this profile.
-    pub instructions: Option<String>,
-}
-
-impl Profile {
-    pub const WRITE: ProfileId = ProfileId::from_static("write");
-
-    /// The default: every tool, the full sandbox.
-    pub fn write() -> Self {
-        Self {
-            id: Self::WRITE,
-            name: "Write".into(),
-            description: "Read and change files".into(),
-            hidden_tools: vec![],
-            read_only: false,
-            instructions: None,
-        }
-    }
-
-    pub fn shows(&self, tool: &ToolName) -> bool {
-        !self.hidden_tools.contains(tool)
-    }
-}
-
-crate::id_type! {
     /// A slash command's name without the slash, e.g. `grant-read`.
     pub CommandName
-}
-
-crate::id_type! {
-    /// Names a `Field` in `Answers`.
-    pub FieldKey
-}
-
-crate::id_type! {
-    /// A `Choice` as returned in `Answers`.
-    pub ChoiceValue
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -413,56 +355,6 @@ pub struct Settle<'a> {
     pub history: &'a [Message],
     /// Names of the tools that ran during this run.
     pub tools_called: &'a [ToolName],
-}
-
-/// Questions to show the user in one dialog.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Form {
-    /// Shown above the fields.
-    pub message: String,
-    pub fields: Vec<Field>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Field {
-    /// Names the field in `Answers`.
-    pub key: FieldKey,
-    pub title: String,
-    pub description: Option<String>,
-    pub kind: FieldKind,
-    pub required: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum FieldKind {
-    /// Free text.
-    Text,
-    Choice {
-        options: Vec<Choice>,
-        /// More than one option can be picked.
-        multiple: bool,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Choice {
-    /// What is returned in `Answers`.
-    pub value: ChoiceValue,
-    pub title: String,
-    pub description: Option<String>,
-}
-
-/// Field key -> answer. One value for text and single choices; fields the
-/// user left empty are missing.
-pub type Answers = BTreeMap<FieldKey, Vec<String>>;
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum FormReply {
-    Answers(Answers),
-    /// The user dismissed the form.
-    Declined,
-    /// The frontend cannot show forms.
-    Unsupported,
 }
 
 /// The user-facing side of a session (CLI printer, ACP connection).

@@ -16,7 +16,7 @@ extensions (against ADR 0002), and a new tool needed an entry in both lists.
 - `Tool` gets two methods with defaults: `kind() -> ToolKind` (`Other`) and
   `titled() -> bool` (`false`). `ToolKind` is rho's own enum (`Read`,
   `Edit`, `Execute`, `Search`, `Fetch`, `SwitchMode`, `Other`), mapped to
-  ACP's in `acp.rs`.
+  ACP's in `acp/update.rs`.
 - `AgentEvent::ToolStart` carries both, so frontends need no lookup.
 - For replays, the ACP frontend keeps the session's tools by name. Replays
   while a turn holds the session now show tool descriptions too.
@@ -29,5 +29,5 @@ extensions (against ADR 0002), and a new tool needed an entry in both lists.
 - Tools that are gone from a session replay with `Other` and the input-key
   title.
 
-Code: `Tool` in `rho/src/tools.rs`, `to_update` and `replay_history` in
-`rho/src/acp.rs`.
+Code: `Tool` in `rho/src/tools.rs`, `to_update` in `rho/src/acp/update.rs`,
+`replay_history` in `rho/src/acp/mod.rs`.

@@ -23,7 +23,7 @@ as its title". That is `Read`, `Write`, `Edit`, `Bash`, `BackgroundTask`,
 - A call that runs without a required argument gets a
   `<system-reminder>` appended to its result (`missing_required` in
   `rho/src/agent.rs`). It doesn't fail.
-- `title()` in `rho/src/acp.rs` uses the first line of the description, at
+- `title()` in `rho/src/acp/update.rs` uses the first line of the description, at
   most 160 characters, for tools in `DESCRIBED`. Other tools keep the
   input-key title. In MCP tools a `description` can be content, not a
   title.

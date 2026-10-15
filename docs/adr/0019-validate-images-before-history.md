@@ -34,4 +34,4 @@ every later request of the session (and it would be stored, ADR 0014).
 - Images make the stored sessions larger.
 
 Code: `ImageSource` in `rho/src/provider.rs`, `to_content` in
-`rho/src/acp.rs`, `ReadImage` in `rho/src/tools.rs`.
+`rho/src/acp/mod.rs`, `ReadImage` in `rho/src/tools.rs`.

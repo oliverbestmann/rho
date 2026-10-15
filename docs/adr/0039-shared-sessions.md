@@ -12,7 +12,7 @@ dropped connection killed its running turn.
 
 ## Decision
 
-The open sessions live in a `Hub` (`rho/src/acp.rs`). `acp::agent_in(agent,
+The open sessions live in a `Hub` (`rho/src/acp/hub.rs`). `acp::agent_in(agent,
 hub)` builds one connection on it; the daemon passes one hub to the Unix and
 the TCP server. `acp::agent` (stdio) makes its own hub.
 

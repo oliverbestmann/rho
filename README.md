@@ -71,8 +71,10 @@ Cargo workspace:
 - `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat)
 - `rho/src/extension.rs` - `Extension` hooks, `Context` session handle, `Frontend` trait
+- `rho/src/profile.rs` - `Profile`s and the note that tells the model about a switch
+- `rho/src/form.rs` - forms an extension shows the user (`Context::ask`)
 - `rho/src/store.rs` - session persistence in SQLite
-- `rho/src/acp.rs` - Agent Client Protocol server (initialize, session/new, load, resume, list, close, prompt, cancel)
+- `rho/src/acp/` - Agent Client Protocol server: handlers (initialize, session/new, load, resume, list, close, prompt, cancel) in `mod.rs`, open sessions in `hub.rs`, per-session frontend in `frontend.rs`, the ACP messages in `update.rs`
 - `rho/src/acp_ws.rs` - ACP over WebSocket: `rho daemon` (Unix socket, `--listen` with a bearer token) and `rho acp --daemon`
 
 ## Use

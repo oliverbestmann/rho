@@ -13,7 +13,7 @@ mode) and slash commands. Writing a terminal UI would duplicate all of that.
 ## Decision
 
 - rho's main interface is ACP over stdio (`rho acp`), implemented in
-  `rho/src/acp.rs` with the `agent-client-protocol` crate.
+  `rho/src/acp/` with the `agent-client-protocol` crate.
 - There is no interactive TUI. A one-shot CLI (`rho "<prompt>"`) exists for
   scripting: answer on stdout, thinking/tools/usage on stderr, sessions not
   saved.
@@ -38,5 +38,5 @@ mode) and slash commands. Writing a terminal UI would duplicate all of that.
 - Notices (`Context::notify`) are rendered as finished tool calls, as there
   is no other ACP element for agent-side messages to the user.
 
-Code: `rho/src/acp.rs`, `rho/src/cli.rs`, `Frontend` in
+Code: `rho/src/acp/`, `rho/src/cli.rs`, `Frontend` in
 `rho/src/extension.rs`.

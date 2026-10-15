@@ -53,4 +53,5 @@ paths one at a time (ADR 0013) is tedious and cannot be taken back. Profiles
   tools.
 
 Code: `rho/src/feature.rs`, `Context::set_feature` / `tool_available` /
-`effective_sandbox`, `profile_note` and `decide_and_run` in `rho/src/agent.rs`.
+`effective_sandbox` and `decide_and_run` in `rho/src/agent.rs`, `profile::note`
+in `rho/src/profile.rs`.

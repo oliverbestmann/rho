@@ -14,7 +14,7 @@ clients saw an idle session. ACP has no update that says a turn runs.
 ## Decision
 
 rho sends it as its own metadata, like the usage details (`_meta.rho` of
-`usage_update`). See `rho/src/acp.rs`.
+`usage_update`). See `busy_update` in `rho/src/acp/update.rs`.
 
 - `Hub::start_run` and `Run::drop` call `AcpFrontend::set_busy` when the
   session's run list becomes non-empty or empty. It sends a

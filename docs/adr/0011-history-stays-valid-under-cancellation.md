@@ -35,4 +35,4 @@ where it can be dropped or fail:
 - Saving after each step (`Session::save`) persists only valid histories.
 
 Code: `Agent::run`, `push_user` in `rho/src/agent.rs`; prompt handling in
-`rho/src/acp.rs`.
+`rho/src/acp/mod.rs`.

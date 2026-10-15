@@ -42,4 +42,4 @@ tools, which can keep it.
   future (ADR 0011).
 
 Code: `Context` in `rho/src/extension.rs`, `Agent::run` in
-`rho/src/agent.rs`, `watch_inbox` in `rho/src/acp.rs`.
+`rho/src/agent.rs`, `watch_inbox` in `rho/src/acp/mod.rs`.

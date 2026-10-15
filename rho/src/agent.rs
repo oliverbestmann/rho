@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
@@ -20,7 +20,12 @@ use crate::provider::{
     ToolCallId, ToolName, ToolSpec, Usage,
 };
 use crate::store::{SessionId, State, Store};
+
+mod usage;
+
 use crate::tools::{DynTool, ToolKind};
+pub(crate) use usage::count;
+use usage::turn_report;
 
 /// Picks the database for a session from its cwd, see `Agent::sessions_db`.
 pub type SessionsDb = Arc<dyn Fn(&Path) -> PathBuf + Send + Sync>;
@@ -215,7 +220,7 @@ impl Session {
 
     /// Specs of all tools. Every request carries all of them, whatever the
     /// profile, so a profile switch keeps the prompt cache; the model learns
-    /// what it may call from `profile_note`.
+    /// what it may call from `profile::note`.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         self.specs.clone()
     }
@@ -229,102 +234,6 @@ impl Session {
     pub fn tool(&self, name: &ToolName) -> Option<&Arc<dyn DynTool>> {
         let i = self.specs.iter().position(|s| s.name == *name)?;
         Some(&self.tools[i])
-    }
-
-    /// What the model needs to know about the profile and features, once per
-    /// change: on the first request if anything is restricted or on, then
-    /// after each switch. The tools it must not call, the ones it may call
-    /// now, the sandbox, and the instructions.
-    fn profile_note(&mut self) -> Option<String> {
-        let profile = self.ctx.profile();
-        let features = self.ctx.features();
-        let now = (profile.id.clone(), self.ctx.active_features());
-        let seen = self.seen.replace(now.clone());
-        if seen.as_ref() == Some(&now) {
-            return None;
-        }
-        let active = &now.1;
-        let profiles = self.ctx.profiles();
-        let before = seen
-            .as_ref()
-            .and_then(|(id, _)| profiles.iter().find(|p| &p.id == id));
-        let was_active = seen.as_ref().map(|(_, a)| a.as_slice());
-        // Before the first request, every tool counts as callable.
-        let callable = |p: Option<&Profile>, on: Option<&[FeatureId]>, n: &ToolName| {
-            p.is_none_or(|p| p.shows(n))
-                && on.is_none_or(|on| crate::feature::unlocks(&features, on, n))
-        };
-        let changed = |gone: bool| -> Vec<&str> {
-            self.specs
-                .iter()
-                .map(|s| &s.name)
-                .filter(|n| {
-                    let was = callable(before, was_active, n);
-                    let is = callable(Some(&profile), Some(active), n);
-                    if gone { was && !is } else { !was && is }
-                })
-                .map(ToolName::as_str)
-                .collect()
-        };
-        let (removed, added) = (changed(true), changed(false));
-        let old = was_active.unwrap_or_default();
-        let turned_on: Vec<_> = features
-            .iter()
-            .filter(|f| active.contains(&f.id) && !old.contains(&f.id))
-            .collect();
-        let turned_off = features
-            .iter()
-            .filter(|f| !active.contains(&f.id) && old.contains(&f.id));
-        let switched = seen.as_ref().is_none_or(|(id, _)| *id != profile.id);
-        let sandboxed = self.ctx.sandbox().is_some();
-        let mut parts = vec![];
-        if seen.is_none() {
-            // Nothing to say about an unrestricted profile without features.
-            if removed.is_empty()
-                && !(profile.read_only && sandboxed)
-                && profile.instructions.is_none()
-                && turned_on.is_empty()
-            {
-                return None;
-            }
-            parts.push(format!(
-                "The session is in the {} profile ({}).",
-                profile.name, profile.description
-            ));
-        } else if switched {
-            parts.push(format!(
-                "The session switched to the {} profile ({}).",
-                profile.name, profile.description
-            ));
-        }
-        parts.extend(turned_on.iter().map(|f| f.turned_on(sandboxed)));
-        parts.extend(turned_off.map(|f| format!("The {} feature is off now.", f.id)));
-        if !removed.is_empty() {
-            parts.push(format!(
-                "Do not call these tools now, calls fail: {}.",
-                removed.join(", ")
-            ));
-        }
-        if !added.is_empty() {
-            parts.push(format!(
-                "You can call these tools now: {}.",
-                added.join(", ")
-            ));
-        }
-        if switched && sandboxed && (profile.read_only || before.is_some_and(|b| b.read_only)) {
-            parts.push(if profile.read_only {
-                "The sandbox is read-only now: commands cannot change any files.".into()
-            } else {
-                "The sandbox allows writing to the workspace again.".into()
-            });
-        }
-        let mut note = format!("<system-reminder>\n{}", parts.join(" "));
-        let instructions = turned_on.iter().map(|f| &f.instructions);
-        let profile_text = switched.then_some(&profile.instructions);
-        for text in profile_text.into_iter().chain(instructions).flatten() {
-            note += &format!("\n\n{text}");
-        }
-        Some(note + "\n</system-reminder>")
     }
 
     /// The additional directories as a list for a notice, `None` without any.
@@ -418,62 +327,6 @@ impl Session {
         self.save().await;
     }
 
-    /// Markdown summary of token, cache and cost usage, for `/usage`.
-    pub fn usage_report(&self) -> String {
-        let (last, total) = (&self.last_usage, &self.usage);
-        let mut out = format!("**Usage** · `{}`\n\n", self.model);
-        if total.prompt() + total.output == 0 {
-            out += "No requests yet.";
-            return out;
-        }
-        out += "| | Last request | Session |\n|---|---:|---:|\n";
-        for (label, f) in [
-            (
-                "Input (uncached)",
-                (|u: &Usage| u.input) as fn(&Usage) -> u64,
-            ),
-            ("Cache read", |u| u.cache_read),
-            ("Cache write", |u| u.cache_write),
-            // Every input token is one of the three above.
-            ("**Input total**", |u| u.prompt()),
-            ("Output", |u| u.output),
-        ] {
-            out += &format!("| {label} | {} | {} |\n", count(f(last)), count(f(total)));
-        }
-        out += &format!(
-            "| Cache hit rate | {} | {} |\n\n",
-            hit_rate(last),
-            hit_rate(total)
-        );
-        let info = self.info();
-        let (used, window) = (info.context_used(), info.context_window.max(1));
-        out += &format!(
-            "- Context: {} / {} ({:.1}%)\n",
-            count(used),
-            count(window),
-            used as f64 * 100.0 / window as f64
-        );
-        if self.cost > 0.0 {
-            out += &format!("- Cost: ${:.4}\n", self.cost);
-        }
-        let ttl = crate::compact::CACHE_TTL;
-        out += &match self.last_request.map(|t| t.elapsed()) {
-            Some(age) if age < ttl => {
-                let left = (ttl - age).as_secs();
-                format!(
-                    "- Cache: warm, expires in ~{}m {:02}s",
-                    left / 60,
-                    left % 60
-                )
-            }
-            _ => format!(
-                "- Cache: cold (no request in the last {}m)",
-                ttl.as_secs() / 60
-            ),
-        };
-        out
-    }
-
     /// Streams one model response to the frontend. Returns its content, why
     /// it stopped and its usage, which is also added to the session's.
     async fn stream(&mut self, request: Request) -> Result<(Vec<Content>, StopReason, Usage)> {
@@ -523,44 +376,6 @@ impl Session {
             .model_info(self.model.id())
             .and_then(|m| m.cost(usage))
             .unwrap_or(0.0)
-    }
-}
-
-/// 1234567 -> "1,234,567".
-pub(crate) fn count(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// One line: "2 requests · 3.4s · input 1,030 (98% cached, 0 written) · output 12 · $0.0123".
-fn turn_report(requests: u32, took: Duration, u: &Usage, cost: f64) -> String {
-    let mut out = format!(
-        "{requests} request{} · {:.1}s · input {} ({} cached, {} written) · output {}",
-        if requests == 1 { "" } else { "s" },
-        took.as_secs_f64(),
-        count(u.prompt()),
-        hit_rate(u),
-        count(u.cache_write),
-        count(u.output),
-    );
-    if cost > 0.0 {
-        out += &format!(" · ${cost:.4}");
-    }
-    out
-}
-
-/// Share of the prompt read from cache.
-fn hit_rate(u: &Usage) -> String {
-    match u.prompt() {
-        0 => "–".into(),
-        p => format!("{:.0}%", u.cache_read as f64 * 100.0 / p as f64),
     }
 }
 
@@ -961,7 +776,9 @@ impl Agent {
         // No turn limit, like Claude Code and pi; the user cancels runaway runs.
         loop {
             // The history ends with a user message here (prompt or tool results).
-            if let Some(note) = session.profile_note() {
+            if let Some(note) =
+                crate::profile::note(&session.ctx, &mut session.seen, &session.specs)
+            {
                 push_user(&mut session.history, vec![Content::text(note)]);
             }
             let mut request = Request {
@@ -1227,25 +1044,5 @@ pub(crate) fn push_user(history: &mut Vec<Message>, content: Vec<Content>) {
             role: Role::User,
             content,
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn turn_report_sums_up_the_run() {
-        let u = Usage {
-            input: 20,
-            cache_read: 1010,
-            cache_write: 1000,
-            output: 12,
-        };
-        assert_eq!(
-            turn_report(2, Duration::from_millis(3400), &u, 0.01234),
-            "2 requests · 3.4s · input 2,030 (50% cached, 1,000 written) · output 12 · $0.0123"
-        );
-        assert!(!turn_report(1, Duration::ZERO, &u, 0.0).contains('$'));
     }
 }

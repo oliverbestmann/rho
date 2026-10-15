@@ -45,5 +45,5 @@ Treat the prefix as append-only within a session:
 - Small prompts below the model's minimum cacheable size are not cached;
   nothing is done about that.
 
-Code: `build_body` in `rho/src/anthropic.rs`, `Session::tool_specs` and
-`profile_note` in `rho/src/agent.rs`.
+Code: `build_body` in `rho/src/anthropic.rs`, `Session::tool_specs` in
+`rho/src/agent.rs`, `profile::note` in `rho/src/profile.rs`.

@@ -46,5 +46,6 @@ prefix, ADR 0007); the first version did that and was changed in
 - Without a sandbox, only hidden tools apply; `read_only` does nothing.
 - With only one profile, ACP clients get no mode selector.
 
-Code: `Profile` and `Context::set_profile` in `rho/src/extension.rs`,
-`profile_note` and `call_tool` in `rho/src/agent.rs`, `Policy::read_only`.
+Code: `Profile` and `profile::note` in `rho/src/profile.rs`,
+`Context::set_profile` in `rho/src/extension.rs`, `call_tool` in
+`rho/src/agent.rs`, `Policy::read_only`.
