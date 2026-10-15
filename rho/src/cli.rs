@@ -289,7 +289,7 @@ async fn one_shot(agent: Agent, prompt: String) -> Result<()> {
         )
         .await?;
     let mut stop = agent.run(&mut session, vec![Content::text(prompt)]).await?;
-    // ponytail: only handles messages already triggered when the run ends; a
+    // shortcut: only handles messages already triggered when the run ends; a
     // one-shot run does not wait for background work that reports later.
     while let Some(next) = agent.run_triggered(&mut session).await {
         stop = next?;

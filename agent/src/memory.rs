@@ -201,6 +201,10 @@ rho::id_type! {
 struct MemoryTool(Arc<Inner>);
 
 impl Tool for MemoryTool {
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: ToolName::from_static("Memory"),

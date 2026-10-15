@@ -1,6 +1,6 @@
 # 38. One rho daemon, editors connect through `rho acp --daemon`
 
-- Status: Accepted
+- Status: Accepted, amended by 0039
 - Date: 2026-10-14
 
 ## Context

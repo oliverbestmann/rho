@@ -14,16 +14,23 @@ pub use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::agent::AgentEvent;
+use crate::feature::{Feature, FeatureId};
 use crate::provider::{
     Content, Event, Message, ModelSpec, Provider, Registry, Request, StopReason, Thinking,
     ToolCallId, ToolName, Usage,
 };
+use crate::sandbox::{Access, Policy};
+use crate::store::{SessionId, Store};
+use crate::tools::DynTool;
 
 /// What a session runs with and has used so far, see `Context::session_info`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionInfo {
     /// `None` for a `Context` outside an agent session.
     pub model: Option<ModelSpec>,
+    /// For `/compact` with a cold cache (`models.json` `compact`,
+    /// `RHO_COMPACT_MODEL`); `None` if the session model compacts.
+    pub compact_model: Option<ModelSpec>,
     pub context_window: u64,
     pub thinking: Thinking,
     /// The current profile's id.
@@ -43,11 +50,13 @@ impl SessionInfo {
     pub fn context_used(&self) -> u64 {
         self.last_usage.prompt() + self.last_usage.output
     }
+
+    /// For cheap one-off calls (`Context::complete`): the compaction model,
+    /// else the session model.
+    pub fn cheap_model(&self) -> Option<&ModelSpec> {
+        self.compact_model.as_ref().or(self.model.as_ref())
+    }
 }
-use crate::feature::{Feature, FeatureId};
-use crate::sandbox::{Access, Policy};
-use crate::store::{SessionId, Store};
-use crate::tools::DynTool;
 
 /// Hooks into the agent loop. Every method is optional; implement them with
 /// `async fn`.
@@ -800,7 +809,8 @@ impl Context {
         self.0.frontend.ask(form).await
     }
 
-    /// One-off completion outside the conversation, e.g. to name the session.
+    /// One-off completion outside the conversation, e.g. to summarize a
+    /// command. `SessionInfo::cheap_model` is a good model for it.
     pub async fn complete(&self, model: &ModelSpec, system: &str, prompt: &str) -> Result<String> {
         let provider = self.0.registry.resolve(model)?;
         let mut stream = self.stream(

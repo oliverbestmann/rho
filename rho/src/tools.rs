@@ -43,6 +43,28 @@ pub trait Tool: Send + Sync {
     fn rules(&self) -> &'static [&'static str] {
         &[]
     }
+    /// The icon clients show for its calls.
+    fn kind(&self) -> ToolKind {
+        ToolKind::Other
+    }
+    /// The `description` input says what a call is for and titles its card
+    /// (ADR 0044). In other tools, e.g. MCP tools, it can be content.
+    fn titled(&self) -> bool {
+        false
+    }
+}
+
+/// What a tool does, for the client's icon (ACP `ToolKind`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ToolKind {
+    Read,
+    Edit,
+    Execute,
+    Search,
+    Fetch,
+    SwitchMode,
+    #[default]
+    Other,
 }
 
 /// Object-safe form of [`Tool`], implemented for every tool.
@@ -51,6 +73,8 @@ pub trait DynTool: Send + Sync {
     fn run<'a>(&'a self, input: Value, ctx: &'a Context) -> BoxFuture<'a, Result<ToolOutput>>;
     fn describe(&self, input: &Value) -> Option<String>;
     fn rules(&self) -> &'static [&'static str];
+    fn kind(&self) -> ToolKind;
+    fn titled(&self) -> bool;
 }
 
 impl<T: Tool> DynTool for T {
@@ -65,6 +89,12 @@ impl<T: Tool> DynTool for T {
     }
     fn rules(&self) -> &'static [&'static str] {
         Tool::rules(self)
+    }
+    fn kind(&self) -> ToolKind {
+        Tool::kind(self)
+    }
+    fn titled(&self) -> bool {
+        Tool::titled(self)
     }
 }
 
@@ -146,6 +176,14 @@ struct BashInput {
 pub struct Read;
 
 impl Tool for Read {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &["Use Read to examine files instead of cat or sed."]
     }
@@ -174,6 +212,14 @@ impl Tool for Read {
 pub struct ReadImage;
 
 impl Tool for ReadImage {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: READ_IMAGE,
@@ -250,6 +296,14 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
 pub struct Write;
 
 impl Tool for Write {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Edit
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &["Use Write only for new files or complete rewrites."]
     }
@@ -283,6 +337,14 @@ impl Tool for Write {
 pub struct Bash;
 
 impl Tool for Bash {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Execute
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &["Use Bash for file operations like ls, mv or mkdir."]
     }

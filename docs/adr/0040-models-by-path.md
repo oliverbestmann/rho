@@ -1,6 +1,6 @@
 # 40. Allowed, default and compaction models by path
 
-- Status: Accepted
+- Status: Accepted, amended by 0049
 - Date: 2026-10-15
 
 ## Context
@@ -45,7 +45,8 @@ is read once at startup.
   forbidden is not listed, so Zed skips it.
 - `GitGate` summarizes with the first listed (so allowed) Claude Haiku 5.5
   or `gpt-6-luna` of any provider, else with the session's model. Before,
-  it asked `openai/gpt-6-luna`, a provider rho does not register.
+  it asked `openai/gpt-6-luna`, a provider rho does not register. (Since
+  ADR 0049 it uses the compaction model, else the session's.)
 
 ## Consequences
 
@@ -56,4 +57,4 @@ is read once at startup.
 - With an explicit `-m` the daemon refuses sessions in paths that forbid
   that model; drop `-m` and use `default` rules instead.
 - `History` answers (`summarizeOver`) fail in paths that forbid their model;
-  `History` then shows the plain results.
+  `History` then shows the plain results. (ADR 0049 fixes this.)

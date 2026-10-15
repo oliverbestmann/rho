@@ -16,30 +16,18 @@ pub struct GitGate;
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
-/// Model ids, tried in order at every provider that lists them (and the
-/// session's `models.json` rules allow); a failed request tries the next.
-/// Claude Haiku 5.5 is `claude-haiku-5.5` on Copilot.
-const SUMMARY_MODELS: [&str; 3] = ["claude-haiku-5-5", "claude-haiku-5.5", "gpt-6-luna"];
 const SUMMARY_PROMPT: &str = "Say in about 10 to 15 words what this shell command does to the git repository. Name only what matters: what is committed, pushed or tagged, and where. No details on staging or output, no quotes, no markdown. Examples: \"Commits all changes locally.\" \"Pushes main to origin.\" \"Tags HEAD as v1.2 and pushes the tag.\"";
 
-/// The first summary a model in `SUMMARY_MODELS`, or else the session's
-/// model, gives, if any.
+/// What the command does, from the session's compaction model (else its
+/// model), if it answers.
 async fn summarize(ctx: &Context, command: &str) -> Option<String> {
-    let listed = ctx.registry().models();
-    let mut models: Vec<_> = SUMMARY_MODELS
-        .iter()
-        .flat_map(|id| listed.iter().filter(move |(m, _)| m.id().as_str() == *id))
-        .map(|(m, _)| m.clone())
-        .collect();
-    models.extend(ctx.session_info().model);
-    for model in models {
-        if let Ok(text) = ctx.complete(&model, SUMMARY_PROMPT, command).await
-            && !text.trim().is_empty()
-        {
-            return Some(text.trim().to_string());
-        }
-    }
-    None
+    let info = ctx.session_info();
+    let text = ctx
+        .complete(info.cheap_model()?, SUMMARY_PROMPT, command)
+        .await
+        .ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn is_word(c: char) -> bool {
@@ -144,7 +132,7 @@ mod tests {
         }
     }
 
-    /// Lists `gpt-6-luna`, which always answers `.0`.
+    /// Always answers `.0`.
     struct Says(&'static str);
 
     impl rho::provider::Provider for Says {
@@ -193,16 +181,7 @@ mod tests {
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
         assert_eq!(*approve.0.lock().unwrap(), ["git push"]);
 
-        // With a summary from the first model that is available.
-        let mut registry = rho::provider::Registry::default();
-        registry.register(
-            ProviderName::new("github-copilot"),
-            Arc::new(Says("Pushes main to origin.")),
-        );
-        // A path that forbids it: no summary.
-        let only = rho::models::Pattern::try_from("anthropic/*".to_string()).unwrap();
-        let restricted = registry.restricted(Some(Arc::new([only])));
-        let ctx = Context::new(SessionId::new("s"), "/tmp", approve.clone(), restricted);
+        // A bare context knows no model: no summary.
         let mut c = call("Bash", "git tag v1");
         assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
         assert_eq!(
@@ -210,43 +189,44 @@ mod tests {
             Some("git tag v1")
         );
 
-        let ctx = Context::new(SessionId::new("s"), "/tmp", approve.clone(), registry);
-        let mut c = call("Bash", "git push origin main");
-        assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
-        // The summary as text, then the plain command to approve.
-        assert_eq!(
-            approve.0.lock().unwrap()[1..],
-            ["text: Pushes main to origin.\n\n", "git push origin main"]
-        );
-
-        // Neither is allowed here: the session's model summarizes.
-        let mut agent = rho::agent::Agent::new(
-            Arc::new(Says("Tags v1.")),
-            rho::provider::ModelSpec::new("github-copilot", "main"),
-            vec![],
-        );
-        agent.registry.register(
-            ProviderName::new("github-copilot"),
-            Arc::new(Says("Tags v1.")),
-        );
-        agent.models = rho::models::Config::parse(
-            r#"{"rules": [{"path": "/", "allow": ["github-copilot/main"]}]}"#,
-            "models.json".as_ref(),
-        )
-        .unwrap();
-        let session = agent
-            .start_session(SessionId::new("s"), "/tmp", vec![], approve.clone())
-            .await
-            .unwrap();
-        let mut c = call("Bash", "git tag v1");
-        assert_eq!(
-            GitGate.tool_call(&session.ctx, &mut c).await,
-            Decision::Allow
-        );
-        assert_eq!(
-            approve.0.lock().unwrap()[3..],
-            ["text: Tags v1.\n\n", "git tag v1"]
-        );
+        // The compaction model summarizes, else the session's model.
+        for (models, says) in [
+            (
+                r#"{"rules": [{"path": "/", "compact": "cheap/small"}]}"#,
+                "Pushes main to origin.",
+            ),
+            (r#"{"rules": []}"#, "Tags v1."),
+        ] {
+            let mut agent = rho::agent::Agent::new(
+                Arc::new(Says("Tags v1.")),
+                rho::provider::ModelSpec::new("main", "big"),
+                vec![],
+            );
+            agent
+                .registry
+                .register(ProviderName::new("main"), Arc::new(Says("Tags v1.")));
+            agent.registry.register(
+                ProviderName::new("cheap"),
+                Arc::new(Says("Pushes main to origin.")),
+            );
+            agent.models = rho::models::Config::parse(models, "models.json".as_ref()).unwrap();
+            let session = agent
+                .start_session(SessionId::new("s"), "/tmp", vec![], approve.clone())
+                .await
+                .unwrap();
+            let mut c = call("Bash", "git push origin main");
+            assert_eq!(
+                GitGate.tool_call(&session.ctx, &mut c).await,
+                Decision::Allow
+            );
+            let mut log = approve.0.lock().unwrap();
+            let n = log.len();
+            assert_eq!(
+                log[n - 2..],
+                [format!("text: {says}\n\n"), "git push origin main".into()]
+            );
+            log.clear();
+        }
 
         // No UI: blocked.
         let ctx = Context::new(

@@ -47,6 +47,14 @@ struct Fetch {
 }
 
 impl Tool for Fetch {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Fetch
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &["Use FetchUrl to read web pages and files from URLs instead of curl or wget in Bash."]
     }

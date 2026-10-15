@@ -1,6 +1,6 @@
 # 37. ACP over WebSocket with a bearer token
 
-- Status: Accepted
+- Status: Accepted, amended by 0038, 0039
 - Date: 2026-10-14
 
 ## Context
@@ -36,11 +36,12 @@ than a page fed only by hooks, and one way in is easier to secure.
 ## Consequences
 
 - Following a session that is open in an editor, from another device, is
-  gone until one rho serves both (see below).
-
+  gone until one rho serves both (see below; ADR 0038 and 0039 do).
 - No TLS: a `wss://` proxy or tunnel goes in front for remote use.
 - Sessions belong to their connection. A dropped connection ends its open
   sessions and running turns; the client continues with `session/load`.
+  (Since ADR 0039 open sessions are shared and turns survive a dropped
+  connection.)
 - For one rho serving several editors, more is needed: `Bash` gets the
   server's environment, not the editor's, and reattaching to a running
   session needs the session map moved from the connection to the agent.

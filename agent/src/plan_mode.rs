@@ -53,6 +53,10 @@ struct EnterInput {}
 struct EnterPlanMode;
 
 impl Tool for EnterPlanMode {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::SwitchMode
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: ENTER,
@@ -79,6 +83,10 @@ struct PresentInput {
 struct PresentPlan;
 
 impl Tool for PresentPlan {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::SwitchMode
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: PRESENT,

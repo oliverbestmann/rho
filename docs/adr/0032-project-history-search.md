@@ -1,6 +1,6 @@
 # 32. Project history search
 
-- Status: Accepted
+- Status: Accepted, amended by 0049
 - Date: 2026-10-11
 
 ## Context
@@ -43,10 +43,11 @@ outside the project.
 - Hits on consecutive chunks of the same epoch are merged into one result,
   ranked by its best chunk, with the overlap removed. `limit` (default 10,
   at most 50) applies to the merged results.
-- With `summarizeOver: n` and more than n results, a cheap model
-  (`History::with_model`, default `anthropic/claude-haiku-5-5`) answers the query from the results and cites
-  session and seq; the agent gets only the answer. If the call fails, the
-  results are shown.
+- With `summarizeOver: n` and more than n results, a cheap model answers
+  the query from the results and cites session and seq; the agent gets
+  only the answer. If the call fails, the results are shown. (It was
+  `anthropic/claude-haiku-5-5`; since ADR 0049 it is the session's
+  compaction model, else its model.)
 - `read` shows ten messages of a session from a given `seq` on, with tool
   outputs cut, only for sessions in the project.
 - Sessions whose `updated_at` or title changed are indexed after every run

@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, bail};
 use rho::extension::{
     CommandName, Context, Extension, RunEnd, SessionSetup, SlashCommand, ToolOutput,
 };
-use rho::provider::{Content, Message, ModelSpec, Role, ToolName, ToolSpec};
+use rho::provider::{Content, Message, Role, ToolName, ToolSpec};
 use rho::store::{SessionId, SessionInfo, Store, StoredMessage};
 use rho::tools::{Tool, input_schema, parse, truncate};
 use rusqlite::{Connection, params};
@@ -28,9 +28,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::memory;
-
-/// Answers searches with `summarizeOver` by default.
-const MODEL: ModelSpec = ModelSpec::from_static("anthropic", "claude-haiku-5-5");
 
 pub const MARKER: &str = ".rho-project-root";
 /// `/history <query>`: the user searches; the results are not shown to the model.
@@ -87,34 +84,25 @@ struct Inner {
     path: PathBuf,
     conn: Mutex<Option<Connection>>,
     embed: Embed,
-    /// Answers searches with `summarizeOver`.
-    model: ModelSpec,
     /// One indexing pass at a time in this process.
     syncing: tokio::sync::Mutex<()>,
 }
 
 impl Default for History {
     fn default() -> Self {
-        History::with_model(MODEL)
+        History::new(
+            memory::cache_dir().join("history.db"),
+            Box::new(memory::embed),
+        )
     }
 }
 
 impl History {
-    /// `model` answers searches with `summarizeOver`.
-    pub fn with_model(model: ModelSpec) -> History {
-        History::new(
-            memory::cache_dir().join("history.db"),
-            Box::new(memory::embed),
-            model,
-        )
-    }
-
-    fn new(path: PathBuf, embed: Embed, model: ModelSpec) -> History {
+    fn new(path: PathBuf, embed: Embed) -> History {
         History(Arc::new(Inner {
             path,
             conn: Mutex::new(None),
             embed,
-            model,
             syncing: Default::default(),
         }))
     }
@@ -229,6 +217,14 @@ struct HistoryTool {
 }
 
 impl Tool for HistoryTool {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Search
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: ToolName::from_static("History"),
@@ -259,10 +255,10 @@ impl Tool for HistoryTool {
                     .inner
                     .find(ctx, &self.root, &query, mode, limit)
                     .await?;
-                match i.summarize_over {
-                    Some(over) if hits.len() > over as usize => {
+                let info = ctx.session_info();
+                match (i.summarize_over, info.cheap_model()) {
+                    (Some(over), Some(model)) if hits.len() > over as usize => {
                         let prompt = format!("<results>\n{results}\n</results>\n\nQuery: {query}");
-                        let model = &self.inner.model;
                         match ctx.complete(model, ANSWER_SYSTEM, &prompt).await {
                             Ok(answer) => format!(
                                 "Answer from {model} over {} results for {query:?}:\n\n{}",
@@ -770,8 +766,8 @@ mod tests {
     use futures::stream::{self, BoxStream, StreamExt};
     use rho::agent::Agent;
     use rho::extension::NoFrontend;
-    use rho::provider::ProviderName;
     use rho::provider::{Event, Provider, Request as ModelRequest, StopReason};
+    use rho::provider::{ModelSpec, ProviderName};
     use serde_json::json;
 
     #[test]
@@ -848,6 +844,8 @@ mod tests {
             vec![],
         );
         agent.sessions_db = Some(Arc::new(move |_| db.clone()));
+        // Answers `summarizeOver`.
+        agent.compact_model = Some(ModelSpec::new("cheap", "m"));
         for (id, cwd, prompt) in [
             ("in", &sub, "about zebras"),
             ("out", &outside, "about zebras"),
@@ -871,11 +869,7 @@ mod tests {
             ProviderName::new("cheap"),
             Arc::new(Scripted(Mutex::new(cheap))),
         );
-        let history = History::new(
-            dir.path().join("history.db"),
-            Box::new(letters),
-            ModelSpec::new("cheap", "m"),
-        );
+        let history = History::new(dir.path().join("history.db"), Box::new(letters));
         agent.extensions.push(Arc::new(History(history.0.clone())));
 
         let mut session = agent

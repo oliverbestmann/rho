@@ -42,8 +42,9 @@ would box every future and makes signatures harder to read.
 - No `async-trait` dependency; one boxed future per hook call.
 - Extension state is per process, not per session; extensions keep their
   own maps by `session_id` and clean them up in `session_end` (e.g.
-  `GoCheck`, `BackgroundTasks`, `SessionTitle`, `WebUi`).
-- Hooks do not see the streamed text, only whole turns (`turn_end`), which
-  limits what an extension like the web view can show (ADR 0020).
+  `GoCheck`, `BackgroundTasks`, `Skills`).
+- Hooks do not see the streamed text, only whole turns (`turn_end`). This
+  limited the old web view (ADR 0020); frontends now get the stream through
+  ACP (ADR 0037).
 
 Code: `rho/src/extension.rs`, `rho/src/tools.rs`.

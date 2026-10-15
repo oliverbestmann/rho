@@ -128,3 +128,74 @@ async fn cold_cache_uses_the_cheap_model_without_tool_outputs() {
         assert!(text.ends_with("Additional focus: focus on X"), "{text}");
     }
 }
+
+#[tokio::test]
+async fn compaction_counts_its_usage() {
+    let usage = rho::provider::Usage {
+        input: 100,
+        output: 20,
+        ..Default::default()
+    };
+    let main = Scripted::new(vec![vec![text("done")]]);
+    let cheap = Scripted::new(vec![vec![text("## Goal\nsummary"), Event::Usage(usage)]]);
+    let mut agent = Agent::new(main, ModelSpec::new("test", "big"), vec![]);
+    agent
+        .registry
+        .register(ProviderName::new("cheap"), cheap.clone());
+    agent.compact_model = Some(ModelSpec::new("cheap", "small"));
+    let cwd = std::env::current_dir().unwrap();
+    let (mut session, _log) = common::session(&agent, &cwd).await;
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    let (before, requests) = (session.usage, session.requests);
+    session.last_request = None;
+    agent.compact(&mut session, "").await.unwrap();
+    assert_eq!(session.usage - before, usage);
+    assert_eq!(session.requests, requests + 1);
+}
+
+#[tokio::test]
+async fn the_model_hears_about_the_profile_again_after_compaction() {
+    use rho::extension::{Profile, ProfileId};
+    let main = Scripted::new(vec![
+        vec![text("done")],
+        vec![text("## Goal\nwarm summary")],
+        vec![text("again")],
+    ]);
+    let agent = Agent::new(main.clone(), ModelSpec::new("test", "big"), vec![]);
+    let cwd = std::env::current_dir().unwrap();
+    let (mut session, _log) = common::session(&agent, &cwd).await;
+    let look = Profile {
+        id: ProfileId::new("look"),
+        name: "Look".into(),
+        description: "read only".into(),
+        hidden_tools: vec![],
+        read_only: false,
+        instructions: Some("Only look.".into()),
+    };
+    session
+        .ctx
+        .set_profiles(vec![look.clone(), Profile::write()]);
+    for prompt in ["hi", "/compact", "more"] {
+        if prompt == "/compact" {
+            session.last_request = Some(Instant::now());
+            agent.compact(&mut session, "").await.unwrap();
+        } else {
+            agent
+                .run(&mut session, vec![Content::text(prompt)])
+                .await
+                .unwrap();
+        }
+    }
+    let reqs = main.requests.lock().unwrap();
+    let note = |i: usize| {
+        let texts: Vec<_> = reqs[i].messages.iter().flat_map(|m| &m.content).collect();
+        texts
+            .iter()
+            .any(|c| matches!(c, Content::Text { text } if text.contains("Only look.")))
+    };
+    assert!(note(0), "told on the first request");
+    assert!(note(2), "told again after the compaction");
+}

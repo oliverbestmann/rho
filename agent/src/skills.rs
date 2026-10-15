@@ -313,6 +313,10 @@ struct ReadSkill {
 }
 
 impl Tool for ReadSkill {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Read
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: ToolName::from_static("ReadSkill"),

@@ -1,13 +1,14 @@
 # 5. Provider-neutral types in the Anthropic wire format
 
-- Status: Accepted
+- Status: Accepted, amended by 0048
 - Date: 2026-10-09
 
 ## Context
 
 The loop, the store, compaction and the extensions all handle messages.
-Only one provider exists today (Anthropic), but the model is picked per
-session and extensions call other models (`Context::complete`).
+When this was decided, Anthropic was the only provider (GitHub Copilot
+came with ADR 0048), but the model is picked per session and extensions
+call other models (`Context::complete`).
 
 ## Decision
 

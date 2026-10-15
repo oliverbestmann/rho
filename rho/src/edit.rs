@@ -38,6 +38,14 @@ pub const EDIT: ToolName = ToolName::from_static("Edit");
 pub struct Edit;
 
 impl Tool for Edit {
+    fn kind(&self) -> crate::tools::ToolKind {
+        crate::tools::ToolKind::Edit
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &[
             "Use Edit for precise changes (edits[].oldText must match exactly)",

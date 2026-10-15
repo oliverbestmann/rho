@@ -93,6 +93,14 @@ struct StartInput {
 struct Start(Arc<Tasks>);
 
 impl Tool for Start {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Execute
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: BACKGROUND_TASK,

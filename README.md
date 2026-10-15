@@ -289,9 +289,11 @@ tool.
 Implement `rho::extension::Extension` (all hooks optional) in a binary crate
 and pass it to `rho::run`, like `agent/src/main.rs`. `rho::Options` also
 sets providers, tools, the default model and the compaction model; its
-`Default` is anthropic + the built-in tools + no extensions. A tool returns
-`ToolOutput` (`.into()` from a `String`); set its `diff` to show a file
-change to ACP clients.
+`Default` is anthropic and github-copilot + the built-in tools + no
+extensions. A tool returns `ToolOutput` (`.into()` from a `String`); set
+its `diff` to show a file change to ACP clients. `Tool::kind` picks the
+client's icon, and `Tool::titled` makes the `description` input the card
+title (ADR 0050).
 
 Hooks and `Tool::run` are plain `async fn` (no `async-trait`):
 
@@ -373,9 +375,8 @@ tasks are killed when the session ends.
 Ports of the other pi extensions:
 
 - `GitGate` asks the user before `Bash` or `BackgroundTask` runs `git commit`,
-  `git push` or `git tag`, with a summary of the command by the first allowed
-  Claude Haiku 5.5 or `gpt-6-luna` from any provider (else the session's
-  model); without a UI (CLI) they are blocked.
+  `git push` or `git tag`, with a summary of the command by the session's
+  compaction model (else its model); without a UI (CLI) they are blocked.
 - `Secrets` masks secrets with the gitleaks rules (`agent/src/gitleaks.toml`,
   copied from gitleaks' `config/gitleaks.toml`) as `REDACTED`: prompts, the
   system prompt and tool output, then every request body again
@@ -399,7 +400,8 @@ Ports of the other pi extensions:
   tool. Chunks of ~800 bytes with ~150 bytes overlap are embedded like
   `Memory` and put into FTS5 in `~/.cache/rho/history.db`; search fuses both
   rankings and merges hits on neighbouring chunks. `summarizeOver: n` lets
-  a cheap model answer from more than n results instead. `read` shows the
+  the compaction model (else the session's) answer from more than n results
+  instead. `read` shows the
   messages around a result (ADR 0032). The user can search too with
   `/history <query>`; the results are not shown to the model.
 - `Mcp` adds the tools of MCP servers over Streamable HTTP from `mcp.json`

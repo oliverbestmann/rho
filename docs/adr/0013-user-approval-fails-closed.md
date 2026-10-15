@@ -1,6 +1,6 @@
 # 13. Escalations need user approval and fail closed without a UI
 
-- Status: Accepted
+- Status: Accepted, amended by 0047
 - Date: 2026-10-09
 
 ## Context
@@ -25,7 +25,9 @@ with a UI (ACP) and without one (one-shot CLI, tests).
     tool call.
   - `GitGate`: `git commit|push|tag` in `Bash` or `BackgroundTask` need
     approval, on top of what `AGENTS.md` says.
-  - `PlanMode`: `ExitPlanMode` (ADR 0017).
+  - `PlanMode`: `ExitPlanMode` (ADR 0017). Its successor `PresentPlan`
+    asks with a form (`ctx.ask`) and fails without form support
+    (ADR 0047).
 - The user can grant without being asked: `/grant-read <path>` and
   `/grant-write <path>` (`GrantCommands`). The model is told through the
   inbox (ADR 0010): with the next tool results if a run is active,

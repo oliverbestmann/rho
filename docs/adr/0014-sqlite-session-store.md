@@ -7,8 +7,8 @@
 
 ACP clients can list, load (with replay), resume and close sessions.
 Sessions must survive restarts, several rho processes may run at once (one
-per editor window), and extensions such as the web view want to read
-other sessions. Later full-text search over past sessions is wanted.
+per editor window), and extensions want to read other sessions (the web
+view did, ADR 0020; `History` does, ADR 0032). Later full-text search over past sessions is wanted.
 
 ## Decision
 

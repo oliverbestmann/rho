@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -25,7 +25,9 @@ use agent_client_protocol::schema::v1::{
     ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage as AcpUsage,
     UsageUpdate,
 };
-use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, JsonRpcRequest, Responder};
+use agent_client_protocol::{
+    Client, ConnectTo, ConnectionTo, Error, JsonRpcRequest, JsonRpcResponse, Responder,
+};
 use futures::StreamExt;
 use futures::future::{AbortHandle, AbortRegistration, Abortable};
 use futures::stream::FuturesUnordered;
@@ -39,7 +41,7 @@ use crate::extension::{
 };
 use crate::provider::{self, Content, ImageSource, Role, Thinking, ToolCallId, ToolName, Usage};
 use crate::store::{self, Store};
-use crate::tools;
+use crate::tools::{self, DynTool};
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
 
@@ -212,8 +214,10 @@ impl Hub {
     }
 }
 
-/// One connection's view: the shared hub plus what this client can do.
+/// One connection's view: the agent, the shared hub and what this client
+/// can do.
 struct State {
+    agent: Arc<Agent>,
     hub: Arc<Hub>,
     conn: ConnId,
     caps: ClientCaps,
@@ -270,6 +274,7 @@ pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
 /// share open sessions.
 pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
     let state = Arc::new(State {
+        agent,
         hub,
         conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
         caps: ClientCaps::default(),
@@ -283,8 +288,6 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
     );
     let (load_state, resume_state, list_state) = (state.clone(), state.clone(), state.clone());
     let close_state = state;
-    let (prompt_agent, config_agent, init_agent) = (agent.clone(), agent.clone(), agent.clone());
-    let (load_agent, resume_agent, list_agent) = (agent.clone(), agent.clone(), agent.clone());
 
     agent_client_protocol::Agent
         .builder()
@@ -304,7 +307,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                         .unwrap_or(false),
                     Ordering::Relaxed,
                 );
-                let saved = init_agent.sessions_db.is_some();
+                let saved = init_state.agent.sessions_db.is_some();
                 let mut sessions = SessionCapabilities::new()
                     .additional_directories(SessionAdditionalDirectoriesCapabilities::new())
                     .close(SessionCloseCapabilities::new());
@@ -335,7 +338,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                 // Unique across processes: sessions are stored by id.
                 let id = store::SessionId::generate();
                 let sid = SessionId::new(id.as_str());
-                let (agent, state) = (agent.clone(), new_state.clone());
+                let (agent, state) = (new_state.agent.clone(), new_state.clone());
                 // Extension session_start hooks are async; keep them off the dispatch loop.
                 cx.clone().spawn(async move {
                     let frontend = AcpFrontend::new(&sid, &req.cwd);
@@ -376,27 +379,14 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
             async move |req: LoadSessionRequest,
                         responder: Responder<LoadSessionResponse>,
                         cx: ConnectionTo<Client>| {
-                let (agent, state) = (load_agent.clone(), load_state.clone());
+                let (agent, state) = (load_state.agent.clone(), load_state.clone());
                 cx.clone().spawn(async move {
-                    let sid = req.session_id;
-                    let opened = open_stored(
-                        &agent,
-                        &state,
-                        &cx,
-                        &sid,
-                        req.cwd,
-                        req.additional_directories,
-                        true,
-                    );
-                    match opened.await {
-                        Ok((frontend, options, commands)) => {
-                            responder
-                                .respond(LoadSessionResponse::new().config_options(options))?;
-                            frontend.ready(state.conn);
-                            send_commands(&cx, &sid, commands)
-                        }
-                        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
-                    }
+                    let (sid, cwd, dirs) = (req.session_id, req.cwd, req.additional_directories);
+                    let respond = |o| LoadSessionResponse::new().config_options(o);
+                    attach(
+                        &agent, &state, &cx, sid, cwd, dirs, true, responder, respond,
+                    )
+                    .await
                 })
             },
             agent_client_protocol::on_receive_request!(),
@@ -405,27 +395,14 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
             async move |req: ResumeSessionRequest,
                         responder: Responder<ResumeSessionResponse>,
                         cx: ConnectionTo<Client>| {
-                let (agent, state) = (resume_agent.clone(), resume_state.clone());
+                let (agent, state) = (resume_state.agent.clone(), resume_state.clone());
                 cx.clone().spawn(async move {
-                    let sid = req.session_id;
-                    let opened = open_stored(
-                        &agent,
-                        &state,
-                        &cx,
-                        &sid,
-                        req.cwd,
-                        req.additional_directories,
-                        false,
-                    );
-                    match opened.await {
-                        Ok((frontend, options, commands)) => {
-                            responder
-                                .respond(ResumeSessionResponse::new().config_options(options))?;
-                            frontend.ready(state.conn);
-                            send_commands(&cx, &sid, commands)
-                        }
-                        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
-                    }
+                    let (sid, cwd, dirs) = (req.session_id, req.cwd, req.additional_directories);
+                    let respond = |o| ResumeSessionResponse::new().config_options(o);
+                    attach(
+                        &agent, &state, &cx, sid, cwd, dirs, false, responder, respond,
+                    )
+                    .await
                 })
             },
             agent_client_protocol::on_receive_request!(),
@@ -434,7 +411,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
             async move |req: ListSessionsRequest,
                         responder: Responder<ListSessionsResponse>,
                         cx: ConnectionTo<Client>| {
-                let (agent, hub) = (list_agent.clone(), list_state.hub.clone());
+                let (agent, hub) = (list_state.agent.clone(), list_state.hub.clone());
                 cx.spawn(async move {
                     match list_sessions(&agent, &hub, req).await {
                         Ok(list) => responder.respond(list),
@@ -469,7 +446,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                         To::Except(conn),
                     );
                 }
-                let agent = prompt_agent.clone();
+                let agent = prompt_state.agent.clone();
                 // Not on the connection: the turn goes on if it drops, and
                 // cancel notifications get through.
                 tokio::spawn(async move {
@@ -543,7 +520,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                             .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
                     };
                 }
-                let agent = config_agent.clone();
+                let agent = config_state.agent.clone();
                 let conn = config_state.conn;
                 // Waits for a running turn: the change applies from the next one.
                 cx.spawn(async move {
@@ -628,6 +605,8 @@ fn register(
     commands: Vec<AvailableCommand>,
 ) -> SharedSession {
     let ctx = session.ctx.clone();
+    let tools = session.tools().map(|(n, t)| (n.clone(), t.clone()));
+    let _ = frontend.tools.set(tools.collect());
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let (watch, registration) = AbortHandle::new_pair();
     let inbox = watch_inbox(agent.clone(), hub.clone(), sid.clone(), ctx.clone());
@@ -649,8 +628,33 @@ fn register(
     session
 }
 
-/// `session/load` (with `replay`) and `session/resume`: the open session
-/// (also one opened by another connection), or the stored one continued.
+/// `session/load` (with `replay`) and `session/resume`: opens the session
+/// with `open_stored`, answers with `response`, then makes the connection
+/// ready and sends the commands.
+#[expect(clippy::too_many_arguments, reason = "the two handlers' shared body")]
+async fn attach<T: JsonRpcResponse>(
+    agent: &Arc<Agent>,
+    state: &Arc<State>,
+    cx: &ConnectionTo<Client>,
+    sid: SessionId,
+    cwd: PathBuf,
+    additional_dirs: Vec<PathBuf>,
+    replay: bool,
+    responder: Responder<T>,
+    response: impl FnOnce(Vec<SessionConfigOption>) -> T,
+) -> Result<(), Error> {
+    match open_stored(agent, state, cx, &sid, cwd, additional_dirs, replay).await {
+        Ok((frontend, options, commands)) => {
+            responder.respond(response(options))?;
+            frontend.ready(state.conn);
+            send_commands(cx, &sid, commands)
+        }
+        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
+    }
+}
+
+/// The open session (also one opened by another connection), or the stored
+/// one continued.
 /// Returns its frontend, config options and commands. Call
 /// `AcpFrontend::ready` after the response.
 async fn open_stored(
@@ -710,11 +714,11 @@ async fn open_stored(
     };
     let Ok(mut session) = session.try_lock() else {
         // A turn holds the session: replay what is saved, the live updates
-        // follow. shortcut: no tool descriptions in this replay and the new
-        // directories are not applied; lock-free copies would fix both.
+        // follow. shortcut: the new directories are not applied; a lock-free
+        // copy of the roots would fix it.
         if replay {
             let messages: Vec<_> = stored.into_iter().map(|m| (m.epoch, m.message)).collect();
-            replay_history(&frontend, conn, &ctx, None, &messages, &diffs);
+            replay_history(&frontend, conn, &ctx, &messages, &diffs);
         }
         let options = frontend.options();
         return Ok((frontend, options, commands));
@@ -725,7 +729,7 @@ async fn open_stored(
         let earlier = stored.into_iter().filter(|m| m.epoch < epoch);
         let mut messages: Vec<_> = earlier.map(|m| (m.epoch, m.message)).collect();
         messages.extend(session.history.iter().map(|m| (epoch, m.clone())));
-        replay_history(&frontend, conn, &ctx, Some(&session), &messages, &diffs);
+        replay_history(&frontend, conn, &ctx, &messages, &diffs);
     }
     if let Some(dirs) = dirs
         && agent.set_additional_dirs(&mut session, dirs)
@@ -742,13 +746,11 @@ async fn open_stored(
 /// Sends `(epoch, message)`s as session updates to `conn`, as if they were
 /// happening now. A compaction summary (the first text of an epoch after the
 /// first) shows as a notice, like when it was made. Edits show their diff
-/// while it is in `diffs` (see `Store::save_diffs`). Tool descriptions need
-/// the `session`.
+/// while it is in `diffs` (see `Store::save_diffs`).
 fn replay_history(
     frontend: &AcpFrontend,
     conn: ConnId,
     ctx: &Context,
-    session: Option<&Session>,
     messages: &[(i64, provider::Message)],
     diffs: &HashMap<ToolCallId, crate::extension::Diff>,
 ) {
@@ -781,14 +783,15 @@ fn replay_history(
                 Content::Text { text } => emit(AgentEvent::Text(text)),
                 Content::Thinking { thinking, .. } => emit(AgentEvent::Thinking(thinking)),
                 Content::ToolUse { id, name, input } => {
-                    let description = session
-                        .and_then(|s| s.tool(name))
-                        .and_then(|t| t.describe(input));
+                    let tool = frontend.tools.get().and_then(|t| t.get(name));
+                    let description = tool.and_then(|t| t.describe(input));
                     emit(AgentEvent::ToolStart {
                         id,
                         name,
                         input,
                         description: description.as_deref(),
+                        kind: tool.map_or_else(tools::ToolKind::default, |t| t.kind()),
+                        titled: tool.is_some_and(|t| t.titled()),
                     });
                 }
                 Content::ToolResult {
@@ -958,6 +961,9 @@ struct AcpFrontend {
     published: Mutex<Published>,
     /// A run is registered (see `Hub::start_run`).
     busy: AtomicBool,
+    /// The session's tools by name, for replays (also while a turn holds
+    /// the session). Set by `register`.
+    tools: OnceLock<HashMap<ToolName, Arc<dyn DynTool>>>,
 }
 
 impl AcpFrontend {
@@ -972,6 +978,7 @@ impl AcpFrontend {
             shown: Mutex::default(),
             published: Mutex::default(),
             busy: AtomicBool::new(false),
+            tools: OnceLock::new(),
         })
     }
 
@@ -1082,6 +1089,7 @@ impl AcpFrontend {
                 name,
                 input,
                 description,
+                ..
             } => {
                 let shown = Shown::of(name, input, *description, Some(&self.cwd));
                 if let Some(shown) = &shown {
@@ -1590,17 +1598,16 @@ fn status(is_error: bool) -> ToolCallStatus {
     }
 }
 
-/// The client's icon for a tool. Extension tools by name: rho-agent's,
-/// MCP tools are `Other`.
-fn tool_kind(name: &ToolName) -> ToolKind {
-    match name.as_str() {
-        "Read" | "ReadImage" | "ReadSkill" => ToolKind::Read,
-        "Write" | "Edit" => ToolKind::Edit,
-        "Bash" | "BackgroundTask" => ToolKind::Execute,
-        "Glob" | "Grep" | "GoDoc" | "History" => ToolKind::Search,
-        "FetchUrl" => ToolKind::Fetch,
-        "EnterPlanMode" | "PresentPlan" => ToolKind::SwitchMode,
-        _ => ToolKind::Other,
+/// The client's icon for a tool, from `Tool::kind`.
+fn tool_kind(kind: tools::ToolKind) -> ToolKind {
+    match kind {
+        tools::ToolKind::Read => ToolKind::Read,
+        tools::ToolKind::Edit => ToolKind::Edit,
+        tools::ToolKind::Execute => ToolKind::Execute,
+        tools::ToolKind::Search => ToolKind::Search,
+        tools::ToolKind::Fetch => ToolKind::Fetch,
+        tools::ToolKind::SwitchMode => ToolKind::SwitchMode,
+        tools::ToolKind::Other => ToolKind::Other,
     }
 }
 
@@ -1667,13 +1674,18 @@ fn to_update(
             usage_update(last_usage, context_window)
         }
         AgentEvent::ToolStart {
-            id, name, input, ..
+            id,
+            name,
+            input,
+            kind,
+            titled,
+            ..
         } => {
-            let kind = tool_kind(name);
+            let title = || title(name, input, titled);
             let call = match shown {
                 Some(Shown::Terminal { cwd, command }) => ToolCall::new(
                     id.to_string(),
-                    call_description(name, input).map_or(command.clone(), |_| title(name, input)),
+                    call_description(input, titled).map_or(command.clone(), |_| title()),
                 )
                 .content(vec![ToolCallContent::Terminal(Terminal::new(
                     id.to_string(),
@@ -1681,9 +1693,10 @@ fn to_update(
                 .meta(meta(serde_json::json!({
                     "terminal_info": {"terminal_id": id, "cwd": cwd},
                 }))),
-                Some(Shown::Text(text)) => ToolCall::new(id.to_string(), title(name, input))
-                    .content(vec![text.as_str().into()]),
-                None => ToolCall::new(id.to_string(), title(name, input)),
+                Some(Shown::Text(text)) => {
+                    ToolCall::new(id.to_string(), title()).content(vec![text.as_str().into()])
+                }
+                None => ToolCall::new(id.to_string(), title()),
             };
             // Lets the client follow along to the file.
             let file = [tools::READ, tools::READ_IMAGE, tools::WRITE, EDIT].contains(name);
@@ -1692,7 +1705,7 @@ fn to_update(
                 _ => vec![],
             };
             SessionUpdate::ToolCall(
-                call.kind(kind)
+                call.kind(tool_kind(kind))
                     .status(ToolCallStatus::InProgress)
                     .locations(locations)
                     .raw_input(input.clone()),
@@ -1743,34 +1756,17 @@ const TITLE_KEYS: [&str; 11] = [
     "action",
 ];
 
-/// Tools with a `description` input that says what the call is for. Not
-/// every tool: in others (e.g. MCP tools) it can be content.
-const DESCRIBED: [&str; 12] = [
-    "AskUserQuestion",
-    "Bash",
-    "BackgroundTask",
-    "Edit",
-    "FetchUrl",
-    "Glob",
-    "Grep",
-    "History",
-    "Memory",
-    "Read",
-    "ReadImage",
-    "Write",
-];
-
-/// The `description` the model gave a call, see `DESCRIBED`.
-fn call_description<'a>(name: &ToolName, input: &'a serde_json::Value) -> Option<&'a str> {
+/// The `description` the model gave a call of a `Tool::titled` tool.
+fn call_description(input: &serde_json::Value, titled: bool) -> Option<&str> {
     let text = input["description"].as_str()?.trim();
-    (DESCRIBED.contains(&name.as_str()) && !text.is_empty()).then_some(text)
+    (titled && !text.is_empty()).then_some(text)
 }
 
 /// The call's description or "Bash first line of the command", at most
 /// `MAX_TITLE` characters.
-fn title(name: &ToolName, input: &serde_json::Value) -> String {
+fn title(name: &ToolName, input: &serde_json::Value, titled: bool) -> String {
     let arg = TITLE_KEYS.iter().find_map(|k| input[k].as_str());
-    let title = match (call_description(name, input), arg) {
+    let title = match (call_description(input, titled), arg) {
         (Some(text), _) => text.lines().next().unwrap_or_default().to_string(),
         (None, Some(arg)) => format!("{name} {}", arg.lines().next().unwrap_or_default()),
         (None, None) => return name.to_string(),
@@ -1854,24 +1850,28 @@ mod tests {
 
     #[test]
     fn file_tools_have_a_location() {
-        let start = |name: &str, input: &serde_json::Value| {
+        let start = |name: &str, input: &serde_json::Value, kind| {
             update(
                 AgentEvent::ToolStart {
                     id: &ToolCallId::new("t1"),
                     name: &ToolName::new(name),
                     input,
                     description: None,
+                    kind,
+                    titled: false,
                 },
                 None,
             )
         };
-        let wire = start("Edit", &json!({"path": "src/a.rs"}));
+        let wire = start("Edit", &json!({"path": "src/a.rs"}), tools::ToolKind::Edit);
         assert_eq!(wire["kind"], "edit");
         assert_eq!(wire["locations"], json!([{"path": "/w/src/a.rs"}]));
-        let wire = start("ReadSkill", &json!({"name": "s", "path": "x.md"}));
+        let skill = json!({"name": "s", "path": "x.md"});
+        let wire = start("ReadSkill", &skill, tools::ToolKind::Read);
         assert_eq!(wire["kind"], "read");
         assert_eq!(wire.get("locations"), None);
-        assert_eq!(start("Grep", &json!({}))["kind"], "search");
+        let grep = start("Grep", &json!({}), tools::ToolKind::Search);
+        assert_eq!(grep["kind"], "search");
     }
 
     #[test]
@@ -1886,6 +1886,8 @@ mod tests {
             name: &ToolName::new("Bash"),
             input: &input,
             description: None,
+            kind: tools::ToolKind::Execute,
+            titled: true,
         };
         let wire = update(start, Some(&shown));
         assert_eq!(wire["content"][0]["content"]["text"], "```sh\nls\n```");
@@ -1912,6 +1914,8 @@ mod tests {
             name: &ToolName::new("Ask"),
             input: &input,
             description: Some("**Q?**"),
+            kind: tools::ToolKind::Other,
+            titled: false,
         };
         assert_eq!(
             update(start, Some(&shown))["content"][0]["content"]["text"],
@@ -1928,6 +1932,8 @@ mod tests {
             name: &ToolName::new("Bash"),
             input: &input,
             description: None,
+            kind: tools::ToolKind::Execute,
+            titled: true,
         };
         let wire = update(start, Some(&shown));
         assert_eq!(wire["title"], "false");
@@ -1938,6 +1944,8 @@ mod tests {
             name: &ToolName::new("Bash"),
             input: &described,
             description: None,
+            kind: tools::ToolKind::Execute,
+            titled: true,
         };
         assert_eq!(
             update(start_described, Some(&shown))["title"],
@@ -1994,37 +2002,51 @@ mod tests {
     #[test]
     fn long_titles_are_cut() {
         let long = "a".repeat(300);
-        let t = title(&ToolName::new("Bash"), &json!({"command": long}));
+        let t = title(&ToolName::new("Bash"), &json!({"command": long}), true);
         assert_eq!(t.chars().count(), MAX_TITLE + 1);
         assert!(t.ends_with('…'));
         assert_eq!(
-            title(&ToolName::new("Bash"), &json!({"command": "ls\nmore"})),
+            title(
+                &ToolName::new("Bash"),
+                &json!({"command": "ls\nmore"}),
+                true
+            ),
             "Bash ls"
         );
         let described = json!({"command": "ls", "description": "List files"});
-        assert_eq!(title(&ToolName::new("Bash"), &described), "List files");
+        assert_eq!(
+            title(&ToolName::new("Bash"), &described, true),
+            "List files"
+        );
         let read = json!({"path": "a", "description": "Check the config"});
-        assert_eq!(title(&ToolName::new("Read"), &read), "Check the config");
-        // Elsewhere it may be content, e.g. an MCP tool creating a ticket.
+        assert_eq!(
+            title(&ToolName::new("Read"), &read, true),
+            "Check the config"
+        );
+        // In tools that are not `titled` it may be content, e.g. an MCP tool
+        // creating a ticket.
         let mcp = json!({"id": "t", "description": "long text"});
         assert_eq!(
-            title(&ToolName::new("mcp__jira__create"), &mcp),
+            title(&ToolName::new("mcp__jira__create"), &mcp, false),
             "mcp__jira__create t"
         );
         let grep = json!({"pattern": "fn x", "path": "src"});
-        assert_eq!(title(&ToolName::new("Grep"), &grep), "Grep fn x");
+        assert_eq!(title(&ToolName::new("Grep"), &grep, true), "Grep fn x");
         let fetch = json!({"url": "https://x.y", "raw": true});
         assert_eq!(
-            title(&ToolName::new("FetchUrl"), &fetch),
+            title(&ToolName::new("FetchUrl"), &fetch, true),
             "FetchUrl https://x.y"
         );
         let feature = json!({"feature": "ssh", "reason": "sign commits"});
         assert_eq!(
-            title(&ToolName::new("RequestFeature"), &feature),
+            title(&ToolName::new("RequestFeature"), &feature, false),
             "RequestFeature ssh"
         );
         let memory = json!({"action": "search", "query": "x", "description": "Find build notes"});
-        assert_eq!(title(&ToolName::new("Memory"), &memory), "Find build notes");
+        assert_eq!(
+            title(&ToolName::new("Memory"), &memory, true),
+            "Find build notes"
+        );
     }
 
     #[test]

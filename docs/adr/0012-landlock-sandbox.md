@@ -30,8 +30,8 @@ without root, and the `nono` crate wraps it.
     calling thread, so the rest of rho is unaffected. Never a pooled thread
     (`spawn_blocking`), as it would stay restricted.
 - All built-in file tools (`Bash`, `Read`, `ReadImage`, `Write`, `Edit`)
-  and the extension tools that touch files (`Grep`, `GoDoc`,
-  `BackgroundTask`) use it.
+  and the extension tools and checks that touch files (`Glob`, `Grep`,
+  `GoDoc`, `BackgroundTask`, `GoCheck`) use it.
 - Grants during a session (ADR 0013) extend the policy and are **not**
   stored; a resumed session starts from `sandbox.json` again.
 - A read-only profile turns every read-write rule into read-only, except

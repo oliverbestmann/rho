@@ -72,6 +72,10 @@ struct QuestionOption {
 struct AskUserQuestion;
 
 impl Tool for AskUserQuestion {
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: NAME,

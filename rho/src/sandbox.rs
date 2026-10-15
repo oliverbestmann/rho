@@ -217,7 +217,7 @@ impl Policy {
         Ok(nono::sandbox::prepare_landlock_with_abi(&caps, &abi)?)
     }
 
-    // ponytail: Linux (Landlock) only; macOS would need nono's Seatbelt backend.
+    // shortcut: Linux (Landlock) only; macOS would need nono's Seatbelt backend.
     #[cfg(not(target_os = "linux"))]
     pub fn apply(&self, _cmd: &mut tokio::process::Command) -> Result<()> {
         bail!(UNSUPPORTED)

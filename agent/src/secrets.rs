@@ -130,6 +130,12 @@ impl DynTool for AllowMasked {
     fn rules(&self) -> &'static [&'static str] {
         self.0.rules()
     }
+    fn kind(&self) -> rho::tools::ToolKind {
+        self.0.kind()
+    }
+    fn titled(&self) -> bool {
+        self.0.titled()
+    }
 }
 
 impl Extension for Secrets {

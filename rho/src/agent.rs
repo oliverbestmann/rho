@@ -20,7 +20,7 @@ use crate::provider::{
     ToolCallId, ToolName, ToolSpec, Usage,
 };
 use crate::store::{SessionId, State, Store};
-use crate::tools::DynTool;
+use crate::tools::{DynTool, ToolKind};
 
 /// Picks the database for a session from its cwd, see `Agent::sessions_db`.
 pub type SessionsDb = Arc<dyn Fn(&Path) -> PathBuf + Send + Sync>;
@@ -48,6 +48,10 @@ pub enum AgentEvent<'a> {
         input: &'a Value,
         /// The call as markdown, from `Tool::describe`.
         description: Option<&'a str>,
+        /// From `Tool::kind`; `Other` for an unknown tool.
+        kind: ToolKind,
+        /// From `Tool::titled`: `input.description` titles the call.
+        titled: bool,
     },
     ToolEnd {
         id: &'a ToolCallId,
@@ -134,8 +138,8 @@ pub struct Session {
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
     /// The profile and features that were on when the model was last told;
-    /// `None` before the first request.
-    seen: Option<(ProfileId, Vec<FeatureId>)>,
+    /// `None` before the first request (and after a compaction).
+    pub(crate) seen: Option<(ProfileId, Vec<FeatureId>)>,
     /// The cwd, then the additional directories.
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
@@ -178,6 +182,7 @@ impl Session {
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
             model: Some(self.model.clone()),
+            compact_model: self.compact_model.clone(),
             context_window: self.provider.context_window(self.model.id()),
             thinking: self.thinking,
             profile: self.ctx.profile().id,
@@ -213,6 +218,11 @@ impl Session {
     /// what it may call from `profile_note`.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         self.specs.clone()
+    }
+
+    /// The session's tools by name.
+    pub fn tools(&self) -> impl Iterator<Item = (&ToolName, &Arc<dyn DynTool>)> {
+        self.specs.iter().map(|s| &s.name).zip(&self.tools)
     }
 
     /// The tool called `name`.
@@ -375,18 +385,13 @@ impl Session {
         };
         let messages = self.history[from..].to_vec();
         let diffs = std::mem::take(&mut p.diffs);
-        let result = async {
-            p.store.save_state(state).await?;
-            p.store
-                .save_messages(&id, p.epoch, p.base + from as i64, messages)
-                .await?;
-            if diffs.is_empty() {
-                return Ok(());
-            }
-            p.store.save_diffs(&id, diffs).await
+        p.store.save_state(state).await?;
+        p.store
+            .save_messages(&id, p.epoch, p.base + from as i64, messages)
+            .await?;
+        if !diffs.is_empty() {
+            p.store.save_diffs(&id, diffs).await?;
         }
-        .await;
-        result?;
         p.created = true;
         p.saved = self.history.len();
         p.last_len = self.history.last().map_or(0, |m| m.content.len());
@@ -446,7 +451,7 @@ impl Session {
             "- Context: {} / {} ({:.1}%)\n",
             count(used),
             count(window),
-            used as f64 * 100.0 / window.max(1) as f64
+            used as f64 * 100.0 / window as f64
         );
         if self.cost > 0.0 {
             out += &format!("- Cost: ${:.4}\n", self.cost);
@@ -522,7 +527,7 @@ impl Session {
 }
 
 /// 1234567 -> "1,234,567".
-fn count(n: u64) -> String {
+pub(crate) fn count(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -534,7 +539,6 @@ fn count(n: u64) -> String {
     out
 }
 
-/// Share of the prompt read from cache.
 /// One line: "2 requests · 3.4s · input 1,030 (98% cached, 0 written) · output 12 · $0.0123".
 fn turn_report(requests: u32, took: Duration, u: &Usage, cost: f64) -> String {
     let mut out = format!(
@@ -552,6 +556,7 @@ fn turn_report(requests: u32, took: Duration, u: &Usage, cost: f64) -> String {
     out
 }
 
+/// Share of the prompt read from cache.
 fn hit_rate(u: &Usage) -> String {
     match u.prompt() {
         0 => "–".into(),
@@ -613,8 +618,7 @@ impl Agent {
         additional_dirs: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
     ) -> Result<Session> {
-        let mut roots = vec![cwd.into()];
-        roots.extend(additional_dirs);
+        let roots = [vec![cwd.into()], additional_dirs].concat();
         let store = self.open_store(&roots[0]).await?;
         let mut session = self.setup(id, roots, frontend, store, false).await?;
         session.try_save().await.context("saving the new session")?;
@@ -630,8 +634,7 @@ impl Agent {
         additional_dirs: Vec<PathBuf>,
         frontend: Arc<dyn Frontend>,
     ) -> Result<Session> {
-        let mut roots = vec![cwd.into()];
-        roots.extend(additional_dirs);
+        let roots = [vec![cwd.into()], additional_dirs].concat();
         let store = self
             .open_store(&roots[0])
             .await?
@@ -1075,6 +1078,8 @@ impl Agent {
             name: &call.name,
             input: &call.input,
             description: description.as_deref(),
+            kind: tool.map_or_else(ToolKind::default, |t| t.kind()),
+            titled: tool.is_some_and(|t| t.titled()),
         });
         let mut pending = Pending {
             ctx,
@@ -1131,7 +1136,10 @@ impl Agent {
             Decision::Block(reason) => Err(anyhow::anyhow!(reason)),
             Decision::Allow => match tool {
                 Some(tool) => {
-                    missing = missing_required(&tool.spec().input_schema, &call.input);
+                    let spec = session.specs.iter().find(|s| s.name == call.name);
+                    if let Some(spec) = spec {
+                        missing = missing_required(&spec.input_schema, &call.input);
+                    }
                     tool.run(call.input.clone(), ctx).await
                 }
                 None => Err(anyhow::anyhow!("unknown tool {}", call.name)),

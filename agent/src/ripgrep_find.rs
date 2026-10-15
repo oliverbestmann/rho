@@ -78,6 +78,14 @@ struct GlobInput {
 struct Grep;
 
 impl Tool for Grep {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Search
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &["Use Grep to search file contents instead of rg or grep in Bash."]
     }
@@ -101,6 +109,14 @@ impl Tool for Grep {
 struct Glob;
 
 impl Tool for Glob {
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Search
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
     fn rules(&self) -> &'static [&'static str] {
         &["Use Glob to find files by name instead of find or ls in Bash."]
     }

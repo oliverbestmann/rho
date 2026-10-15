@@ -5,8 +5,8 @@
 
 ## Context
 
-Hooks, tools and background work (finished background tasks, messages from
-the web view, sandbox grants) need to talk to the model and to end runs, at
+Hooks, tools and background work (finished background tasks, skills
+invoked with `/skill:<name>`, sandbox grants) need to talk to the model and to end runs, at
 any time and from any task, including while no run is active.
 
 ## Decision

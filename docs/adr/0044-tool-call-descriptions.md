@@ -1,6 +1,6 @@
 # 44. The model titles its tool calls with a `description` argument
 
-- Status: Accepted
+- Status: Accepted, amended by 0050
 - Date: 2026-10-15
 
 ## Context
@@ -32,5 +32,5 @@ as its title". That is `Read`, `Write`, `Edit`, `Bash`, `BackgroundTask`,
 
 - Each call costs a few output tokens.
 - New tools that should get a description title need the field and an
-  entry in `DESCRIBED`.
+  entry in `DESCRIBED`. (Since ADR 0050 they say so with `Tool::titled`.)
 - The reminder works for any required argument, not only `description`.

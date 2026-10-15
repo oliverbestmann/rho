@@ -7,7 +7,7 @@
 
 rho needs a stable core (agent loop, providers, tools, ACP, persistence) and
 a set of opinionated, personal behaviours (ripgrep/git gates, Go checks,
-plan mode, a web view, ...). pi loads extensions at runtime from
+plan mode, memory, ...). pi loads extensions at runtime from
 TypeScript; Rust has no comparable plugin story that is safe and simple.
 
 ## Decision
@@ -21,15 +21,16 @@ A Cargo workspace with two members:
   `main.rs` is ~40 lines.
 
 Extensions are compiled in. Their order in `Options::extensions` is the
-hook order (e.g. `WebUi` goes first so it sees every tool call before
-another extension blocks it; calls the profile blocks never reach any
-`tool_call` hook, ADR 0016).
+hook order (e.g. `Secrets` goes last so it sees the prompts and tool
+output after every other extension changed them, ADR 0034; calls the
+profile blocks never reach any `tool_call` hook, ADR 0016).
 
-`Options::default()` is a working agent: the `anthropic` provider, the
-built-in tools (`Read`, `ReadImage`, `Write`, `Edit`, `Bash`,
-`RequestAccess`), no extensions, model `anthropic/claude-sonnet-5-5`,
-compaction model `anthropic/claude-haiku-5-5`, sessions in
-`RHO_SESSIONS_DB` or `~/.config/rho/sessions.db`.
+`Options::default()` is a working agent: the `anthropic` and
+`github-copilot` providers (ADR 0048), the built-in tools (`Read`,
+`ReadImage`, `Write`, `Edit`, `Bash`, `RequestAccess`), no extensions,
+model `anthropic/claude-sonnet-5-5`, no compaction model (the session
+model compacts, ADR 0040), sessions in `RHO_SESSIONS_DB` or
+`~/.config/rho/sessions.db`.
 
 ## Consequences
 

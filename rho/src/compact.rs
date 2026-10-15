@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use futures::StreamExt;
 
-use crate::agent::{Agent, Session, push_user};
+use crate::agent::{Agent, Session, count, push_user};
 use crate::provider::{Content, Event, Message, Request, Role, StopReason, Thinking, Usage};
 
 /// Anthropic's default cache lifetime, refreshed on every hit.
@@ -126,16 +126,31 @@ impl Agent {
             }
         };
 
+        let model = request.model.clone();
         let mut stream = session.ctx.stream(&*provider, request);
         let mut summary = String::new();
         let mut usage = Usage::default();
+        let mut truncated = false;
         while let Some(event) = stream.next().await {
             match event? {
                 Event::TextDelta(t) => summary.push_str(&t),
                 Event::Usage(u) => usage = u,
-                Event::Done(StopReason::MaxTokens) => bail!("summary hit the token limit"),
+                Event::Done(stop) => truncated = stop == StopReason::MaxTokens,
                 _ => {}
             }
+        }
+        drop(stream);
+        // Counted like any request, also when no summary comes back.
+        session.usage += usage;
+        session.requests += 1;
+        session.cost += provider
+            .model_info(&model)
+            .and_then(|m| m.cost(&usage))
+            .unwrap_or(0.0);
+        session.publish_info();
+        session.emit_usage();
+        if truncated {
+            bail!("summary hit the token limit");
         }
         if summary.trim().is_empty() {
             bail!("model returned no summary");
@@ -154,16 +169,17 @@ impl Agent {
         }];
         // The new prefix is not cached yet.
         session.last_request = None;
+        // The profile and feature notes went with the history: tell the model again.
+        session.seen = None;
         session.save_compacted().await;
         session.ctx.notify(
             &format!("Compacted ({label})"),
             &format!(
-                "input {} + cache read {} + cache write {} | output {}\n\n{}",
-                usage.input,
-                usage.cache_read,
-                usage.cache_write,
-                usage.output,
-                summary.trim()
+                "input {} + cache read {} + cache write {} | output {}\n\n{summary}",
+                count(usage.input),
+                count(usage.cache_read),
+                count(usage.cache_write),
+                count(usage.output),
             ),
             false,
         );

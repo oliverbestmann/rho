@@ -22,6 +22,7 @@ then burn quota indefinitely.
   `before_prompt`, i.e. on a new prompt but also on a run started by a
   triggered message (e.g. a finished background task).
 - Tool output is bounded: `Bash`, `Read`, `Grep` and `GoDoc` cut to 50 KB
+  (`Glob` and `Grep` also list at most 50 lines by default, ADR 0045)
   (`tools::truncate`, `tools::MAX_OUTPUT`); `Memory` cuts to 50 KB too
   (ADR 0030; it used to cut to 2000 lines and save the full JSON to a
   temp file); `FetchUrl` cuts to

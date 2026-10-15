@@ -12,7 +12,7 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0002](0002-library-and-binary-split.md) | A library crate plus a binary that picks the extensions | Accepted |
 | [0003](0003-acp-native-no-tui.md) | ACP-native, no TUI; frontends behind a `Frontend` trait | Accepted |
 | [0004](0004-pi-as-reference-design.md) | pi is the reference design | Accepted |
-| [0005](0005-anthropic-wire-format-as-core-model.md) | Provider-neutral types in the Anthropic wire format | Accepted |
+| [0005](0005-anthropic-wire-format-as-core-model.md) | Provider-neutral types in the Anthropic wire format | Accepted, amended by 0048 |
 | [0006](0006-subscription-oauth-and-request-shaping.md) | Claude subscription OAuth with Claude Code request shaping | Accepted |
 | [0007](0007-keep-the-prompt-cache-prefix-stable.md) | Keep the request prefix stable for the prompt cache | Accepted |
 | [0008](0008-adaptive-thinking-only.md) | Adaptive thinking only | Accepted |
@@ -20,12 +20,12 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0010](0010-context-inbox-steering-and-cooperative-stop.md) | `Context`: message inbox, steering and cooperative stop | Accepted |
 | [0011](0011-history-stays-valid-under-cancellation.md) | History stays valid when a run is cancelled or fails | Accepted |
 | [0012](0012-landlock-sandbox.md) | Deny-by-default Landlock sandbox per session | Accepted |
-| [0013](0013-user-approval-fails-closed.md) | Escalations need user approval and fail closed without a UI | Accepted |
+| [0013](0013-user-approval-fails-closed.md) | Escalations need user approval and fail closed without a UI | Accepted, amended by 0047 |
 | [0014](0014-sqlite-session-store.md) | Sessions in SQLite | Accepted, amended by 0041 |
-| [0015](0015-compaction-epochs-and-cache-aware-model.md) | Compaction keeps old messages and picks the model by cache state | Accepted |
+| [0015](0015-compaction-epochs-and-cache-aware-model.md) | Compaction keeps old messages and picks the model by cache state | Accepted, amended by 0040 |
 | [0016](0016-profiles-via-history-notes.md) | Profiles restrict tools and sandbox, told to the model in the history | Accepted |
 | [0017](0017-plan-mode-as-extension.md) | Plan mode is an extension with user approval | Superseded by 0047 |
-| [0018](0018-exact-edit-tool.md) | `Edit` does exact replacements, no fuzzy matching | Accepted |
+| [0018](0018-exact-edit-tool.md) | `Edit` does exact replacements, no fuzzy matching | Accepted, amended by 0041 |
 | [0019](0019-validate-images-before-history.md) | Validate images before they enter the history | Accepted |
 | [0020](0020-web-view-as-extension.md) | Web view as a hook-only extension; loopback or password | Superseded by 0037 |
 | [0021](0021-background-tasks.md) | Background tasks in process groups, reported with `trigger_turn` | Accepted |
@@ -39,19 +39,22 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0029](0029-project-context-needs-consent.md) | Project context files are read only with the user's consent | Accepted |
 | [0030](0030-local-memory-store.md) | Memories stored locally with embeddings in SQLite | Accepted |
 | [0031](0031-mcp-over-http.md) | MCP servers over Streamable HTTP, from mcp.json | Accepted |
-| [0032](0032-project-history-search.md) | Project history search: hybrid search over past sessions under `.rho-project-root` | Accepted |
+| [0032](0032-project-history-search.md) | Project history search | Accepted, amended by 0049 |
 | [0033](0033-features.md) | Features: switchable bundles of sandbox access and tools | Accepted |
 | [0034](0034-secret-redaction.md) | Secrets are masked in two stages with the gitleaks rules | Accepted |
 | [0035](0035-redact-command.md) | `/redact` masks a phrase in every store | Accepted |
-| [0036](0036-skills.md) | Skills as an extension: `ReadSkill` tool and `/skill:<name>` | Accepted |
-| [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted |
-| [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted |
+| [0036](0036-skills.md) | Skills as an extension | Accepted |
+| [0037](0037-acp-over-websocket.md) | ACP over WebSocket with a bearer token | Accepted, amended by 0038, 0039 |
+| [0038](0038-daemon.md) | One rho daemon, editors connect through `rho acp --daemon` | Accepted, amended by 0039 |
 | [0039](0039-shared-sessions.md) | Open sessions are shared by the connections of one process | Accepted, amended by 0042 |
-| [0040](0040-models-by-path.md) | Allowed, default and compaction models by path (`models.json`) | Accepted |
+| [0040](0040-models-by-path.md) | Allowed, default and compaction models by path | Accepted, amended by 0049 |
 | [0041](0041-edit-diffs-kept-for-replay.md) | Edit diffs are stored for 7 days and replayed | Accepted |
 | [0042](0042-busy-state-in-rho-meta.md) | Clients learn that a turn runs from `_meta.rho.running` | Accepted |
 | [0043](0043-web-client.md) | A web client in `web/`, for the phone | Accepted |
-| [0044](0044-tool-call-descriptions.md) | The model titles its tool calls with a `description` argument | Accepted |
+| [0044](0044-tool-call-descriptions.md) | The model titles its tool calls with a `description` argument | Accepted, amended by 0050 |
 | [0045](0045-glob-and-grep.md) | `Glob` and `Grep` split like Claude Code's | Accepted |
 | [0046](0046-model-sets-session-title.md) | The model sets the session title with `SetSessionTitle` | Accepted |
 | [0047](0047-present-plan-with-feedback.md) | `PresentPlan` replaces `ExitPlanMode` and takes feedback | Accepted |
+| [0048](0048-github-copilot-provider.md) | GitHub Copilot as a second provider | Accepted |
+| [0049](0049-helpers-use-the-compaction-model.md) | Extension helpers use the session's compaction model | Accepted |
+| [0050](0050-tools-describe-their-cards.md) | Tools say how their calls are shown | Accepted |
