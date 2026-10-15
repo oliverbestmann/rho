@@ -176,6 +176,11 @@ struct Input {
     conversation_id: Option<ConversationId>,
     /// Agent ID added as an agent:<id> tag (store)
     agent_id: Option<AgentId>,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 rho::id_type! {

@@ -1732,19 +1732,23 @@ fn to_update(
 const MAX_TITLE: usize = 160;
 
 /// Input keys shown in a tool call title, the first present one wins.
-const TITLE_KEYS: [&str; 10] = [
-    "command", "url", "pattern", "glob", "target", "query", "path", "hash", "id", "action",
+const TITLE_KEYS: [&str; 11] = [
+    "command", "url", "pattern", "glob", "target", "query", "path", "hash", "id", "feature",
+    "action",
 ];
 
 /// Tools with a `description` input that says what the call is for. Not
 /// every tool: in others (e.g. MCP tools) it can be content.
-const DESCRIBED: [&str; 9] = [
+const DESCRIBED: [&str; 12] = [
+    "AskUserQuestion",
     "Bash",
     "BackgroundTask",
     "Edit",
     "FetchUrl",
     "Glob",
     "Grep",
+    "History",
+    "Memory",
     "Read",
     "ReadImage",
     "Write",
@@ -2008,6 +2012,13 @@ mod tests {
             title(&ToolName::new("FetchUrl"), &fetch),
             "FetchUrl https://x.y"
         );
+        let feature = json!({"feature": "ssh", "reason": "sign commits"});
+        assert_eq!(
+            title(&ToolName::new("RequestFeature"), &feature),
+            "RequestFeature ssh"
+        );
+        let memory = json!({"action": "search", "query": "x", "description": "Find build notes"});
+        assert_eq!(title(&ToolName::new("Memory"), &memory), "Find build notes");
     }
 
     #[test]

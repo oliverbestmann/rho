@@ -33,6 +33,11 @@ struct Input {
     /// Questions to ask (1-4).
     #[schemars(length(min = 1, max = 4))]
     questions: Vec<Question>,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]

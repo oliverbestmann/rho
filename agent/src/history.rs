@@ -216,6 +216,11 @@ struct Input {
     /// With more results than this, a cheap model answers the query from them
     /// (citing session and seq) instead of showing them all (search)
     summarize_over: Option<u32>,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 struct HistoryTool {
