@@ -11,19 +11,22 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::extension::{
-    CommandName, Context, Decision, Diff, DynExtension, Frontend, Profile, ProfileId, PromptSetup,
-    RunEnd, SessionInfo, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
+    Context, Decision, Diff, DynExtension, Frontend, Profile, ProfileId, PromptSetup, RunEnd,
+    SessionInfo, SessionSetup, Settle, SlashCommand, ToolCall, ToolOutput, TurnEnd,
 };
 use crate::feature::{Feature, FeatureId};
 use crate::provider::{
     Content, Event, Message, ModelSpec, Provider, Registry, Request, Role, StopReason, Thinking,
     ToolCallId, ToolName, ToolSpec, Usage,
 };
-use crate::store::{SessionId, State, Store};
+use crate::store::{SessionId, Store};
 
+mod commands;
+mod persist;
 mod usage;
 
 use crate::tools::{DynTool, ToolKind};
+use persist::Persist;
 pub(crate) use usage::count;
 use usage::turn_report;
 
@@ -160,30 +163,7 @@ fn notify_dirs_changed(session: &Session) {
     );
 }
 
-/// How much of a session is in its store.
-struct Persist {
-    store: Store,
-    epoch: i64,
-    /// `seq` of `history[0]`.
-    base: i64,
-    /// Messages saved, and the block count of the last one: `push_user` can
-    /// merge into it.
-    saved: usize,
-    last_len: usize,
-    /// The session row exists.
-    created: bool,
-    /// A save failed and the user was told; not repeated.
-    failed: bool,
-    /// Edit diffs not saved yet.
-    diffs: Vec<(ToolCallId, Diff)>,
-}
-
 impl Session {
-    /// Number of compactions of the stored session; 0 if not stored.
-    pub(crate) fn epoch(&self) -> i64 {
-        self.persist.as_ref().map_or(0, |p| p.epoch)
-    }
-
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
             model: Some(self.model.clone()),
@@ -245,86 +225,6 @@ impl Session {
                 .collect::<Vec<_>>()
                 .join("\n")
         })
-    }
-
-    /// Writes new history and the session state (model, usage, ...) to the
-    /// store, if the session has one. A failure is shown to the user once
-    /// and does not stop the session.
-    pub async fn save(&mut self) {
-        if let Err(e) = self.try_save().await
-            && let Some(p) = &mut self.persist
-            && !p.failed
-        {
-            p.failed = true;
-            self.ctx.notify(
-                "Session not saved",
-                &format!("{}: {e:#}", p.store.path().display()),
-                true,
-            );
-        }
-    }
-
-    /// `save`, but the error is returned instead of shown.
-    async fn try_save(&mut self) -> Result<()> {
-        let Some(p) = &mut self.persist else {
-            return Ok(());
-        };
-        let id = self.ctx.session_id().clone();
-        // Rewrite the last saved message if it grew, and drop rows past the
-        // end if the history shrank.
-        let from = match p.saved.checked_sub(1) {
-            Some(last) if self.history.get(last).map(|m| m.content.len()) != Some(p.last_len) => {
-                last
-            }
-            _ => p.saved,
-        }
-        .min(self.history.len());
-        let state = State {
-            id: id.clone(),
-            cwd: self.roots[0].clone(),
-            additional_dirs: self.roots[1..].to_vec(),
-            title: self.ctx.title(),
-            model: self.model.clone(),
-            thinking: self.thinking,
-            usage: self.usage,
-            last_usage: self.last_usage,
-            cost: self.cost,
-            profile: self.ctx.profile().id,
-            features: self.ctx.active_features(),
-        };
-        let messages = self.history[from..].to_vec();
-        let diffs = std::mem::take(&mut p.diffs);
-        p.store.save_state(state).await?;
-        p.store
-            .save_messages(&id, p.epoch, p.base + from as i64, messages)
-            .await?;
-        if !diffs.is_empty() {
-            p.store.save_diffs(&id, diffs).await?;
-        }
-        p.created = true;
-        p.saved = self.history.len();
-        p.last_len = self.history.last().map_or(0, |m| m.content.len());
-        Ok(())
-    }
-
-    /// The history was replaced (compaction): keep the old messages under
-    /// their epoch and save the new history under the next one.
-    pub(crate) async fn save_compacted(&mut self) {
-        if let Some(p) = &mut self.persist
-            && p.created
-        {
-            match p.store.next_epoch(self.ctx.session_id()).await {
-                Ok((epoch, base)) => {
-                    (p.epoch, p.base, p.saved, p.last_len) = (epoch, base, 0, 0);
-                }
-                Err(e) => {
-                    self.ctx
-                        .notify("Session not saved", &format!("{e:#}"), true);
-                    return;
-                }
-            }
-        }
-        self.save().await;
     }
 
     /// Streams one model response to the frontend. Returns its content, why
@@ -582,16 +482,7 @@ impl Agent {
             seen: None,
             roots,
             extensions: self.extensions.clone(),
-            persist: store.map(|store| Persist {
-                store,
-                epoch: 0,
-                base: 0,
-                saved: 0,
-                last_len: 0,
-                created: false,
-                failed: false,
-                diffs: vec![],
-            }),
+            persist: store.map(Persist::new),
         };
         session.publish_info();
         Ok(session)
@@ -649,106 +540,6 @@ impl Agent {
             spec,
             context_window: session.provider.context_window(spec.id()),
         });
-        Ok(())
-    }
-
-    /// The session's slash commands: rho's own, then the extensions'.
-    pub fn commands(&self, session: &Session) -> Vec<SlashCommand> {
-        let own = [
-            (
-                "compact",
-                "Summarize the conversation to free up context",
-                Some("optional focus for the summary"),
-            ),
-            (
-                "usage",
-                "Show token, cache and cost usage of this session",
-                None,
-            ),
-            (
-                "redact",
-                "Mask a phrase in all saved sessions, the history index and memories",
-                Some("exact phrase"),
-            ),
-        ];
-        let own = own.map(|(name, description, hint)| SlashCommand {
-            name: CommandName::from_static(name),
-            description: description.into(),
-            hint: hint.map(Into::into),
-        });
-        own.into_iter()
-            .chain(session.commands.iter().cloned())
-            .collect()
-    }
-
-    /// Runs `/name args`, one of `commands`. `None` if there is no such
-    /// command: the text is a prompt for the model then.
-    pub async fn slash_command(
-        &self,
-        session: &mut Session,
-        name: &str,
-        args: &str,
-    ) -> Option<Result<()>> {
-        Some(match name {
-            "compact" => self.compact(session, args).await,
-            "redact" => self.redact(session, args).await,
-            "usage" => {
-                session.ctx.emit(AgentEvent::Text(&session.usage_report()));
-                Ok(())
-            }
-            _ if session.commands.iter().any(|c| c.name.as_str() == name) => {
-                self.command(session, &CommandName::new(name), args).await;
-                Ok(())
-            }
-            _ => return None,
-        })
-    }
-
-    /// Runs an extension's slash command and shows its reply.
-    async fn command(&self, session: &Session, name: &CommandName, args: &str) {
-        for ext in &self.extensions {
-            if let Some(reply) = ext.command(&session.ctx, name, args).await {
-                session.ctx.emit(AgentEvent::Text(&reply));
-                return;
-            }
-        }
-    }
-
-    /// `/redact <phrase>`: replaces `phrase` with `store::MASK` in the
-    /// session's history, in every stored session and, through the
-    /// extensions' `redact` hooks, in their stores. Shows a summary.
-    pub async fn redact(&self, session: &mut Session, phrase: &str) -> Result<()> {
-        if phrase.is_empty() {
-            bail!("usage: /redact <phrase>");
-        }
-        for m in &mut session.history {
-            if crate::store::redact_content(&mut m.content, phrase) {
-                // The prompt cache no longer matches.
-                session.last_request = None;
-            }
-        }
-        if let Some(title) = session.ctx.title().filter(|t| t.contains(phrase)) {
-            session
-                .ctx
-                .restore_title(Some(title.replace(phrase, crate::store::MASK)));
-        }
-        let mut lines = vec![];
-        if let Some(p) = &session.persist {
-            let (messages, sessions) = p.store.redact(phrase).await?;
-            lines.push(format!(
-                "- Sessions: {messages} messages in {sessions} sessions"
-            ));
-        }
-        for ext in &self.extensions {
-            if let Some(reply) = ext.redact(&session.ctx, phrase).await {
-                lines.push(format!("- {reply}"));
-            }
-        }
-        session.save().await;
-        session.ctx.emit(AgentEvent::Text(&format!(
-            "**Redacted**\n\n{}",
-            lines.join("\n")
-        )));
         Ok(())
     }
 

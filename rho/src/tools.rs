@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::extension::{BoxFuture, Context, ToolOutput};
 use crate::provider::{ImageSource, ToolName, ToolSpec};
@@ -141,6 +142,20 @@ pub fn input_schema<T: JsonSchema>() -> Value {
 #[derive(Deserialize, JsonSchema)]
 struct ReadInput {
     path: String,
+    /// first line to read, from 1; default 1
+    offset: Option<usize>,
+    /// number of lines to read; default all, up to 50 KB
+    limit: Option<usize>,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ReadImageInput {
+    path: String,
     /// what this call is for, at most 10 words; shown to the user as its title
     // Required for the model; calls without it (older sessions) still run.
     #[schemars(required, with = "String")]
@@ -205,8 +220,31 @@ impl Tool for Read {
             .run_sandboxed(move || std::fs::read_to_string(path))
             .await?
             .with_context(|| format!("reading {}", i.path))?;
-        Ok(truncate(text).into())
+        Ok(lines(&text, i.offset.unwrap_or(1).max(1), i.limit).into())
     }
+}
+
+/// `limit` lines of `text` from line `first` (1-based), cut to whole lines
+/// within `MAX_OUTPUT` with a note where to go on.
+fn lines(text: &str, first: usize, limit: Option<usize>) -> String {
+    let mut out: String = text
+        .split_inclusive('\n')
+        .skip(first - 1)
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
+    if out.len() <= MAX_OUTPUT {
+        return out;
+    }
+    out.truncate(out.floor_char_boundary(MAX_OUTPUT));
+    // A line longer than `MAX_OUTPUT` stays cut; the next starts after it.
+    let kept = match out.rfind('\n') {
+        Some(end) => {
+            out.truncate(end + 1);
+            out.matches('\n').count()
+        }
+        None => 1,
+    };
+    out + &format!("[output truncated; read on with offset {}]", first + kept)
 }
 
 pub struct ReadImage;
@@ -226,13 +264,13 @@ impl Tool for ReadImage {
             description:
                 "Look at an image file (PNG, JPEG, GIF or WebP, at most 5 MB). Relative paths are resolved against the working directory. Sandboxed like Read."
                     .into(),
-            input_schema: input_schema::<ReadInput>(),
+            input_schema: input_schema::<ReadImageInput>(),
         }
     }
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         use base64::Engine;
-        let i: ReadInput = parse(input)?;
+        let i: ReadImageInput = parse(input)?;
         let path = resolve(ctx.cwd(), &i.path);
         // The size first, so a huge file is not read for nothing.
         let bytes = ctx
@@ -367,7 +405,7 @@ impl Tool for Bash {
             .filter(|t| !t.is_zero())
             .context("timeout must be a positive number of seconds")?;
         let cwd = i.cwd.map_or(ctx.cwd().into(), |d| resolve(ctx.cwd(), &d));
-        let mut cmd = tokio::process::Command::new("sh");
+        let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c")
             .arg(&i.command)
             .current_dir(cwd)
@@ -379,25 +417,45 @@ impl Tool for Bash {
             .kill_on_drop(true);
         ctx.sandbox_command(&mut cmd)
             .context("setting up the sandbox")?;
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
         // Cancelling the prompt drops this future; take the processes with it.
         let mut group = KillGroup(child.id());
-        let out = tokio::time::timeout(timeout, child.wait_with_output()).await;
-        let Ok(out) = out else {
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let done = async {
+            let (out, err) = tokio::try_join!(read_capped(stdout), read_capped(stderr))?;
+            std::io::Result::Ok((child.wait().await?, out, err))
+        };
+        let Ok(done) = tokio::time::timeout(timeout, done).await else {
             bail!("command timed out after {timeout:?}");
         };
-        let out = out?;
+        let (status, stdout, stderr) = done?;
         // Finished: processes left in the group closed their output and run
         // on (e.g. `nohup cmd >log &`).
         group.0 = None;
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let mut text = String::from_utf8_lossy(&stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&stderr));
         let text = truncate(text);
-        if !out.status.success() {
-            bail!("{text}\n[{}]", out.status);
+        if !status.success() {
+            bail!("{text}\n[{status}]");
         }
         Ok(text.into())
     }
+}
+
+/// Reads `stream` to its end but keeps only what `truncate` can use, so
+/// a huge output does not pile up in memory.
+async fn read_capped(stream: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let Some(mut stream) = stream else {
+        return Ok(buf);
+    };
+    (&mut stream)
+        .take(MAX_OUTPUT as u64 + 1)
+        .read_to_end(&mut buf)
+        .await?;
+    // Drained, so the command does not block on a full pipe.
+    tokio::io::copy(&mut stream, &mut tokio::io::sink()).await?;
+    Ok(buf)
 }
 
 /// Kills the process group led by this pid when dropped.
@@ -458,7 +516,8 @@ impl Tool for RequestAccess {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, Bash, Context, MAX_OUTPUT, Read, ReadImage, RequestAccess, Tool, Write, truncate,
+        Access, Bash, Context, MAX_OUTPUT, Read, ReadImage, RequestAccess, Tool, Write, lines,
+        truncate,
     };
     use crate::provider::ImageSource;
     use crate::store::SessionId;
@@ -693,6 +752,22 @@ mod tests {
         ctx.grant(other.path(), Access::Read);
         let out = ReadImage.run(input, &ctx).await.unwrap();
         assert_eq!(out.images.len(), 1);
+    }
+
+    #[test]
+    fn read_pages_by_lines() {
+        assert_eq!(lines("a\nb\nc", 2, Some(1)), "b\n");
+        assert_eq!(lines("a\nb\nc", 2, None), "b\nc");
+        assert_eq!(lines("a\n", 5, None), "");
+        // Whole lines only, and where to go on.
+        let line = "x".repeat(MAX_OUTPUT / 2) + "\n";
+        let out = lines(&line.repeat(3), 2, None);
+        assert_eq!(
+            out,
+            line.clone() + "[output truncated; read on with offset 3]"
+        );
+        let out = lines(&"y".repeat(MAX_OUTPUT + 1), 1, None);
+        assert!(out.ends_with("y[output truncated; read on with offset 2]"));
     }
 
     #[test]

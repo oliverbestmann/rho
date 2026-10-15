@@ -9,10 +9,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
 use rho::provider::{ToolName, ToolSpec};
-use rho::store::SessionId;
 use rho::tools::{Tool, input_schema, parse};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -28,12 +27,9 @@ rho::id_type! {
 }
 const MAX_TIMEOUT: u64 = 3600;
 
-#[derive(Default)]
-pub struct BackgroundTasks {
-    sessions: Mutex<HashMap<SessionId, Arc<Tasks>>>,
-}
+pub struct BackgroundTasks;
 
-/// One session's tasks.
+/// One session's tasks, in `Context::state`.
 #[derive(Default)]
 struct Tasks {
     next_id: AtomicU32,
@@ -55,21 +51,14 @@ fn kill(task: &Task) {
 
 impl Extension for BackgroundTasks {
     async fn session_start(&self, session: &mut SessionSetup) {
-        let tasks = Arc::new(Tasks::default());
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session.ctx.session_id().clone(), tasks.clone());
-        session.tools.push(Arc::new(Start(tasks.clone())));
-        session.tools.push(Arc::new(List(tasks.clone())));
-        session.tools.push(Arc::new(Cancel(tasks)));
+        session.tools.push(Arc::new(Start));
+        session.tools.push(Arc::new(List));
+        session.tools.push(Arc::new(Cancel));
     }
 
     fn session_end(&self, ctx: &Context) {
-        if let Some(tasks) = self.sessions.lock().unwrap().remove(ctx.session_id()) {
-            for (_, task) in tasks.running.lock().unwrap().drain() {
-                kill(&task);
-            }
+        for (_, task) in ctx.state::<Tasks>().running.lock().unwrap().drain() {
+            kill(&task);
         }
     }
 }
@@ -90,7 +79,7 @@ struct StartInput {
     description: Option<String>,
 }
 
-struct Start(Arc<Tasks>);
+struct Start;
 
 impl Tool for Start {
     fn kind(&self) -> rho::tools::ToolKind {
@@ -127,19 +116,20 @@ impl Tool for Start {
             .process_group(0);
         ctx.sandbox_command(&mut cmd)?;
         let mut child = cmd.spawn()?;
+        // Not 0: `kill(-0)` would hit rho's own process group.
+        let pid = child.id().context("the command has no process id")? as i32;
 
-        let id = TaskId::new((self.0.next_id.fetch_add(1, Ordering::Relaxed) + 1).to_string());
+        let tasks = ctx.state::<Tasks>();
+        let id = TaskId::new((tasks.next_id.fetch_add(1, Ordering::Relaxed) + 1).to_string());
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let task = Task {
             command: i.command.clone(),
             started: Instant::now(),
-            pid: child.id().unwrap_or_default() as i32,
+            pid,
             tail: tail.clone(),
         };
-        let pid = task.pid;
-        self.0.running.lock().unwrap().insert(id.clone(), task);
+        tasks.running.lock().unwrap().insert(id.clone(), task);
 
-        let tasks = self.0.clone();
         let ctx = ctx.clone();
         let started = format!("Started background task {id}");
         tokio::spawn(async move {
@@ -213,7 +203,7 @@ fn describe(status: ExitStatus) -> String {
 #[derive(Deserialize, JsonSchema)]
 struct ListInput {}
 
-struct List(Arc<Tasks>);
+struct List;
 
 impl Tool for List {
     fn spec(&self) -> ToolSpec {
@@ -226,8 +216,9 @@ impl Tool for List {
         }
     }
 
-    async fn run(&self, _input: Value, _ctx: &Context) -> Result<ToolOutput> {
-        let running = self.0.running.lock().unwrap();
+    async fn run(&self, _input: Value, ctx: &Context) -> Result<ToolOutput> {
+        let tasks = ctx.state::<Tasks>();
+        let running = tasks.running.lock().unwrap();
         let mut ids: Vec<_> = running.keys().collect();
         ids.sort_by_key(|id| id.as_str().parse::<u32>().unwrap_or_default());
         let lines: Vec<String> = ids
@@ -256,7 +247,7 @@ struct CancelInput {
     id: TaskId,
 }
 
-struct Cancel(Arc<Tasks>);
+struct Cancel;
 
 impl Tool for Cancel {
     fn spec(&self) -> ToolSpec {
@@ -268,9 +259,9 @@ impl Tool for Cancel {
         }
     }
 
-    async fn run(&self, input: Value, _ctx: &Context) -> Result<ToolOutput> {
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
         let i: CancelInput = parse(input)?;
-        let Some(task) = self.0.running.lock().unwrap().remove(&i.id) else {
+        let Some(task) = ctx.state::<Tasks>().running.lock().unwrap().remove(&i.id) else {
             bail!("no running background task {}", i.id);
         };
         kill(&task);
@@ -283,6 +274,7 @@ mod tests {
     use super::*;
     use rho::agent::AgentEvent;
     use rho::extension::Frontend;
+    use rho::store::SessionId;
     use serde_json::json;
 
     /// Records notices.
@@ -305,7 +297,7 @@ mod tests {
         }
     }
 
-    fn setup() -> (tempfile::TempDir, Arc<Notices>, Context, Arc<Tasks>) {
+    fn setup() -> (tempfile::TempDir, Arc<Notices>, Context) {
         let dir = tempfile::tempdir().unwrap();
         let notices = Arc::new(Notices::default());
         let ctx = Context::new(
@@ -314,7 +306,7 @@ mod tests {
             notices.clone(),
             Default::default(),
         );
-        (dir, notices, ctx, Arc::new(Tasks::default()))
+        (dir, notices, ctx)
     }
 
     async fn wait_notice(notices: &Notices) -> (String, String, bool) {
@@ -329,9 +321,9 @@ mod tests {
 
     #[tokio::test]
     async fn reports_exit_status_and_tail() {
-        let (_dir, notices, ctx, tasks) = setup();
+        let (_dir, notices, ctx) = setup();
         let cmd = "for i in $(seq 1 12); do echo $i; done; sleep 0.2; echo err >&2; exit 3";
-        let out = Start(tasks.clone())
+        let out = Start
             .run(json!({"command": cmd, "timeout": 10}), &ctx)
             .await
             .unwrap();
@@ -344,14 +336,14 @@ mod tests {
             "{text}"
         );
         assert!(ctx.has_triggered());
-        assert!(tasks.running.lock().unwrap().is_empty());
+        assert!(ctx.state::<Tasks>().running.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn runs_in_cwd() {
-        let (dir, notices, ctx, tasks) = setup();
+        let (dir, notices, ctx) = setup();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
-        Start(tasks)
+        Start
             .run(json!({"command": "pwd", "cwd": "sub", "timeout": 10}), &ctx)
             .await
             .unwrap();
@@ -361,8 +353,8 @@ mod tests {
 
     #[tokio::test]
     async fn times_out() {
-        let (_dir, notices, ctx, tasks) = setup();
-        Start(tasks)
+        let (_dir, notices, ctx) = setup();
+        Start
             .run(json!({"command": "sleep 30", "timeout": 1}), &ctx)
             .await
             .unwrap();
@@ -373,26 +365,23 @@ mod tests {
 
     #[tokio::test]
     async fn lists_and_cancels_silently() {
-        let (_dir, notices, ctx, tasks) = setup();
-        Start(tasks.clone())
+        let (_dir, notices, ctx) = setup();
+        Start
             .run(json!({"command": "echo up; sleep 30", "timeout": 60}), &ctx)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let list = List(tasks.clone()).run(json!({}), &ctx).await.unwrap();
+        let list = List.run(json!({}), &ctx).await.unwrap();
         assert!(
             list.output.starts_with("1  ") && list.output.contains("last: up"),
             "{}",
             list.output
         );
 
-        Cancel(tasks.clone())
-            .run(json!({"id": "1"}), &ctx)
-            .await
-            .unwrap();
-        let list = List(tasks.clone()).run(json!({}), &ctx).await.unwrap();
+        Cancel.run(json!({"id": "1"}), &ctx).await.unwrap();
+        let list = List.run(json!({}), &ctx).await.unwrap();
         assert_eq!(list.output, "No running background tasks");
-        assert!(Cancel(tasks).run(json!({"id": "1"}), &ctx).await.is_err());
+        assert!(Cancel.run(json!({"id": "1"}), &ctx).await.is_err());
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(notices.0.lock().unwrap().is_empty());
         assert!(!ctx.has_triggered());

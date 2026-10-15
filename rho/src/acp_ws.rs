@@ -1,4 +1,4 @@
-//! ACP over WebSocket (`rho acp --listen ADDR`): one JSON-RPC message per
+//! ACP over WebSocket (`rho daemon --listen ADDR`): one JSON-RPC message per
 //! text frame, as acp-ui sends it. Every connection is its own ACP
 //! connection to the shared agent, like a separate `rho acp` on stdio.
 //!

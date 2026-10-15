@@ -9,8 +9,8 @@
 //! `${VAR}` in header values comes from the environment. Each remote tool
 //! becomes `mcp__<server>__<tool>`. Servers are connected on the first
 //! session and shared by later ones, so the tool list (and the prompt
-//! cache) stays the same. Problems are shown with the first prompt: notices
-//! sent during `session/new` do not reach the client.
+//! cache) stays the same. Problems are shown as notices when the session
+//! starts (held until the client knows it, ADR 0052).
 
 use std::collections::BTreeMap;
 use std::path::Path;

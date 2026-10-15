@@ -727,8 +727,8 @@ impl Context {
         self.0.frontend.ask(form).await
     }
 
-    /// One-off completion outside the conversation, e.g. to summarize a
-    /// command. `SessionInfo::cheap_model` is a good model for it.
+    /// One-off completion outside the conversation, e.g. to answer from
+    /// search results. `SessionInfo::cheap_model` is a good model for it.
     pub async fn complete(&self, model: &ModelSpec, system: &str, prompt: &str) -> Result<String> {
         let provider = self.0.registry.resolve(model)?;
         let mut stream = self.stream(

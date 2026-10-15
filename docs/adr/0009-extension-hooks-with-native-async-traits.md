@@ -44,7 +44,7 @@ would box every future and makes signatures harder to read.
 - Extension state is per process, not per session; extensions keep their
   own maps by `session_id` and clean them up in `session_end` (e.g.
   `GoCheck`, `BackgroundTasks`, `Skills`). (Since ADR 0051 per-session
-  state lives in `Context::state`; `BackgroundTasks` keeps its map, it
+  state lives in `Context::state`, also `BackgroundTasks`', which still
   kills its processes in `session_end`.)
 - Hooks do not see the streamed text, only whole turns (`turn_end`). This
   limited the old web view (ADR 0020); frontends now get the stream through

@@ -27,7 +27,9 @@ then burn quota indefinitely.
   (ADR 0030; it used to cut to 2000 lines and save the full JSON to a
   temp file); `FetchUrl` cuts to
   64,000 characters by default (`maxLength`, set by the model);
-  background tasks keep 10 lines.
+  background tasks keep 10 lines. (Since 2026-10-15 `Read` cuts to whole
+  lines and takes `offset`/`limit` to read on, and `Bash` keeps at most
+  50 KB per stream in memory while it drains the rest.)
 - `Bash` has a default timeout of 120 s (the model can set another);
   background tasks at most 3600 s. Each model request has
   `max_tokens = 32000`.

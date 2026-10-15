@@ -169,6 +169,10 @@ impl Agent {
         }];
         // The new prefix is not cached yet.
         session.last_request = None;
+        // The context in use is unknown until the next request, not the old one.
+        session.last_usage = Usage::default();
+        session.publish_info();
+        session.emit_usage();
         // The profile and feature notes went with the history: tell the model again.
         session.seen = None;
         session.save_compacted().await;

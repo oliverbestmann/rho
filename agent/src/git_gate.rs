@@ -13,11 +13,21 @@ pub struct GitGate;
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
+/// Options of `git` itself that take the next word as value (lowercased).
+const VALUE_OPTIONS: [&str; 5] = [
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+];
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Same as the regexes `\bgit\s+(commit|push|tag)\b`, case-insensitive.
+/// Like the regex `\bgit\s+(commit|push|tag)\b`, case-insensitive, but
+/// skipping git's own options (`git -C dir push`, `git -c k=v commit`).
 fn mutates_git(command: &str) -> bool {
     let lower = command.to_lowercase();
     lower.match_indices("git").any(|(at, _)| {
@@ -25,12 +35,21 @@ fn mutates_git(command: &str) -> bool {
             return false;
         }
         let rest = &lower[at + 3..];
-        let args = rest.trim_start();
-        if args.len() == rest.len() {
-            return false; // no whitespace after `git`
+        if !rest.starts_with(char::is_whitespace) {
+            return false;
         }
-        let word: String = args.chars().take_while(|c| is_word(*c)).collect();
-        MUTATIONS.contains(&word.as_str())
+        // shortcut: a quoted option value with spaces is taken for the
+        // subcommand; split shell words properly if that gets used to slip by.
+        let mut words = rest.split_whitespace();
+        while let Some(word) = words.next() {
+            if VALUE_OPTIONS.contains(&word) {
+                words.next();
+            } else if !word.starts_with('-') {
+                let sub: String = word.chars().take_while(|c| is_word(*c)).collect();
+                return MUTATIONS.contains(&sub.as_str());
+            }
+        }
+        false
     })
 }
 
@@ -75,6 +94,9 @@ mod tests {
             "git\tcommit",
             "(git push)",
             "git commit-tree",
+            "git -c commit.gpgsign=false commit -m x",
+            "git -C /repo push",
+            "git --no-pager --git-dir /x/.git tag v1",
         ] {
             assert!(mutates_git(cmd), "{cmd}");
         }
@@ -87,6 +109,8 @@ mod tests {
             "git-push",
             "git",
             "echo 'git tagged'",
+            "git -C /repo status",
+            "git -c core.pager=cat log",
         ] {
             assert!(!mutates_git(cmd), "{cmd}");
         }

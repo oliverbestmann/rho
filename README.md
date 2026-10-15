@@ -6,7 +6,10 @@ A small ACP-native coding agent in Rust. Prototype.
 
 - ACP agent for Zed and other clients, plus a one-shot CLI. No TUI.
 - Claude through a Pro/Max subscription (OAuth), with adaptive thinking and
-  prompt caching.
+  prompt caching. Claude and GPT models through GitHub Copilot.
+- `models.json` limits the models a session may use, by path.
+- A web client in `web/` for following and answering sessions from a
+  phone, through the daemon.
 - Built-in tools: `Read`, `ReadImage`, `Write`, `Edit` (exact replacements),
   `Bash`, `RequestAccess`.
 - Deny-by-default Landlock sandbox per session. The user approves more
@@ -22,9 +25,9 @@ A small ACP-native coding agent in Rust. Prototype.
 
 ## Limitations
 
-- Only Anthropic, and only models with adaptive thinking (Claude 4.6+).
-  Subscription billing depends on undocumented request shaping that follows
-  pi-ai.
+- Providers: Anthropic (only models with adaptive thinking, Claude 4.6+)
+  and GitHub Copilot (Claude and GPT, no Gemini). Subscription billing and
+  Copilot depend on undocumented request shaping that follows pi-ai.
 - The sandbox is Linux only; elsewhere it must be disabled. Background tasks
   are Unix only. The network is not sandboxed, and extension code (`Memory`,
   `History`, `Mcp`) runs outside the sandbox. `GitGate` matches command
@@ -33,10 +36,11 @@ A small ACP-native coding agent in Rust. Prototype.
   denied. One-shot runs are not saved and don't wait for background tasks.
 - Changing the set of extensions needs a rebuild. Hooks see whole turns, not
   streamed text.
-- Compaction is manual (`/compact`). A run stops after 50 model requests.
+- Compaction is manual (`/compact`). A run has no request limit; the user
+  cancels a runaway run.
 - Prompt files apply to new sessions only. A session is bound to its cwd;
-  sandbox grants and edit diffs are not saved. The session database only
-  grows.
+  sandbox grants are not saved, edit diffs only for 7 days. The session
+  database only grows.
 - Builds need `nix develop` (onnxruntime). The first `Memory` or `History`
   use downloads the embedding model.
 - `Mcp`: Streamable HTTP only. No stdio servers, OAuth, SSE transport,
@@ -45,9 +49,8 @@ A small ACP-native coding agent in Rust. Prototype.
   project waits for the index. Vector search is a full scan, and the model
   is weak on code. Only one session database is searched.
 - ACP over WebSocket: no TLS (put a `wss://` proxy or tunnel in front), one
-  shared token. A connection that loads a session while a turn runs gets
-  the saved history without tool descriptions, and misses the chunks
-  already streamed of the message in progress. A daemon restart ends all
+  shared token. A connection that loads a session while a turn runs misses
+  the chunks already streamed of the message in progress. A daemon restart ends all
   running turns; clients continue with `session/load`.
 - Images: JPEG, PNG, GIF and WebP up to 5 MB.
 
@@ -61,20 +64,27 @@ Cargo workspace:
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
-  `ProjectContext`, `Secrets`) and a `main` that calls
+  `Skills`, `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
+- `web/` - the Angular web client (ADR 0043, `web/README.md`).
 
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
 - `rho/src/anthropic.rs` - Anthropic Messages API with Claude Pro/Max subscription shaping
+- `rho/src/copilot.rs` - GitHub Copilot: login, token exchange, Claude via `anthropic`, GPT via `openai.rs` (Responses API)
+- `rho/src/models.rs` - `models.json`: allowed, default and compaction models by path
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
 - `rho/src/tools.rs` - `Tool` trait and built-ins: `Read`, `ReadImage`, `Write`, `Bash`, `RequestAccess`
 - `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
-- `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat)
+- `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat); saving in `agent/persist.rs`, slash commands in `agent/commands.rs`, usage reports in `agent/usage.rs`
+- `rho/src/compact.rs` - `/compact`
+- `rho/src/prompt.rs` - the system prompt
+- `rho/src/sandbox.rs`, `rho/src/feature.rs` - Landlock sandbox, `/grant-*`; features and `/enable`
+- `rho/src/cli.rs` - command line, `rho::Options`, one-shot mode
 - `rho/src/extension.rs` - `Extension` hooks, `Context` session handle, `Frontend` trait
 - `rho/src/profile.rs` - `Profile`s and the note that tells the model about a switch
 - `rho/src/form.rs` - forms an extension shows the user (`Context::ask`)
 - `rho/src/store.rs` - session persistence in SQLite
-- `rho/src/acp/` - Agent Client Protocol server: handlers (initialize, session/new, load, resume, list, close, prompt, cancel) in `mod.rs`, open sessions in `hub.rs`, per-session frontend in `frontend.rs`, the ACP messages in `update.rs`
+- `rho/src/acp/` - Agent Client Protocol server: handlers (initialize, session/new, load, resume, list, close, prompt, cancel) in `mod.rs`, load/resume and replay in `load.rs`, config options in `config.rs`, open sessions in `hub.rs`, per-session frontend in `frontend.rs`, the ACP messages in `update.rs`
 - `rho/src/acp_ws.rs` - ACP over WebSocket: `rho daemon` (Unix socket, `--listen` with a bearer token) and `rho acp --daemon`
 
 ## Use
@@ -191,8 +201,8 @@ Clients can list them (`session/list`, filtered by cwd), continue them
 (`session/load` replays the conversation with all epochs, each compaction
 summary as a "Compacted" notice; `session/resume` replays nothing) and
 `session/close` them. Sandbox grants are not saved: a continued session
-starts from `sandbox.json` again. Edit diffs are not stored either, so
-replayed edits show only their output.
+starts from `sandbox.json` again. Edit diffs are stored for 7 days and
+replayed with the edit; older edits show only their output (ADR 0041).
 
 Every session opens its own connection; `Options::sessions_db` maps a cwd
 to a database file (default: the same file for all). Tables are `STRICT`
@@ -524,7 +534,7 @@ Each text frame carries one JSON-RPC message (several, split by newlines,
 are accepted too). Every connection gets its own ACP connection to one
 shared agent, so the extensions (memory, MCP, ...) and open sessions are
 shared. It replaces the earlier web view (ADR 0020): to follow a Zed
-session from a phone, load it in acp-ui.
+session from a phone, load it in the web client (`web/`) or acp-ui.
 
 Every client needs the token, also from this machine, since any website can
 open a WebSocket to localhost. It is `RHO_ACP_TOKEN`, else
