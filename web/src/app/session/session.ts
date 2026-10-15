@@ -38,9 +38,9 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp } from '../acp';
 import { MarkdownPipe } from '../markdown';
 import { AskCard } from './ask-card';
-import { isRunning, listSessions } from '../sessions/sessions';
+import { dir, isRunning, listSessions } from '../sessions/sessions';
 import { ago } from '../time';
-import { blockText, SessionState } from './session-state';
+import { blockText } from './session-state';
 
 const KIND_ICONS: Record<string, string> = {
   read: 'description',
@@ -107,42 +107,32 @@ export class Session {
     const match = /^\/(\S*)$/.exec(draft);
     if (!match) return [];
     const prefix = match[1].toLowerCase();
-    return (this.session.value()?.commands() ?? [])
+    return (this.opened()?.state.commands() ?? [])
       .filter((c) => c.name.toLowerCase().startsWith(prefix))
       .slice(0, 8);
   });
-  private stopListening = () => {};
-
-  protected readonly session = resource({
-    params: () => {
-      const agent = this.acp.agent();
-      return agent && { agent, id: this.id(), cwd: this.cwd() };
-    },
-    loader: async ({ params: { agent, id, cwd } }) => {
-      const state = new SessionState();
-      this.stopListening();
-      this.stopListening = this.acp.listen(id, (u) => state.apply(u));
-      // rho replays the history as updates before it answers.
-      const res = await agent.request(acp.methods.agent.session.load, {
-        sessionId: id,
-        cwd,
-        mcpServers: [],
-      });
-      state.options.set(res.configOptions ?? []);
-      return state;
-    },
+  /** Synchronous, unlike a resource: a session opened before shows at once. */
+  protected readonly opened = computed(() => {
+    const agent = this.acp.agent();
+    return agent && this.acp.session(agent, this.id(), this.cwd());
+  });
+  /** Loaded without error: rho takes prompts for it. */
+  protected readonly ready = computed(() => {
+    const o = this.opened();
+    return !!o && !o.loading() && !o.error();
   });
 
   protected readonly ago = ago;
   protected readonly isRunning = isRunning;
+  protected readonly dir = dir;
   /** For the switcher; reloaded each time it opens. */
   protected readonly sessions = resource({
     params: () => this.acp.agent(),
     loader: ({ params: agent }) => listSessions(agent),
   });
-  /** The five last updated other sessions. */
+  /** The five last updated sessions, plus this one if it is older. */
   protected readonly recent = computed(() =>
-    (this.sessions.value() ?? []).filter((s) => s.sessionId !== this.id()).slice(0, 5),
+    (this.sessions.value() ?? []).filter((s, i) => i < 5 || s.sessionId === this.id()),
   );
 
   protected readonly asks = computed(() =>
@@ -150,19 +140,19 @@ export class Session {
   );
 
   protected readonly title = computed(
-    () => this.session.value()?.title() ?? this.listTitle() ?? 'Session',
+    () => this.opened()?.state.title() ?? this.listTitle() ?? 'Session',
   );
 
   protected readonly usage = computed(() => {
-    const u = this.session.value()?.usage();
+    const u = this.opened()?.state.usage();
     return u && u.size > 0 ? Math.round((100 * u.used) / u.size) : undefined;
   });
 
   protected readonly running = computed(
     () =>
       this.acp.prompting().has(this.id()) ||
-      !!this.session.value()?.running() ||
-      (this.session.value()?.entries() ?? []).some(
+      !!this.opened()?.state.running() ||
+      (this.opened()?.state.entries() ?? []).some(
         (e) => e.kind === 'tool' && e.call().status === 'in_progress',
       ),
   );
@@ -178,7 +168,6 @@ export class Session {
 
   constructor() {
     const destroyRef = inject(DestroyRef);
-    destroyRef.onDestroy(() => this.stopListening());
     effect(() => {
       const [key, draft] = [draftKey(this.id()), this.draft()];
       if (draft) localStorage.setItem(key, draft);
@@ -231,9 +220,10 @@ export class Session {
 
   protected async send() {
     const agent = this.acp.agent();
-    const state = this.session.value();
+    const opened = this.opened();
     const text = this.draft().trim();
-    if (!agent || !state || !text) return;
+    if (!agent || !opened || !this.ready() || !text) return;
+    const state = opened.state;
     // The component stays when the switcher changes the id, so keep this one.
     const sessionId = this.id();
     const prompting = (on: boolean) =>
@@ -264,7 +254,7 @@ export class Session {
 
   protected async setOption(option: acp.SessionConfigOption, change: MatSelectChange<string>) {
     const agent = this.acp.agent();
-    const state = this.session.value();
+    const state = this.opened()?.state;
     if (!agent || !state) return;
     try {
       const res = await agent.request(acp.methods.agent.session.setConfigOption, {

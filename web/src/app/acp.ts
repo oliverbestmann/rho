@@ -1,7 +1,15 @@
-import { effect, inject, Injectable, signal, untracked } from '@angular/core';
+import { effect, inject, Injectable, signal, untracked, WritableSignal } from '@angular/core';
 import * as acp from '@agentclientprotocol/sdk';
 import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client';
 import { Server, Settings } from './settings';
+import { SessionState } from './session/session-state';
+
+/** A session loaded over the current connection; its state follows the updates. */
+export interface Opened {
+  readonly state: SessionState;
+  readonly loading: WritableSignal<boolean>;
+  readonly error: WritableSignal<Error | undefined>;
+}
 
 /** A question from the agent that waits for the user. */
 export type Ask =
@@ -39,7 +47,8 @@ export class Acp {
   /** Sessions with a `session/prompt` from this client still running. */
   readonly prompting = signal<ReadonlySet<string>>(new Set());
 
-  private readonly listeners = new Map<string, (update: acp.SessionUpdate) => void>();
+  /** Sessions loaded over this connection; rho keeps sending their updates. */
+  private readonly opened = new Map<string, Opened>();
   private connection?: acp.ClientConnection;
   private retries = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -56,20 +65,44 @@ export class Acp {
     });
   }
 
-  /** Routes `session/update`s of one session to `fn` until the returned function is called. */
-  listen(sessionId: string, fn: (update: acp.SessionUpdate) => void): () => void {
-    this.listeners.set(sessionId, fn);
-    return () => {
-      if (this.listeners.get(sessionId) === fn) this.listeners.delete(sessionId);
+  /**
+   * The session, loaded with `session/load` the first time it is asked for
+   * on this connection. Later calls return the same, kept current.
+   */
+  session(agent: acp.ClientContext, sessionId: string, cwd: string): Opened {
+    const cached = this.opened.get(sessionId);
+    if (cached) return cached;
+    const opened: Opened = {
+      state: new SessionState(),
+      loading: signal(true),
+      error: signal(undefined),
     };
+    this.opened.set(sessionId, opened);
+    // rho replays the history as updates before it answers.
+    agent
+      .request(acp.methods.agent.session.load, { sessionId, cwd, mcpServers: [] })
+      .then((res) => opened.state.options.set(res.configOptions ?? []))
+      .catch((e: unknown) => {
+        // Not kept, so the next visit tries again.
+        if (this.opened.get(sessionId) === opened) this.opened.delete(sessionId);
+        opened.error.set(e instanceof Error ? e : new Error(String(e)));
+      })
+      .finally(() => opened.loading.set(false));
+    return opened;
+  }
+
+  /** No connection: rho forgot what we viewed, the next visit loads again. */
+  private disconnected() {
+    this.agent.set(undefined);
+    this.asks.set([]);
+    this.opened.clear();
   }
 
   private async open(server: Server | undefined) {
     clearTimeout(this.timer);
     this.connection?.close();
     this.connection = undefined;
-    this.agent.set(undefined);
-    this.asks.set([]);
+    this.disconnected();
     if (!server) {
       this.status.set('offline');
       return;
@@ -83,7 +116,7 @@ export class Acp {
     const conn = acp
       .client({ name: 'rho-web' })
       .onNotification(acp.methods.client.session.update, ({ params }) =>
-        this.listeners.get(params.sessionId)?.(params.update),
+        this.opened.get(params.sessionId)?.state.apply(params.update),
       )
       .onRequest(acp.methods.client.session.requestPermission, ({ params, signal }) =>
         this.ask<acp.RequestPermissionResponse>(signal, (id, answer) => ({
@@ -111,8 +144,7 @@ export class Acp {
       .then(() => {
         if (this.connection !== conn) return;
         this.connection = undefined;
-        this.agent.set(undefined);
-        this.asks.set([]);
+        this.disconnected();
         this.status.set('offline');
         this.error.set(`Cannot reach ${server.url}`);
         const delay = Math.min(1000 * 2 ** this.retries++, 30_000);

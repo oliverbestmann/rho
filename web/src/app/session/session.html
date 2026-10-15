@@ -20,31 +20,36 @@
         mat-menu-item
         [routerLink]="['/session', s.sessionId]"
         [queryParams]="{ cwd: s.cwd, title: s.title }"
+        [class.current]="s.sessionId === id()"
+        [attr.aria-current]="s.sessionId === id() ? 'page' : null"
       >
         <span class="switch-title">{{ s.title || 'Untitled' }}</span>
         @if (isRunning(s)) {
           <mat-spinner class="switch-busy" diameter="16" aria-label="Running" />
         }
-        <span class="switch-time">{{ ago(s.updatedAt) }}</span>
+        <span class="switch-time" [title]="s.cwd">{{ dir(s.cwd) }} · {{ ago(s.updatedAt) }}</span>
       </a>
     } @empty {
       <button mat-menu-item disabled>
-        {{ sessions.isLoading() ? 'Loading…' : 'No other sessions' }}
+        {{ sessions.isLoading() ? 'Loading…' : 'No sessions' }}
       </button>
     }
   </mat-menu>
 </mat-toolbar>
 <div class="stream">
-  @if (session.isLoading() || running()) {
+  @if (opened()?.loading() || running()) {
     <mat-progress-bar mode="indeterminate" class="progress" />
   }
   <div class="scroller" #scroller>
     <main>
-      @if (session.error(); as error) {
+      @if (opened()?.error(); as error) {
         <p class="error">{{ error.message }}</p>
       }
 
-      @if (session.value(); as state) {
+      <!-- Hidden until loaded, so the replayed history does not fly by. -->
+      @if (opened()?.loading()) {
+        <mat-spinner class="loading" diameter="40" aria-label="Loading" />
+      } @else if (opened()?.state; as state) {
         @for (entry of state.entries(); track $index) {
           @switch (entry.kind) {
             @case ('user') {
@@ -110,7 +115,7 @@
 <footer>
   @if (showOptions()) {
     <div class="options" id="session-options">
-      @for (option of session.value()?.options(); track option.id) {
+      @for (option of opened()?.state?.options(); track option.id) {
         @if (option.type === 'select') {
           <mat-form-field subscriptSizing="dynamic" [class]="option.category">
             <mat-select
@@ -183,7 +188,7 @@
       <button
         matIconButton
         aria-label="Send"
-        [disabled]="!draft().trim() || !session.hasValue()"
+        [disabled]="!draft().trim() || !ready()"
         (click)="send()"
       >
         <mat-icon>send</mat-icon>

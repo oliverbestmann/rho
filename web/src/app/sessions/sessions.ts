@@ -29,6 +29,11 @@ export function isRunning(s: acp.SessionInfo) {
   return typeof rho === 'object' && (rho as { running?: unknown }).running === true;
 }
 
+/** The last part of a path, for showing a session's working directory. */
+export function dir(cwd: string) {
+  return cwd.split('/').filter(Boolean).at(-1) ?? cwd;
+}
+
 @Component({
   selector: 'app-sessions',
   imports: [
@@ -99,6 +104,7 @@ export class Sessions {
   private readonly settings = inject(Settings);
   private readonly router = inject(Router);
   protected readonly ago = ago;
+  protected readonly dir = dir;
 
   protected readonly sessions = resource({
     params: () => this.acp.agent(),
@@ -107,10 +113,6 @@ export class Sessions {
 
   /** Sessions with a question for the user. */
   protected readonly waiting = computed(() => new Set(this.acp.asks().map((a) => a.sessionId)));
-
-  protected dir(cwd: string) {
-    return cwd.split('/').filter(Boolean).at(-1) ?? cwd;
-  }
 
   protected logout() {
     this.router.navigate(['/login']);

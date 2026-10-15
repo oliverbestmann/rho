@@ -33,14 +33,21 @@
   color: var(--mat-sys-on-surface-variant);
 }
 
+// The open session in the switcher.
+.current {
+  background: var(--mat-sys-secondary-container);
+  color: var(--mat-sys-on-secondary-container);
+}
+
 .switch-busy {
   display: inline-block;
   vertical-align: middle;
   margin-left: 12px;
 }
 
+// Its own line under the title.
 .switch-time {
-  margin-left: 12px;
+  display: block;
   font: var(--mat-sys-body-small);
   color: var(--mat-sys-on-surface-variant);
 }
@@ -135,6 +142,11 @@ main {
 
 .error {
   color: var(--mat-sys-error);
+}
+
+.loading {
+  align-self: center;
+  margin: 48px 0;
 }
 
 // Floats over the end of the list, right-aligned.
