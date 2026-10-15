@@ -1,3 +1,4 @@
 /target
-/result
+result
 /_rho-auth.json
+/.rho-project-root
