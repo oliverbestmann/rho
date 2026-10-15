@@ -6,7 +6,7 @@ import { MatCardModule } from '@angular/material/card';
 import { MatCheckboxModule } from '@angular/material/checkbox';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
-import { MatSelectModule } from '@angular/material/select';
+import { MatRadioModule } from '@angular/material/radio';
 import { Ask } from '../acp';
 import { MarkdownPipe } from '../markdown';
 import { blockText } from './session-state';
@@ -20,7 +20,7 @@ interface Field {
   description?: string;
   required: boolean;
   type: 'text' | 'number' | 'choice' | 'multi' | 'boolean';
-  options: { value: string; title: string }[];
+  options: { value: string; title: string; description?: string }[];
 }
 
 /** A permission request or form from the agent. */
@@ -34,7 +34,7 @@ interface Field {
     MatCheckboxModule,
     MatFormFieldModule,
     MatInputModule,
-    MatSelectModule,
+    MatRadioModule,
   ],
   template: `
     @let a = ask();
@@ -57,9 +57,7 @@ interface Field {
           }
         </mat-card-actions>
       } @else {
-        <mat-card-header>
-          <mat-card-title>{{ a.request.message }}</mat-card-title>
-        </mat-card-header>
+        <mat-card-content class="markdown" [innerHTML]="a.request.message | markdown" />
         <mat-card-content class="fields">
           @for (f of fields(); track f.key) {
             @switch (f.type) {
@@ -69,42 +67,54 @@ interface Field {
                 </mat-checkbox>
               }
               @case ('choice') {
-                <mat-form-field>
-                  <mat-label>{{ f.title }}</mat-label>
-                  <mat-select
-                    [required]="f.required"
-                    [value]="values()[f.key]"
-                    (selectionChange)="set(f.key, $event.value)"
-                  >
-                    @for (o of f.options; track o.value) {
-                      <mat-option [value]="o.value">{{ o.title }}</mat-option>
+                <div class="choice">
+                  <div class="question">
+                    {{ f.title }}
+                    @if (f.required) {
+                      *
                     }
-                  </mat-select>
+                  </div>
                   @if (f.description) {
-                    <mat-hint>{{ f.description }}</mat-hint>
+                    <div class="hint">{{ f.description }}</div>
                   }
-                </mat-form-field>
+                  <mat-radio-group [value]="values()[f.key]" (change)="set(f.key, $event.value)">
+                    @for (o of f.options; track o.value) {
+                      <mat-radio-button [value]="o.value">
+                        <div>{{ o.title }}</div>
+                        @if (o.description) {
+                          <div class="hint">{{ o.description }}</div>
+                        }
+                      </mat-radio-button>
+                    }
+                  </mat-radio-group>
+                </div>
               }
               @case ('multi') {
-                <mat-form-field>
-                  <mat-label>{{ f.title }}</mat-label>
-                  <mat-select
-                    multiple
-                    [required]="f.required"
-                    [value]="values()[f.key]"
-                    (selectionChange)="set(f.key, $event.value)"
-                  >
-                    @for (o of f.options; track o.value) {
-                      <mat-option [value]="o.value">{{ o.title }}</mat-option>
+                <div class="choice">
+                  <div class="question">
+                    {{ f.title }}
+                    @if (f.required) {
+                      *
                     }
-                  </mat-select>
+                  </div>
                   @if (f.description) {
-                    <mat-hint>{{ f.description }}</mat-hint>
+                    <div class="hint">{{ f.description }}</div>
                   }
-                </mat-form-field>
+                  @for (o of f.options; track o.value) {
+                    <mat-checkbox
+                      [checked]="picked(f.key, o.value)"
+                      (change)="toggle(f.key, o.value, $event.checked)"
+                    >
+                      <div>{{ o.title }}</div>
+                      @if (o.description) {
+                        <div class="hint">{{ o.description }}</div>
+                      }
+                    </mat-checkbox>
+                  }
+                </div>
               }
               @default {
-                <mat-form-field>
+                <mat-form-field subscriptSizing="dynamic">
                   <mat-label>{{ f.title }}</mat-label>
                   <textarea
                     matInput
@@ -139,8 +149,21 @@ interface Field {
     .fields {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 16px;
       padding-top: 16px;
+    }
+    .choice,
+    mat-radio-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .question {
+      font: var(--mat-sys-title-small);
+    }
+    .hint {
+      color: var(--mat-sys-on-surface-variant);
+      font: var(--mat-sys-body-small);
     }
   `,
 })
@@ -181,6 +204,17 @@ export class AskCard {
     this.values.update((v) => ({ ...v, [key]: value }));
   }
 
+  protected picked(key: string, value: string) {
+    const v = this.values()[key];
+    return Array.isArray(v) && v.includes(value);
+  }
+
+  protected toggle(key: string, value: string, on: boolean) {
+    const v = this.values()[key];
+    const list = (Array.isArray(v) ? v : []).filter((x) => x !== value);
+    this.set(key, on ? [...list, value] : list);
+  }
+
   protected submit() {
     const a = this.ask();
     if (a.kind !== 'form') return;
@@ -205,7 +239,11 @@ function toField(key: string, p: acp.ElicitationPropertySchema, required: boolea
     options: [],
   };
   const titled = (list: unknown) =>
-    ((list as acp.EnumOption[] | undefined) ?? []).map((o) => ({ value: o.const, title: o.title }));
+    ((list as acp.EnumOption[] | undefined) ?? []).map((o) => ({
+      value: o.const,
+      title: o.title,
+      description: o.description ?? undefined,
+    }));
   const plain = (list: unknown) =>
     ((list as string[] | undefined) ?? []).map((v) => ({ value: v, title: v }));
   switch (p.type) {
