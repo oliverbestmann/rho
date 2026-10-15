@@ -135,6 +135,26 @@ export class Session {
     (this.sessions.value() ?? []).filter((s, i) => i < 5 || s.sessionId === this.id()),
   );
 
+  /**
+   * The entries in chunks of `CHUNK`, keyed per session so the switcher does
+   * not reuse a rendered chunk. Only the chunks with the last `CHUNK` entries
+   * render at once, the older ones when scrolled to: `@defer` keeps them once shown.
+   */
+  protected readonly chunks = computed(() => {
+    const entries = this.opened()?.state.entries() ?? [];
+    const id = this.id();
+    const chunks = [];
+    for (let start = 0; start < entries.length; start += CHUNK) {
+      const end = start + CHUNK;
+      chunks.push({
+        key: `${id}:${start}`,
+        entries: entries.slice(start, end),
+        eager: end > entries.length - CHUNK,
+      });
+    }
+    return chunks;
+  });
+
   protected readonly asks = computed(() =>
     this.acp.asks().filter((a) => a.sessionId === this.id()),
   );
@@ -282,6 +302,9 @@ export class Session {
     this.acp.agent()?.notify(acp.methods.agent.session.cancel, { sessionId: this.id() });
   }
 }
+
+/** Entries per chunk of the chat, see `Session.chunks`. */
+const CHUNK = 20;
 
 function draftKey(sessionId: string) {
   return `rho.draft.${sessionId}`;

@@ -144,6 +144,11 @@ main {
   color: var(--mat-sys-error);
 }
 
+// Stands in for a chunk of older entries until it is scrolled to.
+.chunk-placeholder {
+  height: 500px;
+}
+
 .loading {
   align-self: center;
   margin: 48px 0;

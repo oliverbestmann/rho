@@ -49,53 +49,59 @@
       <!-- Hidden until loaded, so the replayed history does not fly by. -->
       @if (opened()?.loading()) {
         <mat-spinner class="loading" diameter="40" aria-label="Loading" />
-      } @else if (opened()?.state; as state) {
-        @for (entry of state.entries(); track $index) {
-          @switch (entry.kind) {
-            @case ('user') {
-              <div class="user markdown" [innerHTML]="entry.text() | markdown"></div>
+      } @else {
+        @for (chunk of chunks(); track chunk.key) {
+          @defer (on viewport; when chunk.eager) {
+            @for (entry of chunk.entries; track $index) {
+              @switch (entry.kind) {
+                @case ('user') {
+                  <div class="user markdown" [innerHTML]="entry.text() | markdown"></div>
+                }
+                @case ('agent') {
+                  <div class="agent markdown" [innerHTML]="entry.text() | markdown"></div>
+                }
+                @case ('thought') {
+                  <mat-expansion-panel class="tool thought" hideToggle expanded>
+                    <mat-expansion-panel-header>
+                      <mat-panel-title>
+                        <mat-icon class="status">psychology</mat-icon>
+                        <span class="tool-title">Thinking</span>
+                      </mat-panel-title>
+                    </mat-expansion-panel-header>
+                    <div class="thought-scroll">
+                      <div class="markdown" [innerHTML]="entry.text() | markdown"></div>
+                    </div>
+                  </mat-expansion-panel>
+                }
+                @case ('tool') {
+                  @let call = entry.call();
+                  <mat-expansion-panel
+                    class="tool"
+                    hideToggle
+                    [disabled]="!hasBody(call)"
+                    [class.failed]="call.status === 'failed'"
+                  >
+                    <mat-expansion-panel-header>
+                      <mat-panel-title>
+                        @if (call.status === 'in_progress' || call.status === 'pending') {
+                          <mat-spinner class="status" diameter="20" />
+                        } @else if (call.status === 'failed') {
+                          <mat-icon class="status">error</mat-icon>
+                        } @else {
+                          <mat-icon class="status">{{ icon(call) }}</mat-icon>
+                        }
+                        <span class="tool-title">{{ call.title }}</span>
+                      </mat-panel-title>
+                    </mat-expansion-panel-header>
+                    <ng-template matExpansionPanelContent>
+                      <div class="markdown" [innerHTML]="call | toolBody | markdown"></div>
+                    </ng-template>
+                  </mat-expansion-panel>
+                }
+              }
             }
-            @case ('agent') {
-              <div class="agent markdown" [innerHTML]="entry.text() | markdown"></div>
-            }
-            @case ('thought') {
-              <mat-expansion-panel class="tool thought" hideToggle expanded>
-                <mat-expansion-panel-header>
-                  <mat-panel-title>
-                    <mat-icon class="status">psychology</mat-icon>
-                    <span class="tool-title">Thinking</span>
-                  </mat-panel-title>
-                </mat-expansion-panel-header>
-                <div class="thought-scroll">
-                  <div class="markdown" [innerHTML]="entry.text() | markdown"></div>
-                </div>
-              </mat-expansion-panel>
-            }
-            @case ('tool') {
-              @let call = entry.call();
-              <mat-expansion-panel
-                class="tool"
-                hideToggle
-                [disabled]="!hasBody(call)"
-                [class.failed]="call.status === 'failed'"
-              >
-                <mat-expansion-panel-header>
-                  <mat-panel-title>
-                    @if (call.status === 'in_progress' || call.status === 'pending') {
-                      <mat-spinner class="status" diameter="20" />
-                    } @else if (call.status === 'failed') {
-                      <mat-icon class="status">error</mat-icon>
-                    } @else {
-                      <mat-icon class="status">{{ icon(call) }}</mat-icon>
-                    }
-                    <span class="tool-title">{{ call.title }}</span>
-                  </mat-panel-title>
-                </mat-expansion-panel-header>
-                <ng-template matExpansionPanelContent>
-                  <div class="markdown" [innerHTML]="call | toolBody | markdown"></div>
-                </ng-template>
-              </mat-expansion-panel>
-            }
+          } @placeholder {
+            <div class="chunk-placeholder"></div>
           }
         }
       }
