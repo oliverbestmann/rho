@@ -384,7 +384,11 @@ impl Extension for Confirmer {
 
 fn confirm_agent(own_card: bool) -> (Arc<Scripted>, Agent) {
     let provider = Scripted::new(vec![
-        vec![tool_use("t1", "Bash", json!({"command": "echo hi"}))],
+        vec![tool_use(
+            "t1",
+            "Bash",
+            json!({"command": "echo hi", "description": "Say hi"}),
+        )],
         vec![text("ok")],
     ]);
     let mut agent = Agent::new(

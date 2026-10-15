@@ -285,7 +285,7 @@ async fn a_question_waits_for_the_next_connection() {
         vec![Event::Block(Content::ToolUse {
             id: ToolCallId::new("t1"),
             name: ToolName::new("Bash"),
-            input: serde_json::json!({"command": "echo hi"}),
+            input: serde_json::json!({"command": "echo hi", "description": "Say hi"}),
         })],
         answer("ok"),
     ]);

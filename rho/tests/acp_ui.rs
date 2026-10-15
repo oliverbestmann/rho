@@ -227,7 +227,7 @@ fn bash_run() -> Vec<Vec<Event>> {
             Event::Block(Content::ToolUse {
                 id: ToolCallId::new("t1"),
                 name: ToolName::new("Bash"),
-                input: json!({"command": "echo hi"}),
+                input: json!({"command": "echo hi", "description": "Say hi"}),
             }),
             Event::Done(StopReason::ToolUse),
         ],
@@ -290,7 +290,7 @@ async fn bash_is_a_terminal_for_clients_that_ask_for_it() {
         .filter(|v| v["toolCallId"] == "t1")
         .collect();
     assert_eq!(wire.len(), 2, "{wire:?}");
-    assert_eq!(wire[0]["title"], "echo hi");
+    assert_eq!(wire[0]["title"], "Say hi");
     assert_eq!(wire[0]["content"][0]["type"], "terminal");
     assert_eq!(wire[0]["_meta"]["terminal_info"]["terminal_id"], "t1");
     assert_eq!(wire[1]["_meta"]["terminal_output"]["data"], "hi\n");

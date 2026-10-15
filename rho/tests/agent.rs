@@ -102,7 +102,10 @@ async fn agent_runs_tools_and_feeds_results_back() {
         msgs[2].content,
         vec![Content::ToolResult {
             tool_use_id: ToolCallId::new("t1"),
-            content: "from-tool\n".into(),
+            // The call has no `description`: it runs, with a reminder.
+            content: "from-tool\n\n\n<system-reminder>\nThis call left out the required argument(s) `description`. \
+                Pass every required argument in every call.\n</system-reminder>"
+                .into(),
             is_error: false,
             images: vec![],
         }]

@@ -1095,10 +1095,14 @@ impl Agent {
             }
             decision = ext.tool_call(ctx, call).await;
         }
+        let mut missing = vec![];
         let result = match decision {
             Decision::Block(reason) => Err(anyhow::anyhow!(reason)),
             Decision::Allow => match tool {
-                Some(tool) => tool.run(call.input.clone(), ctx).await,
+                Some(tool) => {
+                    missing = missing_required(&tool.spec().input_schema, &call.input);
+                    tool.run(call.input.clone(), ctx).await
+                }
                 None => Err(anyhow::anyhow!("unknown tool {}", call.name)),
             },
         };
@@ -1113,6 +1117,14 @@ impl Agent {
         for ext in &self.extensions {
             ext.tool_result(ctx, call, &mut out).await;
         }
+        // Tools run without some required arguments (e.g. `description`) for
+        // older sessions; remind the model instead of failing the call.
+        if !out.is_error && !missing.is_empty() {
+            out.output += &format!(
+                "\n\n<system-reminder>\nThis call left out the required argument(s) {}. Pass every required argument in every call.\n</system-reminder>",
+                missing.join(", ")
+            );
+        }
         // An image the API rejects would fail every later request.
         if let Some(e) = out.images.iter().find_map(|i| i.check().err()) {
             out = ToolOutput {
@@ -1123,6 +1135,19 @@ impl Agent {
         }
         out
     }
+}
+
+/// The schema's `required` keys missing from `input`, as `` `key` ``.
+fn missing_required(schema: &serde_json::Value, input: &serde_json::Value) -> Vec<String> {
+    let Some(required) = schema["required"].as_array() else {
+        return vec![];
+    };
+    required
+        .iter()
+        .filter_map(|k| k.as_str())
+        .filter(|k| input.get(k).is_none_or(|v| v.is_null()))
+        .map(|k| format!("`{k}`"))
+        .collect()
 }
 
 /// Ends a started tool call in the frontend if the run is cancelled (its
