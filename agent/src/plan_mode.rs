@@ -20,7 +20,7 @@ pub const PLAN: ProfileId = ProfileId::from_static("plan");
 const ENTER: ToolName = ToolName::from_static("EnterPlanMode");
 const EXIT: ToolName = ToolName::from_static("ExitPlanMode");
 
-const INSTRUCTIONS: &str = "You are in plan mode. Explore the code (Read, Bash, Grep, ...) and ask the user questions, \
+const INSTRUCTIONS: &str = "You are in plan mode. Explore the code (Read, Bash, Glob, Grep, ...) and ask the user questions, \
 but do not change anything: no file edits, no commits, no commands with side effects. \
 Work out a concrete implementation plan. When it is ready, call ExitPlanMode with the plan; \
 the user has to approve it before you can make changes.";

@@ -111,12 +111,22 @@ pub fn input_schema<T: JsonSchema>() -> Value {
 #[derive(Deserialize, JsonSchema)]
 struct ReadInput {
     path: String,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct WriteInput {
     path: String,
     content: String,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -126,6 +136,11 @@ struct BashInput {
     cwd: Option<String>,
     /// seconds, default 120
     timeout: Option<f64>,
+    /// what the command does, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 pub struct Read;
@@ -409,8 +424,9 @@ mod tests {
                     "command": {"type": "string"},
                     "cwd": {"type": ["string", "null"], "description": "working directory, absolute or relative to the session's; default the session's"},
                     "timeout": {"type": ["number", "null"], "format": "double", "description": "seconds, default 120"},
+                    "description": {"type": "string", "description": "what the command does, at most 10 words; shown to the user as its title"},
                 },
-                "required": ["command"],
+                "required": ["command", "description"],
             })
         );
     }

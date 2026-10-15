@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
+    ContentBlock, ContentChunk, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Client, ConnectionTo, Responder};
 use futures::StreamExt;
@@ -59,6 +60,19 @@ fn chunks(updates: &Updates) -> Vec<String> {
                 content: ContentBlock::Text(t),
                 ..
             }) => Some(format!("agent: {}", t.text)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `_meta.rho.running` values of the `session_info_update`s.
+fn running(updates: &Updates) -> Vec<bool> {
+    updates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|u| match u {
+            SessionUpdate::SessionInfoUpdate(i) => i.meta.as_ref()?["rho"]["running"].as_bool(),
             _ => None,
         })
         .collect()
@@ -226,8 +240,14 @@ async fn a_turn_outlives_its_connection() {
                 cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
                     .block_task()
                     .await?;
+                let list = cx
+                    .send_request(ListSessionsRequest::new().cwd(cwd.clone()))
+                    .block_task()
+                    .await?;
+                let meta = list.sessions[0].meta.as_ref().expect("running meta");
+                assert_eq!(meta["rho"]["running"], true);
                 go.notify_one();
-                while !chunks(&seen).contains(&"agent: Late.".to_string()) {
+                while running(&seen) != [true, false] {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Ok(())
@@ -240,6 +260,8 @@ async fn a_turn_outlives_its_connection() {
 
     // The replay came from the store: the prompt was saved before the request.
     assert_eq!(chunks(&b_updates), ["user: hi", "agent: Late."]);
+    // Busy when it attached, idle when the turn ended.
+    assert_eq!(running(&b_updates), [true, false]);
 }
 
 /// Asks before every tool call.
@@ -377,5 +399,98 @@ async fn a_question_waits_for_the_next_connection() {
     assert!(
         matches!(result, Content::ToolResult { is_error: false, content, .. } if content == "hi\n"),
         "{result:?}"
+    );
+}
+
+/// The current value of a select config option.
+fn current(options: &[SessionConfigOption], id: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|o| *o.id.0 == *id)
+        .and_then(|o| match &o.kind {
+            SessionConfigKind::Select(s) => Some(s.current_value.0.to_string()),
+            _ => None,
+        })
+}
+
+#[tokio::test]
+async fn a_config_change_reaches_the_other_viewers() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let agent = agent(Scripted::new(vec![]), &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+
+    let (sid_tx, sid_rx) = oneshot::channel();
+    let (loaded_tx, loaded_rx) = oneshot::channel::<()>();
+    let a_updates = Updates::default();
+    let a_cwd = cwd.clone();
+    let a = tokio::spawn(client!(a_updates).connect_with(
+        rho::acp::agent_in(agent.clone(), hub.clone()),
+        async move |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let sid = cx
+                .send_request(NewSessionRequest::new(a_cwd))
+                .block_task()
+                .await?
+                .session_id;
+            sid_tx.send(sid.clone()).unwrap();
+            loaded_rx.await.unwrap();
+            let res = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    sid,
+                    "thought_level",
+                    "low",
+                ))
+                .block_task()
+                .await?;
+            Ok(res.config_options)
+        },
+    ));
+
+    let b_updates = Updates::default();
+    let seen = b_updates.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(b_updates).connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone()),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = sid_rx.await.unwrap();
+                cx.send_request(LoadSessionRequest::new(sid, cwd.clone()))
+                    .block_task()
+                    .await?;
+                loaded_tx.send(()).unwrap();
+                let options = a.await.unwrap().unwrap();
+                assert_eq!(current(&options, "thought_level").as_deref(), Some("low"));
+                // B, which did not ask, is told too.
+                loop {
+                    let got = seen.lock().unwrap().iter().any(|u| {
+                        matches!(u, SessionUpdate::ConfigOptionUpdate(c)
+                            if current(&c.config_options, "thought_level").as_deref() == Some("low"))
+                    });
+                    if got {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // A got the options in its response, not again as an update.
+    assert!(
+        !a_updates
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| matches!(u, SessionUpdate::ConfigOptionUpdate(_)))
     );
 }

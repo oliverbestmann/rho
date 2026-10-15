@@ -346,8 +346,9 @@ Ports of the other pi extensions:
   (`before_send`, with a notice on a hit). Write/Edit calls that would put
   `REDACTED` into a file are blocked unless the call sets `allowMasked: true`
   (ADR 0034).
-- `RipgrepFind` adds `Grep` (pi's `grep`): `rg` for file names or contents,
-  sandboxed like `Bash`, 50 lines by default.
+- `RipgrepFind` adds `Glob` (file names, newest first) and `Grep` (contents;
+  only file names unless `outputMode` is `content` or `count`), like Claude
+  Code's. Both run `rg`, sandboxed like `Bash`, 50 lines by default.
 - `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,
   sandboxed, so the module cache and `GOCACHE` must be accessible.
 - `FetchUrl` (pi's `fetch_url`) fetches a URL; HTML becomes markdown via

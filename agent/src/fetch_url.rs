@@ -34,6 +34,11 @@ struct Input {
     /// Return raw response body instead of converting HTML to markdown (default: false)
     #[serde(default)]
     raw: bool,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 #[derive(Default)]

@@ -155,6 +155,8 @@ struct Persist {
     created: bool,
     /// A save failed and the user was told; not repeated.
     failed: bool,
+    /// Edit diffs not saved yet.
+    diffs: Vec<(ToolCallId, Diff)>,
 }
 
 impl Session {
@@ -362,11 +364,16 @@ impl Session {
             features: self.ctx.active_features(),
         };
         let messages = self.history[from..].to_vec();
+        let diffs = std::mem::take(&mut p.diffs);
         let result = async {
             p.store.save_state(state).await?;
             p.store
                 .save_messages(&id, p.epoch, p.base + from as i64, messages)
-                .await
+                .await?;
+            if diffs.is_empty() {
+                return Ok(());
+            }
+            p.store.save_diffs(&id, diffs).await
         }
         .await;
         result?;
@@ -734,6 +741,7 @@ impl Agent {
                 last_len: 0,
                 created: false,
                 failed: false,
+                diffs: vec![],
             }),
         };
         session.publish_info();
@@ -960,6 +968,9 @@ impl Agent {
                     self.call_tool(session, &mut call).await
                 };
                 tools_called.push(call.name);
+                if let (Some(diff), Some(p)) = (out.diff, &mut session.persist) {
+                    p.diffs.push((call.id.clone(), diff));
+                }
                 results.push(Content::ToolResult {
                     tool_use_id: call.id,
                     content: out.output,

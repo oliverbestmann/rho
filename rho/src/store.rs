@@ -10,6 +10,7 @@
 //!
 //! Extensions get read access through `Context::store`; writes are crate-only.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,9 +20,9 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
-use crate::extension::ProfileId;
+use crate::extension::{Diff, ProfileId};
 use crate::feature::FeatureId;
-use crate::provider::{Content, Message, ModelSpec, Role, Thinking, Usage};
+use crate::provider::{Content, Message, ModelSpec, Role, Thinking, ToolCallId, Usage};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
 const MIGRATIONS: &[&str] = &[
@@ -83,7 +84,24 @@ ALTER TABLE sessions ADD COLUMN profile TEXT NOT NULL DEFAULT 'write' CHECK (pro
 ALTER TABLE sessions ADD COLUMN features TEXT NOT NULL DEFAULT '[]'
     CHECK (json_valid(features) AND json_type(features) = 'array');
 "#,
+    r#"
+-- Edit diffs, for the replay; kept for `DIFF_DAYS`.
+CREATE TABLE diffs (
+    session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+    tool_use_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    old TEXT NOT NULL,
+    new TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, tool_use_id)
+) STRICT;
+
+CREATE INDEX diffs_by_age ON diffs (created_at);
+"#,
 ];
+
+/// Edit diffs older than this are deleted; the edit then shows its output only.
+const DIFF_DAYS: i64 = 7;
 
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
     output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
@@ -529,7 +547,56 @@ impl Store {
         .await
     }
 
-    /// Replaces `phrase` with `MASK` in all messages and titles of all
+    /// Saves the diffs of Edit calls, by tool call, and deletes diffs older
+    /// than `DIFF_DAYS`.
+    pub(crate) async fn save_diffs(
+        &self,
+        id: &SessionId,
+        diffs: Vec<(ToolCallId, Diff)>,
+    ) -> Result<()> {
+        let id = id.clone();
+        self.call(move |c| {
+            let now = now_ms();
+            let tx = c.transaction()?;
+            tx.execute(
+                "DELETE FROM diffs WHERE created_at < ?1",
+                [now - DIFF_DAYS * 24 * 3600 * 1000],
+            )?;
+            let mut insert = tx.prepare(
+                "INSERT OR REPLACE INTO diffs (session_id, tool_use_id, path, old, new, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (call, d) in &diffs {
+                insert.execute(params![id, call, path_str(&d.path)?, d.old, d.new, now])?;
+            }
+            drop(insert);
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The session's saved Edit diffs, by tool call.
+    pub async fn diffs(&self, id: &SessionId) -> Result<HashMap<ToolCallId, Diff>> {
+        let id = id.clone();
+        self.call(move |c| {
+            let mut stmt =
+                c.prepare("SELECT tool_use_id, path, old, new FROM diffs WHERE session_id = ?1")?;
+            let rows = stmt.query_map([&id], |r| {
+                let path: String = r.get(1)?;
+                let diff = Diff {
+                    path: path.into(),
+                    old: r.get(2)?,
+                    new: r.get(3)?,
+                };
+                Ok((r.get(0)?, diff))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+    }
+
+    /// Replaces `phrase` with `MASK` in all messages, diffs and titles of all
     /// sessions, see `redact_content`. Deleted bytes are zeroed and the WAL
     /// is checkpointed, so no copy stays in the files. Returns the number of
     /// changed messages and sessions.
@@ -567,6 +634,16 @@ impl Store {
             let mut stmt = tx.prepare(
                 "UPDATE sessions SET title = replace(title, ?1, ?2) WHERE instr(title, ?1) > 0
                  RETURNING id",
+            )?;
+            for id in stmt.query_map([phrase.as_str(), MASK], |r| r.get(0))? {
+                sessions.insert(id?);
+            }
+            drop(stmt);
+            let mut stmt = tx.prepare(
+                "UPDATE diffs SET path = replace(path, ?1, ?2), old = replace(old, ?1, ?2),
+                     new = replace(new, ?1, ?2)
+                 WHERE instr(path, ?1) > 0 OR instr(old, ?1) > 0 OR instr(new, ?1) > 0
+                 RETURNING session_id",
             )?;
             for id in stmt.query_map([phrase.as_str(), MASK], |r| r.get(0))? {
                 sessions.insert(id?);
@@ -862,6 +939,38 @@ mod tests {
         // Still loads: seq is contiguous.
         assert_eq!(store.history(&id).await.unwrap().len(), 2);
         assert_eq!(store.redact("s3cr\"et").await.unwrap(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn diffs_are_kept_for_a_while_and_redacted() {
+        let store = Store::memory().unwrap();
+        let id = SessionId::new("s");
+        store.save_state(state("s", "/w")).await.unwrap();
+        let diff = |old: &str| Diff {
+            path: "/w/f".into(),
+            old: old.into(),
+            new: "new".into(),
+        };
+        let save =
+            |call: &str, old: &str| store.save_diffs(&id, vec![(ToolCallId::new(call), diff(old))]);
+        save("old", "x").await.unwrap();
+        store
+            .call(|c| Ok(c.execute("UPDATE diffs SET created_at = 0", [])?))
+            .await
+            .unwrap();
+        save("t", "a s3cret").await.unwrap();
+        // Rewriting messages leaves diffs alone.
+        store
+            .save_messages(&id, 0, 0, vec![msg(Role::User, "a")])
+            .await
+            .unwrap();
+        let diffs = store.diffs(&id).await.unwrap();
+        assert_eq!(diffs.len(), 1, "the old one is deleted");
+        assert_eq!(diffs[&ToolCallId::new("t")], diff("a s3cret"));
+
+        assert_eq!(store.redact("s3cret").await.unwrap(), (0, 1));
+        let diffs = store.diffs(&id).await.unwrap();
+        assert_eq!(diffs[&ToolCallId::new("t")], diff(&format!("a {MASK}")));
     }
 
     #[tokio::test]

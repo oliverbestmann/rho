@@ -83,6 +83,11 @@ struct StartInput {
     /// Timeout in seconds (max 3600), the task is killed after this
     #[schemars(range(min = 1, max = 3600))]
     timeout: u64,
+    /// what the command does, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 struct Start(Arc<Tasks>);

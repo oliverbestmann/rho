@@ -9,7 +9,7 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, ImageContent, InitializeRequest, ListSessionsRequest,
     LoadSessionRequest, NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate,
-    TextContent,
+    TextContent, ToolCallContent,
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use rho::agent::Agent;
@@ -301,37 +301,7 @@ async fn acp_load_replays_all_epochs() {
         .unwrap();
     drop(session);
 
-    let updates = Updates::default();
-    let record = updates.clone();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        Client
-            .builder()
-            .on_receive_notification(
-                async move |n: SessionNotification, _cx| {
-                    record.lock().unwrap().push(n.update);
-                    Ok(())
-                },
-                agent_client_protocol::on_receive_notification!(),
-            )
-            .connect_with(
-                rho::acp::agent(agent.clone()),
-                async |cx: ConnectionTo<_>| {
-                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                        .block_task()
-                        .await?;
-                    cx.send_request(LoadSessionRequest::new("s", cwd.clone()))
-                        .block_task()
-                        .await?;
-                    Ok(())
-                },
-            ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let updates = updates.lock().unwrap();
+    let updates = load(agent, &cwd).await;
     let shown: Vec<String> = updates
         .iter()
         .filter_map(|u| match u {
@@ -345,12 +315,10 @@ async fn acp_load_replays_all_epochs() {
             }) => Some(format!("agent: {}", t.text)),
             SessionUpdate::ToolCall(t) => {
                 let text = match t.content.first() {
-                    Some(agent_client_protocol::schema::v1::ToolCallContent::Content(c)) => {
-                        match &c.content {
-                            ContentBlock::Text(t) => t.text.clone(),
-                            _ => String::new(),
-                        }
-                    }
+                    Some(ToolCallContent::Content(c)) => match &c.content {
+                        ContentBlock::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    },
                     _ => String::new(),
                 };
                 Some(format!("tool: {} {text}", t.title))
@@ -370,6 +338,82 @@ async fn acp_load_replays_all_epochs() {
             "agent: After.",
         ]
     );
+}
+
+#[tokio::test]
+async fn acp_load_replays_edit_diffs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    std::fs::write(cwd.join("f.txt"), "a\n").unwrap();
+    let edit = vec![
+        Event::Block(Content::ToolUse {
+            id: ToolCallId::new("t1"),
+            name: ToolName::new("Edit"),
+            input: json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "b"}]}),
+        }),
+        Event::Done(StopReason::ToolUse),
+    ];
+    let responses = vec![edit, vec![text("Done."), Event::Done(StopReason::EndTurn)]];
+    let agent = Arc::new(agent(Scripted::new(responses), &db));
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("edit")])
+        .await
+        .unwrap();
+    drop(session);
+
+    let updates = load(agent, &cwd).await;
+    let diff = updates.iter().find_map(|u| match u {
+        SessionUpdate::ToolCallUpdate(t) => {
+            t.fields.content.as_ref()?.iter().find_map(|c| match c {
+                ToolCallContent::Diff(d) => Some(d.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    });
+    let diff = diff.expect("replayed diff");
+    assert_eq!(diff.path, cwd.join("f.txt"));
+    assert_eq!(diff.old_text.as_deref(), Some("a\n"));
+    assert_eq!(diff.new_text, "b\n");
+}
+
+/// Loads session "s" over ACP and returns the replayed updates.
+async fn load(agent: Arc<Agent>, cwd: &Path) -> Vec<SessionUpdate> {
+    let updates = Updates::default();
+    let record = updates.clone();
+    let cwd = cwd.to_path_buf();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    record.lock().unwrap().push(n.update);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(
+                rho::acp::agent(agent.clone()),
+                async |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    cx.send_request(LoadSessionRequest::new("s", cwd))
+                        .block_task()
+                        .await?;
+                    Ok(())
+                },
+            ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    std::mem::take(&mut *updates.lock().unwrap())
 }
 
 type Updates = Arc<Mutex<Vec<SessionUpdate>>>;

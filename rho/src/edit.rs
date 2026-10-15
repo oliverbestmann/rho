@@ -17,6 +17,11 @@ struct EditInput {
     path: String,
     /// One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.
     edits: Vec<Replace>,
+    /// what this call is for, at most 10 words; shown to the user as its title
+    // Required for the model; calls without it (older sessions) still run.
+    #[schemars(required, with = "String")]
+    #[expect(dead_code, reason = "only for the schema, read by the frontend")]
+    description: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
