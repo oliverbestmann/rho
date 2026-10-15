@@ -30,7 +30,9 @@ is read once at startup.
   quiet fallback).
 - **Start model:** an explicit `-m` / `RHO_MODEL` wins, and a session whose
   path forbids it fails to start. Otherwise the path `default`, then the
-  built-in default. The same for `RHO_COMPACT_MODEL` and `compact`.
+  built-in default. The same for `RHO_COMPACT_MODEL` and `compact`, except
+  that there is no built-in compaction model: without one the session model
+  compacts.
 - **Startup check:** for every rule path, the non-explicit default and
   compaction model must be allowed. The policy only changes at rule paths,
   so this covers every cwd.
@@ -41,7 +43,7 @@ is read once at startup.
   remembers its default per config id, so a pick in one area does not
   override the path default of another. A remembered model that is
   forbidden is not listed, so Zed skips it.
-- `GitGate` summarizes with the first listed (so allowed) `claude-haiku-5-5`
+- `GitGate` summarizes with the first listed (so allowed) Claude Haiku 5.5
   or `gpt-6-luna` of any provider, else with the session's model. Before,
   it asked `openai/gpt-6-luna`, a provider rho does not register.
 
@@ -53,6 +55,5 @@ is read once at startup.
   remembered for it.
 - With an explicit `-m` the daemon refuses sessions in paths that forbid
   that model; drop `-m` and use `default` rules instead.
-- `History` answers (`summarizeOver`) and compaction fail in paths that
-  forbid their models unless `compact` is set; `History` then shows the
-  plain results.
+- `History` answers (`summarizeOver`) fail in paths that forbid their model;
+  `History` then shows the plain results.

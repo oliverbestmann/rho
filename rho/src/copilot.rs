@@ -42,9 +42,10 @@ const HEADERS: [(&str, &str); 4] = [
     ("copilot-integration-id", "vscode-chat"),
 ];
 
-/// Models on Copilot (pi's list): id, name, context window, USD per million
-/// tokens (input, output, cache read, cache write) and the price for prompts
-/// above a token count. Copilot ids use dots.
+/// Models on Copilot (pi's list, prices from GitHub's "Models and pricing"
+/// page): id, name, context window, USD per million tokens (input, output,
+/// cache read, cache write) and the price for prompts above a token count.
+/// Copilot ids use dots.
 type ModelRow = (
     &'static str,
     &'static str,
@@ -166,13 +167,6 @@ const MODELS: &[ModelRow] = &[
         None,
     ),
     (
-        "claude-opus-4.7",
-        "Claude Opus 4.7",
-        1_000_000,
-        [5.0, 25.0, 0.5, 6.25],
-        None,
-    ),
-    (
         "claude-sonnet-5.5",
         "Claude Sonnet 5.5",
         1_000_000,
@@ -194,8 +188,22 @@ const MODELS: &[ModelRow] = &[
         None,
     ),
     (
+        "claude-sonnet-4",
+        "Claude Sonnet 4",
+        200_000,
+        [3.0, 15.0, 0.3, 3.75],
+        None,
+    ),
+    (
+        "claude-haiku-5.5",
+        "Claude Haiku 5.5",
+        1_000_000,
+        [0.1, 0.5, 0.01, 0.125],
+        Some((100_000, [0.5, 2.5, 0.05, 0.625])),
+    ),
+    (
         "claude-haiku-4.5",
-        "Claude Haiku 4.5 (latest)",
+        "Claude Haiku 4.5",
         200_000,
         [1.0, 5.0, 0.1, 1.25],
         None,

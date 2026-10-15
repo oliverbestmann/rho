@@ -18,7 +18,8 @@ const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
 /// Model ids, tried in order at every provider that lists them (and the
 /// session's `models.json` rules allow); a failed request tries the next.
-const SUMMARY_MODELS: [&str; 2] = ["claude-haiku-5-5", "gpt-6-luna"];
+/// Claude Haiku 5.5 is `claude-haiku-5.5` on Copilot.
+const SUMMARY_MODELS: [&str; 3] = ["claude-haiku-5-5", "claude-haiku-5.5", "gpt-6-luna"];
 const SUMMARY_PROMPT: &str = "Say in about 10 to 15 words what this shell command does to the git repository. Name only what matters: what is committed, pushed or tagged, and where. No details on staging or output, no quotes, no markdown. Examples: \"Commits all changes locally.\" \"Pushes main to origin.\" \"Tags HEAD as v1.2 and pushes the tag.\"";
 
 /// The first summary a model in `SUMMARY_MODELS`, or else the session's

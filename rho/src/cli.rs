@@ -61,7 +61,8 @@ pub struct Options {
     /// Unless `-m` or `RHO_MODEL` is set.
     pub model: ModelSpec,
     /// For `/compact` with an expired cache, unless `RHO_COMPACT_MODEL` is set.
-    pub compact_model: ModelSpec,
+    /// Default: none, the session model compacts.
+    pub compact_model: Option<ModelSpec>,
     /// Database for ACP sessions, by cwd; `None` does not save them.
     /// Default: `store::default_path()` (`RHO_SESSIONS_DB` or
     /// `~/.config/rho/sessions.db`) for every cwd. One-shot runs are not saved.
@@ -86,7 +87,7 @@ impl Default for Options {
             tools: crate::tools::builtin(),
             extensions: vec![],
             model: ModelSpec::from_static("anthropic", "claude-sonnet-5-5"),
-            compact_model: ModelSpec::from_static("anthropic", "claude-haiku-5-5"),
+            compact_model: None,
             sessions_db: Some(Arc::new(|_| crate::store::default_path())),
         }
     }
@@ -208,15 +209,15 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     let compact = match std::env::var("RHO_COMPACT_MODEL") {
         Ok(m) => {
             agent.compact_pinned = true;
-            m.parse().context("RHO_COMPACT_MODEL")?
+            Some(m.parse().context("RHO_COMPACT_MODEL")?)
         }
         Err(_) => options.compact_model,
     };
     agent.models.check(
         (!agent.model_pinned).then_some(&agent.model),
-        (!agent.compact_pinned).then_some(&compact),
+        compact.as_ref().filter(|_| !agent.compact_pinned),
     )?;
-    agent.compact_model = Some(compact);
+    agent.compact_model = compact;
     agent.extensions = options.extensions;
     Ok(agent)
 }

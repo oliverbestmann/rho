@@ -140,9 +140,10 @@ To reuse pi's addendum:
 replaces the history with a pi-style structured summary (`rho/src/compact.rs`).
 If the last request was less than 4.5 minutes ago, the prompt cache is
 assumed warm: the session model summarizes with the exact same prefix, so the
-history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` (default
-`anthropic/claude-haiku-5-5`) gets the conversation as text, without tool
-outputs and with tool arguments cut to 2000 chars. The notice shows which path
+history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` or the path's
+`compact` model (`models.json`) gets the conversation as text, without tool
+outputs and with tool arguments cut to 2000 chars; without one, the session
+model does. The notice shows which path
 ran and its token usage.
 
 ## Models by path
@@ -155,8 +156,8 @@ model it starts with and the compaction model, by the session's cwd
 {
   "rules": [
     { "path": "~/github", "allow": ["github-copilot/*"],
-      "default": "github-copilot/claude-sonnet-5-5",
-      "compact": "github-copilot/claude-haiku-5-5" },
+      "default": "github-copilot/claude-sonnet-5.5",
+      "compact": "github-copilot/claude-haiku-5.5" },
     { "path": "~/github/sandbox-repo", "allow": ["*"] }
   ]
 }
@@ -373,7 +374,7 @@ Ports of the other pi extensions:
 
 - `GitGate` asks the user before `Bash` or `BackgroundTask` runs `git commit`,
   `git push` or `git tag`, with a summary of the command by the first allowed
-  `claude-haiku-5-5` or `gpt-6-luna` from any provider (else the session's
+  Claude Haiku 5.5 or `gpt-6-luna` from any provider (else the session's
   model); without a UI (CLI) they are blocked.
 - `Secrets` masks secrets with the gitleaks rules (`agent/src/gitleaks.toml`,
   copied from gitleaks' `config/gitleaks.toml`) as `REDACTED`: prompts, the

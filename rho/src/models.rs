@@ -4,8 +4,8 @@
 //! ```json
 //! { "rules": [
 //!     { "path": "~/github", "allow": ["github-copilot/*"],
-//!       "default": "github-copilot/claude-sonnet-5-5",
-//!       "compact": "github-copilot/claude-haiku-5-5" },
+//!       "default": "github-copilot/claude-sonnet-5.5",
+//!       "compact": "github-copilot/claude-haiku-5.5" },
 //!     { "path": "~/github/sandbox-repo", "allow": ["*"] }
 //! ] }
 //! ```
