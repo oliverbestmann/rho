@@ -72,6 +72,7 @@ pub fn build(
         },
     ));
     let mut rules: Vec<&str> = tools.iter().flat_map(|t| t.rules()).copied().collect();
+    rules.push("Tool calls in one response run one after another, in the order given. Batch independent calls; calls that depend on each other may share a batch.");
     rules.push("Be concise in your responses");
     rules.push("Show file paths clearly when working with files");
     let rules: Vec<String> = rules.iter().map(|r| format!("- {r}")).collect();
@@ -180,6 +181,10 @@ mod tests {
         assert!(p.starts_with(PREAMBLE), "{p}");
         assert!(p.contains("<tools>\n- Read: Read a text file."), "{p}");
         assert!(p.contains("- Use Read to examine files"), "{p}");
+        assert!(
+            p.contains("- Tool calls in one response run one after another"),
+            "{p}"
+        );
         assert!(p.contains("<addendum>\n# Mine\nuse rg\n</addendum>"), "{p}");
         assert!(p.contains("global rules"), "{p}");
         assert!(
