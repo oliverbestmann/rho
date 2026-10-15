@@ -130,7 +130,14 @@ pub async fn run(options: Options) -> Result<()> {
         Some("acp") => {
             if args.iter().any(|a| a == "--daemon") {
                 let dir = crate::prompt::config_dir().join(crate::acp_ws::DAEMON_DIR);
-                return crate::acp_ws::connect_stdio(&dir, &daemon_args).await;
+                let result = crate::acp_ws::connect_stdio(&dir, &daemon_args).await;
+                // Tokio's stdin reader blocks in a thread that cannot be
+                // cancelled, so the runtime would wait for the editor forever.
+                if let Err(e) = result {
+                    eprintln!("Error: {e:?}");
+                    std::process::exit(1);
+                }
+                std::process::exit(0);
             }
             let agent = Arc::new(acp_agent(options, model, thinking)?);
             use agent_client_protocol::ConnectTo;

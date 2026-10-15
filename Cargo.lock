@@ -2771,6 +2771,7 @@ dependencies = [
  "sqlite-vec",
  "tempfile",
  "tokio",
+ "tungstenite",
 ]
 
 [[package]]

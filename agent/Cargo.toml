@@ -30,3 +30,4 @@ gitleaks-rs = { git = "https://github.com/TeamCadenceAI/gitleaks-rs", rev = "b05
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 futures = "0.3.34"
 tempfile = "3.27.0"
+tungstenite = "0.29"
