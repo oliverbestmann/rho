@@ -26,7 +26,9 @@ as its title". That is `Read`, `Write`, `Edit`, `Bash`, `BackgroundTask`,
 - `title()` in `rho/src/acp/update.rs` uses the first line of the description, at
   most 160 characters, for tools in `DESCRIBED`. Other tools keep the
   input-key title. In MCP tools a `description` can be content, not a
-  title.
+  title. (Since 2026-10-15 MCP tools without their own `description`
+  input get rho's, required; `Mcp` strips it before the call goes to the
+  server and the tool is `titled`.)
 
 ## Consequences
 

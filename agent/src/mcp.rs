@@ -7,7 +7,8 @@
 //! ```
 //!
 //! `${VAR}` in header values comes from the environment. Each remote tool
-//! becomes `mcp__<server>__<tool>`. Servers are connected on the first
+//! becomes `mcp__<server>__<tool>`, with a `description` input for its
+//! title unless it has its own (ADR 0044). Servers are connected on the first
 //! session and shared by later ones, so the tool list (and the prompt
 //! cache) stays the same. Problems are shown as notices when the session
 //! starts (held until the client knows it, ADR 0052).
@@ -355,22 +356,28 @@ struct McpTool {
     /// The tool's name on the server.
     remote: ToolName,
     spec: ToolSpec,
+    /// rho added the `description` input; it titles the card and is not
+    /// sent to the server. False when the tool has its own `description`.
+    titled: bool,
 }
 
 impl McpTool {
     fn new(server: &Arc<Server>, tool: &Value) -> Option<Self> {
         let remote = ToolName::new(tool["name"].as_str()?);
+        let mut input_schema = tool
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object"}));
+        let titled = add_description(&mut input_schema);
         Some(Self {
             spec: ToolSpec {
                 name: tool_name(&server.name, &remote),
                 description: tool["description"].as_str().unwrap_or_default().into(),
-                input_schema: tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type": "object"})),
+                input_schema,
             },
             server: server.clone(),
             remote,
+            titled,
         })
     }
 }
@@ -380,9 +387,42 @@ impl Tool for McpTool {
         self.spec.clone()
     }
 
-    async fn run(&self, input: Value, _ctx: &Context) -> Result<ToolOutput> {
+    async fn run(&self, mut input: Value, _ctx: &Context) -> Result<ToolOutput> {
+        if self.titled
+            && let Some(input) = input.as_object_mut()
+        {
+            input.remove("description");
+        }
         Ok(to_output(&self.server.call(&self.remote, input).await?))
     }
+
+    fn titled(&self) -> bool {
+        self.titled
+    }
+}
+
+/// Adds a required `description` input (ADR 0044) unless the schema has
+/// one; returns whether it did.
+fn add_description(schema: &mut Value) -> bool {
+    let Some(schema) = schema.as_object_mut() else {
+        return false;
+    };
+    let properties = schema.entry("properties").or_insert_with(|| json!({}));
+    let Some(properties) = properties.as_object_mut() else {
+        return false;
+    };
+    if properties.contains_key("description") {
+        return false;
+    }
+    properties.insert(
+        "description".into(),
+        json!({"type": "string", "description": "what this call is for, at most 10 words; shown to the user as its title"}),
+    );
+    let required = schema.entry("required").or_insert_with(|| json!([]));
+    if let Some(required) = required.as_array_mut() {
+        required.push("description".into());
+    }
+    true
 }
 
 /// A `tools/call` result: text and text resources as output, valid images
@@ -460,6 +500,19 @@ mod tests {
     }
 
     #[test]
+    fn adds_a_description_input() {
+        let mut schema = json!({"type": "object", "required": ["a"]});
+        assert!(add_description(&mut schema));
+        assert_eq!(schema["required"], json!(["a", "description"]));
+        assert_eq!(schema["properties"]["description"]["type"], "string");
+
+        let mut own = json!({"type": "object", "properties": {"description": {"type": "string"}}});
+        let before = own.clone();
+        assert!(!add_description(&mut own));
+        assert_eq!(own, before);
+    }
+
+    #[test]
     fn reads_sse_bodies() {
         let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n\
                     data: {\"jsonrpc\":\"2.0\",\r\ndata: \"id\":7,\"result\":1}\n\n";
@@ -518,7 +571,7 @@ mod tests {
             }),
             "tools/list" => json!({"tools": [{"name": "fail"}]}),
             "tools/call" => json!({
-                "content": [{"type": "text", "text": msg["params"]["arguments"]["text"]}],
+                "content": [{"type": "text", "text": msg["params"]["arguments"].to_string()}],
                 "isError": msg["params"]["name"] == "fail",
             }),
             _ => return StatusCode::BAD_REQUEST.into_response(),
@@ -586,8 +639,10 @@ mod tests {
         );
 
         for tool in &setup.tools[2..] {
-            let out = tool.run(json!({"text": "hi"}), &ctx).await.unwrap();
-            assert_eq!(out.output, "hi");
+            assert!(tool.titled());
+            let input = json!({"text": "hi", "description": "say hi"});
+            let out = tool.run(input, &ctx).await.unwrap();
+            assert_eq!(out.output, r#"{"text":"hi"}"#);
             assert_eq!(out.is_error, tool.spec().name.as_str().ends_with("fail"));
         }
         let calls = calls.lock().unwrap();
