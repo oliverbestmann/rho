@@ -1,14 +1,25 @@
 //! Hard gate on `git commit`, `git push` and `git tag` (pi's git-gate): the
 //! user has to approve them, on top of what AGENTS.md asks. Read-only git
 //! commands pass. Without a UI (CLI) they are blocked. The question is
-//! titled with the call's `description`, else the command.
+//! titled with the call's `description`, else the command. One approval,
+//! or `/git:allow`, allows all git mutations for the rest of the session.
 
-use rho::extension::{Context, Decision, Extension, ToolCall};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use rho::extension::{
+    CommandName, Context, Decision, Extension, SessionSetup, SlashCommand, ToolCall,
+};
 use rho::provider::ToolName;
 
 use crate::background_task::BACKGROUND_TASK;
 
 pub struct GitGate;
+
+const ALLOW: CommandName = CommandName::from_static("git:allow");
+
+/// Set once the user allowed git mutations in this session.
+#[derive(Default)]
+struct Allowed(AtomicBool);
 
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
@@ -54,6 +65,22 @@ fn mutates_git(command: &str) -> bool {
 }
 
 impl Extension for GitGate {
+    async fn session_start(&self, session: &mut SessionSetup) {
+        session.commands.push(SlashCommand {
+            name: ALLOW,
+            description: "Allow git commit, push and tag for the rest of the session".into(),
+            hint: None,
+        });
+    }
+
+    async fn command(&self, ctx: &Context, name: &CommandName, _args: &str) -> Option<String> {
+        if *name != ALLOW {
+            return None;
+        }
+        ctx.state::<Allowed>().0.store(true, Ordering::Relaxed);
+        Some("Git commit, push and tag are allowed for the rest of the session.".into())
+    }
+
     async fn tool_call(&self, ctx: &Context, call: &mut ToolCall) -> Decision {
         if !SHELL_TOOLS.contains(&call.name) {
             return Decision::Allow;
@@ -62,12 +89,17 @@ impl Extension for GitGate {
         if !mutates_git(command) {
             return Decision::Allow;
         }
+        let allowed = ctx.state::<Allowed>();
+        if allowed.0.load(Ordering::Relaxed) {
+            return Decision::Allow;
+        }
         let title = call.input["description"]
             .as_str()
             .map(str::trim)
             .filter(|d| !d.is_empty())
             .unwrap_or(command);
         if ctx.confirm(Some(&call.id), title).await {
+            allowed.0.store(true, Ordering::Relaxed);
             Decision::Allow
         } else {
             Decision::Block("Git operation not approved by the user".into())
@@ -139,50 +171,57 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn asks_before_mutations() {
-        let approve = Arc::new(Approve(Mutex::default()));
-        let ctx = Context::new(
-            SessionId::new("s"),
-            "/tmp",
-            approve.clone(),
-            Default::default(),
-        );
-        for (name, input, decision) in [
-            ("Bash", json!({"command": "git push"}), Decision::Allow),
-            ("Bash", json!({"command": "git status"}), Decision::Allow),
-            ("Write", json!({"command": "git push"}), Decision::Allow),
-            (
-                "Bash",
-                json!({"command": "git tag v1", "description": " Tag v1 "}),
-                Decision::Allow,
-            ),
-            (
-                "Bash",
-                json!({"command": "git tag v2", "description": ""}),
-                Decision::Allow,
-            ),
-        ] {
-            let mut c = call(name, input);
-            assert_eq!(GitGate.tool_call(&ctx, &mut c).await, decision);
-        }
-        // The description titles the question, else the command.
-        assert_eq!(
-            *approve.0.lock().unwrap(),
-            ["git push", "Tag v1", "git tag v2"]
-        );
+    fn ctx(frontend: Arc<dyn Frontend>) -> Context {
+        Context::new(SessionId::new("s"), "/tmp", frontend, Default::default())
+    }
 
-        // No UI: blocked.
-        let ctx = Context::new(
-            SessionId::new("s"),
-            "/tmp",
-            Arc::new(NoFrontend),
-            Default::default(),
+    #[tokio::test]
+    async fn asks_once_before_mutations() {
+        let approve = Arc::new(Approve(Mutex::default()));
+        let ctx = ctx(approve.clone());
+        for (name, command) in [
+            ("Bash", "git push"),
+            ("Bash", "git status"),
+            ("Write", "git push"),
+            // Allowed by the first approval.
+            ("BackgroundTask", "git tag v1"),
+        ] {
+            let mut c = call(name, json!({"command": command}));
+            assert_eq!(GitGate.tool_call(&ctx, &mut c).await, Decision::Allow);
+        }
+        assert_eq!(*approve.0.lock().unwrap(), ["git push"]);
+    }
+
+    #[tokio::test]
+    async fn titles_with_description_else_command() {
+        let approve = Arc::new(Approve(Mutex::default()));
+        for input in [
+            json!({"command": "git tag v1", "description": " Tag v1 "}),
+            json!({"command": "git tag v2", "description": ""}),
+        ] {
+            let mut c = call("Bash", input);
+            GitGate.tool_call(&ctx(approve.clone()), &mut c).await;
+        }
+        assert_eq!(*approve.0.lock().unwrap(), ["Tag v1", "git tag v2"]);
+    }
+
+    #[tokio::test]
+    async fn blocks_without_approval_until_allowed() {
+        // No UI: blocked, every time.
+        let ctx = ctx(Arc::new(NoFrontend));
+        let commit = || call("BackgroundTask", json!({"command": "git commit -m x"}));
+        for _ in 0..2 {
+            assert!(matches!(
+                GitGate.tool_call(&ctx, &mut commit()).await,
+                Decision::Block(_)
+            ));
+        }
+        assert!(GitGate.command(&ctx, &ALLOW, "").await.is_some());
+        assert_eq!(
+            GitGate.tool_call(&ctx, &mut commit()).await,
+            Decision::Allow
         );
-        let mut c = call("BackgroundTask", json!({"command": "git commit -m x"}));
-        assert!(matches!(
-            GitGate.tool_call(&ctx, &mut c).await,
-            Decision::Block(_)
-        ));
+        let other = CommandName::new("other");
+        assert!(GitGate.command(&ctx, &other, "").await.is_none());
     }
 }
