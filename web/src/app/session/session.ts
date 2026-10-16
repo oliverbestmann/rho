@@ -22,7 +22,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectChange } from '@angular/material/select';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
-import { Acp, Ask, errorText } from '../acp';
+import { Acp, Ask, errorText, Opened } from '../acp';
 import { listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
 import { Composer } from './composer';
@@ -74,12 +74,26 @@ export class Session {
   /** Model, thinking and profile selectors, hidden behind a button. */
   protected readonly showOptions = linkedSignal({ source: this.id, computation: () => false });
 
-  protected readonly commands = computed(() => this.opened()?.state.commands() ?? []);
+  protected readonly commands = computed(() => this.shown()?.state.commands() ?? []);
   /** Synchronous, unlike a resource: a session opened before shows at once. */
   protected readonly opened = computed(() => {
     const agent = this.acp.agent();
     return agent && this.acp.session(agent, this.id(), this.cwd());
   });
+  /** What the view shows: the last loaded state while offline or reloading. */
+  protected readonly shown = linkedSignal<
+    { id: string; opened: Opened | undefined; loading: boolean | undefined },
+    Opened | undefined
+  >({
+    source: () => {
+      const opened = this.opened();
+      return { id: this.id(), opened, loading: opened?.loading() };
+    },
+    computation: ({ id, opened }, prev) =>
+      keepShown(opened, prev?.source.id === id ? prev.value : undefined),
+  });
+  /** The view shows history from a lost connection. */
+  protected readonly stale = computed(() => !!this.shown() && this.shown() !== this.opened());
   /** Loaded without error: rho takes prompts for it. */
   protected readonly ready = computed(() => {
     const o = this.opened();
@@ -102,7 +116,7 @@ export class Session {
    * render at once, the older ones when scrolled to: `@defer` keeps them once shown.
    */
   protected readonly chunks = computed(() => {
-    const entries = this.opened()?.state.entries() ?? [];
+    const entries = this.shown()?.state.entries() ?? [];
     const id = this.id();
     const chunks = [];
     for (let start = 0; start < entries.length; start += CHUNK) {
@@ -131,11 +145,11 @@ export class Session {
   }
 
   protected readonly title = computed(
-    () => this.opened()?.state.title() ?? this.listTitle() ?? 'Session',
+    () => this.shown()?.state.title() ?? this.listTitle() ?? 'Session',
   );
 
   protected readonly usage = computed(() => {
-    const u = this.opened()?.state.usage();
+    const u = this.shown()?.state.usage();
     return u && u.size > 0 ? u : undefined;
   });
 
@@ -224,6 +238,14 @@ export class Session {
   protected cancel() {
     this.acp.cancel(this.id());
   }
+}
+
+/**
+ * The session to show: the open one, unless it is gone (offline) or still
+ * reloading after a reconnect and `old`, shown before, has its history.
+ */
+export function keepShown(opened: Opened | undefined, old: Opened | undefined) {
+  return opened && !(opened.loading() && old && !old.loading()) ? opened : old;
 }
 
 /** Entries per chunk of the chat, see `Session.chunks`. */

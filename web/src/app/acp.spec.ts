@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import * as acp from '@agentclientprotocol/sdk';
-import { Acp } from './acp';
+import { Acp, errorText } from './acp';
 
 describe('Acp.session', () => {
   it('loads a session once and keeps it', async () => {
@@ -85,5 +85,11 @@ describe('Acp queue', () => {
     a.queue('s').set(['one']);
     running(false);
     expect(prompts.map((p) => p.text)).toEqual(['one']);
+  });
+});
+
+describe('errorText', () => {
+  it('names a socket error event instead of [object Event]', () => {
+    expect(errorText(new Event('error'))).toBe('Connection lost');
   });
 });

@@ -34,6 +34,8 @@ type Status = 'offline' | 'connecting' | 'online';
 /** An error with the JSON-RPC `data` rho puts the cause in. */
 export function errorText(e: unknown) {
   if (e instanceof acp.RequestError && typeof e.data === 'string') return `${e.message}: ${e.data}`;
+  // The socket's `error` event rejects the pending requests.
+  if (e instanceof Event) return 'Connection lost';
   return e instanceof Error ? e.message : String(e);
 }
 
@@ -143,7 +145,8 @@ export class Acp {
         this.snackBar.open(`Stopped: ${res.stopReason}`, 'OK', { duration: 5000 });
       }
     } catch (e) {
-      this.snackBar.open(errorText(e), 'OK');
+      // A lost connection shows as the offline note in the session.
+      if (!(e instanceof Event) && this.agent() === agent) this.snackBar.open(errorText(e), 'OK');
     } finally {
       prompting(false);
     }

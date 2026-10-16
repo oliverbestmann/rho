@@ -35,6 +35,12 @@ html {
   outline-offset: -2px;
 }
 
+// Snack bars end above the session's composer, at the bottom elsewhere.
+.cdk-global-overlay-wrapper:has(.mat-mdc-snack-bar-container) {
+  height: auto;
+  bottom: anchor(--composer top, 0px);
+}
+
 body {
   background-color: var(--mat-sys-surface);
   color: var(--mat-sys-on-surface);

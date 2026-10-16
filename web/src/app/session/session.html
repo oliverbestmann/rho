@@ -16,12 +16,12 @@
 <div class="stream">
   <div class="scroller" #scroller>
     <main>
-      @if (opened()?.error(); as error) {
+      @if (shown()?.error(); as error) {
         <p class="error">{{ error }}</p>
       }
 
       <!-- Hidden until loaded, so the replayed history does not fly by. -->
-      @if (opened()?.loading()) {
+      @if (shown()?.loading()) {
         <mat-spinner class="loading" diameter="40" aria-label="Loading" />
       } @else {
         @for (chunk of chunks(); track chunk.key) {
@@ -47,7 +47,9 @@
           }
         }
         <!-- An open question is what the turn waits for, so it shows instead. -->
-        @if (running() && !asks().length) {
+        @if (stale()) {
+          <p class="offline" role="status"><mat-icon>cloud_off</mat-icon> Offline, reconnecting…</p>
+        } @else if (running() && !asks().length) {
           <app-working />
         }
       }
@@ -67,7 +69,7 @@
 <footer>
   @if (showOptions()) {
     <div class="options" id="session-options">
-      @for (option of opened()?.state?.options(); track option.id) {
+      @for (option of shown()?.state?.options(); track option.id) {
         @if (option.type === 'select') {
           <app-option-select
             [class]="option.category"
