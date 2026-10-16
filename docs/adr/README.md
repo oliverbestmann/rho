@@ -54,10 +54,11 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0044](0044-tool-call-descriptions.md) | The model titles its tool calls with a `description` argument | Accepted, amended by 0050 |
 | [0045](0045-glob-and-grep.md) | `Glob` and `Grep` split like Claude Code's | Accepted |
 | [0046](0046-model-sets-session-title.md) | The model sets the session title with `SetSessionTitle` | Accepted |
-| [0047](0047-present-plan-with-feedback.md) | `PresentPlan` replaces `ExitPlanMode` and takes feedback | Accepted |
+| [0047](0047-present-plan-with-feedback.md) | `PresentPlan` replaces `ExitPlanMode` and takes feedback | Accepted, amended by 0054 |
 | [0048](0048-github-copilot-provider.md) | GitHub Copilot as a second provider | Accepted |
 | [0049](0049-helpers-use-the-compaction-model.md) | Extension helpers use the session's compaction model | Accepted |
 | [0050](0050-tools-describe-their-cards.md) | Tools say how their calls are shown | Accepted |
 | [0051](0051-per-session-extension-state.md) | Per-session extension state in the `Context` | Accepted |
 | [0052](0052-hold-notices-until-the-session-is-known.md) | Hold a starting session's notices until the client knows it | Accepted |
 | [0053](0053-commands-in-the-agent-and-a-redact-hook.md) | Slash commands run in the agent; extensions redact through a hook | Accepted |
+| [0054](0054-plan-approval-as-permission-request.md) | Plan approval is a permission request on the tool call again | Accepted |

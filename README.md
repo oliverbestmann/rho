@@ -474,12 +474,11 @@ saved with the session.
 `PlanMode` (in the `rho` binary) adds `plan`, like Claude Code's plan mode:
 `Write` and `Edit` are hidden and the sandbox is read-only. The model can
 enter it with `EnterPlanMode`. `PresentPlan { plan }` works in every
-profile: the plan is shown on the tool call and the user gets a form with
-Approve / Revise and a feedback text field. Approved: from `plan` back to
-`write`, the model starts implementing (with the feedback as notes).
-Feedback without approval: the model gets it and revises the plan. Neither:
-the profile stays and the run stops. Picking `write` in the selector needs
-no approval (ADR 0047).
+profile: the plan is shown on the tool call with a permission request,
+Approve or "Skip, let me add something". Approved: from `plan` back to
+`write`, the model starts implementing. Skipped: the profile stays and the
+run stops, so the next message can add to the plan. Picking `write` in the
+selector needs no approval (ADRs 0047, 0054).
 
 ## Images
 

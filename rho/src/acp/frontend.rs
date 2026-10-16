@@ -295,6 +295,16 @@ impl Frontend for AcpFrontend {
         tool_call_id: Option<&'a ToolCallId>,
         title: &'a str,
     ) -> BoxFuture<'a, bool> {
+        self.confirm_with(tool_call_id, title, "Allow", "Reject")
+    }
+
+    fn confirm_with<'a>(
+        &'a self,
+        tool_call_id: Option<&'a ToolCallId>,
+        title: &'a str,
+        allow: &'a str,
+        reject: &'a str,
+    ) -> BoxFuture<'a, bool> {
         Box::pin(async move {
             let mut fields = ToolCallUpdateFields::new().title(title.to_string());
             // Clients show one line of title; the rest goes into the card.
@@ -316,8 +326,8 @@ impl Frontend for AcpFrontend {
                 self.sid.clone(),
                 call,
                 vec![
-                    PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
-                    PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+                    PermissionOption::new("allow", allow, PermissionOptionKind::AllowOnce),
+                    PermissionOption::new("reject", reject, PermissionOptionKind::RejectOnce),
                 ],
             );
             let r = self.first_answer(|_| true, request).await;

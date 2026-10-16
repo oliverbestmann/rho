@@ -382,6 +382,17 @@ pub trait Frontend: Send + Sync {
         Box::pin(async { false })
     }
 
+    /// `confirm` with the labels of the two answers.
+    fn confirm_with<'a>(
+        &'a self,
+        tool_call_id: Option<&'a ToolCallId>,
+        title: &'a str,
+        _allow: &'a str,
+        _reject: &'a str,
+    ) -> BoxFuture<'a, bool> {
+        self.confirm(tool_call_id, title)
+    }
+
     /// Ask the user to fill in a form. Without a UI this is `Unsupported`.
     fn ask<'a>(&'a self, _form: &'a Form) -> BoxFuture<'a, FormReply> {
         Box::pin(async { FormReply::Unsupported })
@@ -720,6 +731,19 @@ impl Context {
 
     pub async fn confirm(&self, tool_call_id: Option<&ToolCallId>, title: &str) -> bool {
         self.0.frontend.confirm(tool_call_id, title).await
+    }
+
+    pub async fn confirm_with(
+        &self,
+        tool_call_id: Option<&ToolCallId>,
+        title: &str,
+        allow: &str,
+        reject: &str,
+    ) -> bool {
+        self.0
+            .frontend
+            .confirm_with(tool_call_id, title, allow, reject)
+            .await
     }
 
     /// Shows a form and waits for the user to fill it in.

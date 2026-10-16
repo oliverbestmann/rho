@@ -1,6 +1,6 @@
 # 47. `PresentPlan` replaces `ExitPlanMode` and takes feedback
 
-- Status: Accepted
+- Status: Accepted, amended by [0054](0054-plan-approval-as-permission-request.md)
 - Date: 2026-10-15
 
 ## Context
@@ -15,6 +15,8 @@ e.g. when the model wants sign-off before a large change in `write`.
 `EnterPlanMode` and the `plan` profile stay as in ADR 0017. `ExitPlanMode`
 becomes `PresentPlan { plan }`, available in every profile:
 
+- (Since ADR 0054 the approval is a permission request on the tool call
+  with Approve / "Skip, let me add something"; the form below is gone.)
 - The plan is the form's message, so it shows inside the approval box;
   Zed and the web client collapse the tool call card. It also stays on the
   tool call (`Tool::describe`) for the transcript.
