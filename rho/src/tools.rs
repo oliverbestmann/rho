@@ -27,10 +27,10 @@ pub const REQUEST_ACCESS: ToolName = ToolName::from_static("RequestAccess");
 
 /// Output larger than this is cut off so it does not flood the context.
 pub const MAX_OUTPUT: usize = 50 * 1024;
-/// The most a call can ask for with `max_output` (Read, Bash).
+/// The most a call can ask for with `maxOutput` (Read, Bash).
 pub const MAX_OUTPUT_LIMIT: usize = 64 * 1024;
 
-/// A call's `max_output`, kept within 1..=`MAX_OUTPUT_LIMIT`.
+/// A call's `maxOutput`, kept within 1..=`MAX_OUTPUT_LIMIT`.
 fn max_output(asked: Option<usize>) -> usize {
     asked.unwrap_or(MAX_OUTPUT).clamp(1, MAX_OUTPUT_LIMIT)
 }
@@ -151,11 +151,12 @@ pub fn input_schema<T: JsonSchema>() -> Value {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct ReadInput {
     path: String,
     /// first line to read, from 1; default 1
     offset: Option<usize>,
-    /// number of lines to read; default all, up to max_output
+    /// number of lines to read; default all, up to maxOutput
     limit: Option<usize>,
     /// output cap in bytes; default 50 KB, at most 64 KB
     #[schemars(range(min = 1, max = 65536))]
@@ -625,6 +626,7 @@ mod tests {
                     },
                     "cwd": {"type": ["string", "null"], "description": "working directory, absolute or relative to the session's; default the session's"},
                     "timeout": {"type": ["number", "null"], "format": "double", "description": "seconds, default 120"},
+                    "maxOutput": {"type": ["integer", "null"], "format": "uint", "minimum": 1, "maximum": 65536, "description": "output cap in bytes; default 50 KB, at most 64 KB"},
                     "description": {"type": "string", "description": "what the command does, at most 10 words; shown to the user as its title"},
                 },
                 "required": ["command", "description"],
@@ -876,12 +878,12 @@ mod tests {
             (json!(1 << 20), MAX_OUTPUT_LIMIT),
         ] {
             let out = Read
-                .run(json!({"path": "big", "max_output": max}), &ctx)
+                .run(json!({"path": "big", "maxOutput": max}), &ctx)
                 .await
                 .unwrap();
             assert_eq!(out.output.matches('x').count(), kept, "Read {max}");
             let out = Bash
-                .run(json!({"command": print, "max_output": max}), &ctx)
+                .run(json!({"command": print, "maxOutput": max}), &ctx)
                 .await
                 .unwrap();
             assert_eq!(out.output.matches('x').count(), kept, "Bash {max}");
