@@ -27,6 +27,13 @@ pub const REQUEST_ACCESS: ToolName = ToolName::from_static("RequestAccess");
 
 /// Output larger than this is cut off so it does not flood the context.
 pub const MAX_OUTPUT: usize = 50 * 1024;
+/// The most a call can ask for with `max_output` (Read, Bash).
+pub const MAX_OUTPUT_LIMIT: usize = 64 * 1024;
+
+/// A call's `max_output`, kept within 1..=`MAX_OUTPUT_LIMIT`.
+fn max_output(asked: Option<usize>) -> usize {
+    asked.unwrap_or(MAX_OUTPUT).clamp(1, MAX_OUTPUT_LIMIT)
+}
 
 /// A tool the model can call. Implement `run` with `async fn`.
 pub trait Tool: Send + Sync {
@@ -115,9 +122,13 @@ pub(crate) fn resolve(cwd: &Path, path: &str) -> PathBuf {
 }
 
 /// Cuts `s` to `MAX_OUTPUT` bytes (on a char boundary) and marks the cut.
-pub fn truncate(mut s: String) -> String {
-    if s.len() > MAX_OUTPUT {
-        s.truncate(s.floor_char_boundary(MAX_OUTPUT));
+pub fn truncate(s: String) -> String {
+    truncate_to(s, MAX_OUTPUT)
+}
+
+fn truncate_to(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        s.truncate(s.floor_char_boundary(max));
         s.push_str("\n[output truncated]");
     }
     s
@@ -144,8 +155,11 @@ struct ReadInput {
     path: String,
     /// first line to read, from 1; default 1
     offset: Option<usize>,
-    /// number of lines to read; default all, up to 50 KB
+    /// number of lines to read; default all, up to max_output
     limit: Option<usize>,
+    /// output cap in bytes; default 50 KB, at most 64 KB
+    #[schemars(range(min = 1, max = 65536))]
+    max_output: Option<usize>,
     /// what this call is for, at most 10 words; shown to the user as its title
     // Required for the model; calls without it (older sessions) still run.
     #[schemars(required, with = "String")]
@@ -188,6 +202,9 @@ struct BashInput {
     cwd: Option<String>,
     /// seconds, default 120
     timeout: Option<f64>,
+    /// output cap in bytes; default 50 KB, at most 64 KB
+    #[schemars(range(min = 1, max = 65536))]
+    max_output: Option<usize>,
     /// what the command does, at most 10 words; shown to the user as its title
     // Required for the model; calls without it (older sessions) still run.
     #[schemars(required, with = "String")]
@@ -227,23 +244,24 @@ impl Tool for Read {
             .run_sandboxed(move || std::fs::read_to_string(path))
             .await?
             .with_context(|| format!("reading {}", i.path))?;
-        Ok(lines(&text, i.offset.unwrap_or(1).max(1), i.limit).into())
+        let max = max_output(i.max_output);
+        Ok(lines(&text, i.offset.unwrap_or(1).max(1), i.limit, max).into())
     }
 }
 
 /// `limit` lines of `text` from line `first` (1-based), cut to whole lines
-/// within `MAX_OUTPUT` with a note where to go on.
-fn lines(text: &str, first: usize, limit: Option<usize>) -> String {
+/// within `max` bytes with a note where to go on.
+fn lines(text: &str, first: usize, limit: Option<usize>, max: usize) -> String {
     let mut out: String = text
         .split_inclusive('\n')
         .skip(first - 1)
         .take(limit.unwrap_or(usize::MAX))
         .collect();
-    if out.len() <= MAX_OUTPUT {
+    if out.len() <= max {
         return out;
     }
-    out.truncate(out.floor_char_boundary(MAX_OUTPUT));
-    // A line longer than `MAX_OUTPUT` stays cut; the next starts after it.
+    out.truncate(out.floor_char_boundary(max));
+    // A line longer than `max` stays cut; the next starts after it.
     let kept = match out.rfind('\n') {
         Some(end) => {
             out.truncate(end + 1);
@@ -414,6 +432,7 @@ impl Tool for Bash {
             .ok()
             .filter(|t| !t.is_zero())
             .context("timeout must be a positive number of seconds")?;
+        let max = max_output(i.max_output);
         let cwd = i.cwd.map_or(ctx.cwd().into(), |d| resolve(ctx.cwd(), &d));
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c")
@@ -442,8 +461,8 @@ impl Tool for Bash {
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let done = async {
             let (out, err) = tokio::try_join!(
-                read_streamed(stdout, ctx, false),
-                read_streamed(stderr, ctx, true)
+                read_streamed(stdout, ctx, false, max),
+                read_streamed(stderr, ctx, true, max)
             )?;
             std::io::Result::Ok((child.wait().await?, out, err))
         };
@@ -456,7 +475,7 @@ impl Tool for Bash {
         group.0 = None;
         let mut text = String::from_utf8_lossy(&stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&stderr));
-        let text = truncate(text);
+        let text = truncate_to(text, max);
         if !status.success() {
             bail!("{text}\n[{status}]");
         }
@@ -465,11 +484,12 @@ impl Tool for Bash {
 }
 
 /// Reads `stream` to its end and streams it to the user, but keeps only what
-/// `truncate` can use, so a huge output does not pile up in memory.
+/// `truncate_to(_, max)` can use, so a huge output does not pile up in memory.
 async fn read_streamed(
     stream: Option<impl AsyncRead + Unpin>,
     ctx: &Context,
     stderr: bool,
+    max: usize,
 ) -> std::io::Result<Vec<u8>> {
     let mut kept = Vec::new();
     let Some(mut stream) = stream else {
@@ -481,7 +501,7 @@ async fn read_streamed(
         if n == 0 {
             break;
         }
-        let room = (MAX_OUTPUT + 1).saturating_sub(kept.len());
+        let room = (max + 1).saturating_sub(kept.len());
         kept.extend_from_slice(&chunk[..n.min(room)]);
         pending.extend_from_slice(&chunk[..n]);
         let whole = utf8_prefix(&pending);
@@ -565,8 +585,8 @@ impl Tool for RequestAccess {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, Bash, Context, MAX_OUTPUT, Read, ReadImage, RequestAccess, Tool, Write, lines,
-        truncate, utf8_prefix,
+        Access, Bash, Context, MAX_OUTPUT, MAX_OUTPUT_LIMIT, Read, ReadImage, RequestAccess, Tool,
+        Write, lines, truncate, utf8_prefix,
     };
     use crate::provider::ImageSource;
     use crate::store::SessionId;
@@ -829,18 +849,43 @@ mod tests {
 
     #[test]
     fn read_pages_by_lines() {
-        assert_eq!(lines("a\nb\nc", 2, Some(1)), "b\n");
-        assert_eq!(lines("a\nb\nc", 2, None), "b\nc");
-        assert_eq!(lines("a\n", 5, None), "");
+        assert_eq!(lines("a\nb\nc", 2, Some(1), MAX_OUTPUT), "b\n");
+        assert_eq!(lines("a\nb\nc", 2, None, MAX_OUTPUT), "b\nc");
+        assert_eq!(lines("a\n", 5, None, MAX_OUTPUT), "");
         // Whole lines only, and where to go on.
         let line = "x".repeat(MAX_OUTPUT / 2) + "\n";
-        let out = lines(&line.repeat(3), 2, None);
+        let out = lines(&line.repeat(3), 2, None, MAX_OUTPUT);
         assert_eq!(
             out,
             line.clone() + "[output truncated; read on with offset 3]"
         );
-        let out = lines(&"y".repeat(MAX_OUTPUT + 1), 1, None);
+        let out = lines(&"y".repeat(MAX_OUTPUT + 1), 1, None, MAX_OUTPUT);
         assert!(out.ends_with("y[output truncated; read on with offset 2]"));
+    }
+
+    #[tokio::test]
+    async fn max_output_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path());
+        let big = "x".repeat(100 * 1024);
+        std::fs::write(dir.path().join("big"), &big).unwrap();
+        let print = format!("head -c {} /dev/zero | tr '\\0' x", big.len());
+        for (max, kept) in [
+            (json!(null), MAX_OUTPUT),
+            (json!(10), 10),
+            (json!(1 << 20), MAX_OUTPUT_LIMIT),
+        ] {
+            let out = Read
+                .run(json!({"path": "big", "max_output": max}), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(out.output.matches('x').count(), kept, "Read {max}");
+            let out = Bash
+                .run(json!({"command": print, "max_output": max}), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(out.output.matches('x').count(), kept, "Bash {max}");
+        }
     }
 
     #[test]
