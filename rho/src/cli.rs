@@ -271,6 +271,14 @@ impl Frontend for Cli {
                 st.requests += 1;
             }
             AgentEvent::ToolStart { name, input, .. } => eprintln!("\n> {name} {input}"),
+            AgentEvent::ToolStream { chunk, stderr, .. } => {
+                let (on, off) = if stderr {
+                    ("\x1b[31m", "\x1b[0m")
+                } else {
+                    ("", "")
+                };
+                eprint!("{on}{chunk}{off}");
+            }
             AgentEvent::ToolEnd {
                 is_error: true,
                 output,
@@ -285,10 +293,7 @@ impl Frontend for Cli {
                 if is_error { "failed: " } else { "" },
                 if text.is_empty() { "" } else { "\n" }
             ),
-            AgentEvent::ToolEnd { .. }
-            | AgentEvent::ToolStream { .. }
-            | AgentEvent::Title(_)
-            | AgentEvent::Model { .. } => {}
+            AgentEvent::ToolEnd { .. } | AgentEvent::Title(_) | AgentEvent::Model { .. } => {}
         }
     }
 }
