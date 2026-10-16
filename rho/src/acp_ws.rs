@@ -9,6 +9,10 @@
 //!
 //! `rho daemon` serves it on a Unix socket in a private directory, without a
 //! token, and `rho acp --daemon` pumps an editor's stdio into that socket.
+//!
+//! The listener also serves the web client (`web/`) if `web_dir` has it:
+//! `/` without a WebSocket upgrade is its page. The files are public, only
+//! the WebSocket needs the token.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,9 +23,10 @@ use agent_client_protocol::{ConnectTo, Lines};
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::Listener;
 use base64::Engine;
@@ -30,6 +35,7 @@ use futures::{SinkExt, StreamExt, future, stream};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::tungstenite;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::acp::Hub;
 use crate::agent::Agent;
@@ -50,23 +56,44 @@ struct Server {
     hub: Arc<Hub>,
     /// `None` lets everyone in who can reach the listener.
     token: Option<String>,
+    /// The web client's files, see `web_dir`.
+    web: Option<PathBuf>,
 }
 
-/// Serves ACP on `/` until the listener fails. Connections share the open
-/// sessions of `hub`.
+/// The built web client: `RHO_WEB_DIR`, else the one the build was given
+/// (the nix package sets it).
+pub fn web_dir() -> Option<PathBuf> {
+    std::env::var_os("RHO_WEB_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or(option_env!("RHO_WEB_DIR").map(PathBuf::from))
+}
+
+/// Serves ACP on `/` until the listener fails, and the web client from
+/// `web`. Connections share the open sessions of `hub`.
 pub async fn serve<L>(
     agent: Arc<Agent>,
     hub: Arc<Hub>,
     listener: L,
     token: Option<String>,
+    web: Option<PathBuf>,
 ) -> Result<()>
 where
     L: Listener,
     L::Addr: std::fmt::Debug,
 {
-    let app = Router::new()
-        .route("/", get(upgrade))
-        .with_state(Arc::new(Server { agent, hub, token }));
+    let mut app = Router::new().route("/", get(upgrade));
+    if let Some(dir) = &web {
+        // The client's routes (`/session/...`) are its page too.
+        let files = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+        app = app.fallback_service(files);
+    }
+    let app = app.with_state(Arc::new(Server {
+        agent,
+        hub,
+        token,
+        web,
+    }));
     axum::serve(listener, app).await.context("acp websocket")
 }
 
@@ -259,8 +286,13 @@ pub fn token(config_dir: &Path) -> Result<String> {
 async fn upgrade(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
+    let ws = match (ws, &server.web) {
+        (Ok(ws), _) => ws,
+        (Err(_), Some(dir)) => return page(dir).await,
+        (Err(rejection), None) => return rejection.into_response(),
+    };
     if let Some(token) = &server.token
         && !authorized(&headers, token)
     {
@@ -278,6 +310,17 @@ async fn upgrade(
             }
         })
         .into_response()
+}
+
+/// The web client's `index.html`.
+async fn page(dir: &Path) -> Response {
+    match tokio::fs::read_to_string(dir.join("index.html")).await {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            eprintln!("rho acp: web client in {}: {e}", dir.display());
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
 }
 
 fn authorized(headers: &HeaderMap, token: &str) -> bool {

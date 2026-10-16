@@ -44,6 +44,8 @@ gets no special API.
   `npx ng test`, not with `cargo test`.
 - No build is served by rho. It runs with `ng serve`, or as static files
   behind any server, and needs TLS (a proxy or Tailscale) away from
-  localhost.
+  localhost. (Since 2026-10-16 the nix package builds `web/` and
+  `rho daemon --listen` serves it, see `acp_ws::web_dir`; the files need
+  no token, the WebSocket does.)
 - Features that ACP lacks (busy state, usage details) need rho metadata
   in `_meta.rho`. Other clients don't show them.

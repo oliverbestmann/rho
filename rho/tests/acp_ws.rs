@@ -30,6 +30,7 @@ async fn server() -> String {
         Arc::default(),
         listener,
         Some("secret".into()),
+        None,
     ));
     url
 }
@@ -97,6 +98,7 @@ async fn daemon_socket_through_the_stdio_pump() {
         Arc::default(),
         listener,
         None,
+        None,
     ));
 
     let stream = tokio::net::UnixStream::connect(rho::acp_ws::socket_path(&daemon))
@@ -126,6 +128,38 @@ async fn daemon_socket_through_the_stdio_pump() {
     assert_eq!(ids, [1, 2]);
 }
 
+#[tokio::test]
+async fn serves_the_web_client_without_token() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), "<app-root>").unwrap();
+    std::fs::write(dir.path().join("main.js"), "go()").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(rho::acp_ws::serve(
+        Arc::new(agent()),
+        Arc::default(),
+        listener,
+        Some("secret".into()),
+        Some(dir.path().into()),
+    ));
+
+    // `/session/x` is a client route: the page again.
+    for (path, body) in [
+        ("/", "<app-root>"),
+        ("/main.js", "go()"),
+        ("/session/x", "<app-root>"),
+    ] {
+        let r = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(r.status(), 200, "{path}");
+        assert_eq!(r.text().await.unwrap(), body, "{path}");
+    }
+    // The WebSocket on `/` still needs the token.
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("401"), "{err}");
+}
+
 struct Greeter;
 
 impl rho::extension::Extension for Greeter {
@@ -144,6 +178,7 @@ async fn session_start_notices_follow_the_new_session_response() {
         Arc::new(agent),
         Arc::default(),
         listener,
+        None,
         None,
     ));
     let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();

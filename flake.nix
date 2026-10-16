@@ -18,8 +18,31 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          # The Angular client (web/), served by `rho daemon --listen`.
+          web = pkgs.buildNpmPackage {
+            pname = "rho-web";
+            version = "0.1.0";
+            src = pkgs.lib.cleanSourceWith {
+              src = ./web;
+              filter =
+                path: _:
+                !builtins.elem (baseNameOf path) [
+                  "node_modules"
+                  "dist"
+                  ".angular"
+                ];
+            };
+            nodejs = pkgs.nodejs_26;
+            npmDepsHash = "sha256-V413/uCCU/bJrumo5qYIsGC+izfDtfjJzHnWXIHDlSk=";
+            NG_CLI_ANALYTICS = "false";
+            # sass-embedded ships a prebuilt `dart`, linked for FHS systems.
+            nativeBuildInputs = pkgs.lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
+            preBuild = pkgs.lib.optionalString pkgs.stdenv.isLinux "autoPatchelf node_modules/sass-embedded-linux-*";
+            installPhase = "cp -r dist/web/browser $out";
+          };
         in
         {
+          inherit web;
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "rho";
             version = "0.1.0";
@@ -34,6 +57,8 @@
             buildInputs = [ pkgs.onnxruntime ];
             ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
             ORT_PREFER_DYNAMIC_LINK = "1";
+            # Compiled in as the default web client dir (`acp_ws::web_dir`).
+            RHO_WEB_DIR = "${web}";
             # Tests run in the dev shell; some need the network or a writable home.
             doCheck = false;
           };

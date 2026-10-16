@@ -533,7 +533,9 @@ Each text frame carries one JSON-RPC message (several, split by newlines,
 are accepted too). Every connection gets its own ACP connection to one
 shared agent, so the extensions (memory, MCP, ...) and open sessions are
 shared. It replaces the earlier web view (ADR 0020): to follow a Zed
-session from a phone, load it in the web client (`web/`) or acp-ui.
+session from a phone, load it in the web client (`web/`) or acp-ui. The
+nix package bundles the web client and serves it on `http://ADDR/`
+(`RHO_WEB_DIR` points to another build).
 
 Every client needs the token, also from this machine, since any website can
 open a WebSocket to localhost. It is `RHO_ACP_TOKEN`, else

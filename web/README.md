@@ -21,6 +21,12 @@ nix develop path:.. -c npm start       # http://localhost:4200
 the token. Both are kept in localStorage. The token goes as a
 `bearer.<token>` subprotocol, since browsers cannot set headers.
 
+The nix package (`nix build`) bundles the built client: `rho daemon
+--listen ADDR` serves it on `http://ADDR/` and the suggested URL is
+`ws://ADDR/`. A local build is served with
+`RHO_WEB_DIR=web/dist/web/browser`. After changing `package-lock.json`,
+update `npmDepsHash` in `flake.nix` (the failing build prints it).
+
 From a phone, reach the daemon through Tailscale or similar. Don't expose
 `ws://` with a token without TLS.
 

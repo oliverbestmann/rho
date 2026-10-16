@@ -158,7 +158,7 @@ pub async fn run(options: Options) -> Result<()> {
             let agent = Arc::new(acp_agent(options, model, thinking)?);
             // One hub: editors and acp-ui see the same sessions.
             let hub = Arc::new(crate::acp::Hub::default());
-            let unix = crate::acp_ws::serve(agent.clone(), hub.clone(), socket, None);
+            let unix = crate::acp_ws::serve(agent.clone(), hub.clone(), socket, None, None);
             let Some(addr) = listen else {
                 return unix.await;
             };
@@ -171,7 +171,12 @@ pub async fn run(options: Options) -> Result<()> {
                 listener.local_addr()?,
                 config_dir.join(crate::acp_ws::TOKEN_FILE).display()
             );
-            let tcp = crate::acp_ws::serve(agent, hub, listener, Some(token));
+            let web = crate::acp_ws::web_dir();
+            if let Some(dir) = &web {
+                let addr = listener.local_addr()?;
+                eprintln!("rho daemon: web client http://{addr}/ ({})", dir.display());
+            }
+            let tcp = crate::acp_ws::serve(agent, hub, listener, Some(token), web);
             tokio::try_join!(unix, tcp).map(|_| ())
         }
         Some(_) => one_shot(make_agent(options, model, thinking)?, args.join(" ")).await,

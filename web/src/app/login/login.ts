@@ -1,4 +1,4 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, inject, isDevMode, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -87,6 +87,8 @@ export class Login {
 }
 
 /** The daemon behind the dev server's proxy (proxy.conf.json), on the page's own host. */
+// `ng serve` proxies /dev/acp to rho; a built client is served by rho itself.
 function defaultUrl() {
-  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/dev/acp`;
+  const path = isDevMode() ? '/dev/acp' : '/';
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`;
 }
