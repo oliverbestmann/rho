@@ -68,7 +68,8 @@ main {
 footer {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  // Like the gap between the options, so both rows read as one grid.
+  gap: 8px;
   padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
   background: var(--mat-sys-surface-container);
 
