@@ -29,6 +29,11 @@ parses ANSI escapes.
   `ToolEnd` then sends only the exit code, plus the last line of an error
   (exit status, timeout). Without streamed output (a blocked call, a
   replay) it sends the whole output as before.
+- The shown command (the `$` line and the `sh` block) is formatted by a
+  best-effort pass in `rho/src/acp/shell.rs`: one command per line, a
+  break before `&&`, `||` and `|`, indented `if`, loops and `{ }`. No Rust
+  crate formats shell, and `shfmt` would be a Go binary to run per call.
+  Heredocs, `case` and unbalanced quotes stay as written.
 - Clients without terminals, like the web client, get nothing streamed;
   their tool call content is replaced on each update, so streaming would
   resend everything each time.

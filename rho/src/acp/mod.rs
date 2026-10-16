@@ -28,6 +28,7 @@ mod config;
 mod frontend;
 mod hub;
 mod load;
+mod shell;
 mod update;
 
 use config::{PROFILE_OPTION, config_options, set_config};

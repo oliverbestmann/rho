@@ -22,10 +22,10 @@ use crate::extension::{BoxFuture, Form, FormReply, Frontend};
 use crate::provider::{ToolCallId, ToolName};
 use crate::tools::DynTool;
 
-use super::ConnId;
 use super::update::{
     LastUsage, Shown, busy_update, form_answers, form_schema, red, terminal_output, to_update,
 };
+use super::{ConnId, shell};
 
 /// Output a terminal card shows of one call, so a flood does not swamp the
 /// client; the model's copy is cut separately.
@@ -292,7 +292,8 @@ impl AcpFrontend {
         if let (AgentEvent::ToolStart { id, .. }, Some(Shown::Terminal { command, .. })) =
             (&ev, &shown)
         {
-            let text = format!("$ {command}\n");
+            // Later lines line up under the first, after the `$ `.
+            let text = format!("$ {}\n", shell::format(command).replace('\n', "\n  "));
             self.send_terminal(id, &text, to);
             let started = Streamed {
                 text,

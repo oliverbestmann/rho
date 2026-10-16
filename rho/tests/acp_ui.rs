@@ -367,12 +367,15 @@ async fn bash_is_a_terminal_for_clients_that_ask_for_it() {
     assert_eq!(wire[0]["title"], "Say hi");
     assert_eq!(wire[0]["content"][0]["type"], "terminal");
     assert_eq!(wire[0]["_meta"]["terminal_info"]["terminal_id"], "t1");
-    // The command first, then the output as it came, stderr in red.
+    // The command first, formatted, then the output as it came, stderr in red.
     let shown: String = wire[1..]
         .iter()
         .filter_map(|v| v["_meta"]["terminal_output"]["data"].as_str())
         .collect();
-    assert_eq!(shown, format!("$ {CMD}\nhi\n\x1b[31moops\n\x1b[0m"));
+    assert_eq!(
+        shown,
+        "$ echo hi\n  sleep 0.1\n  echo oops >&2\nhi\n\x1b[31moops\n\x1b[0m"
+    );
     assert_eq!(
         wire.last().unwrap()["_meta"]["terminal_exit"]["exit_code"],
         0
@@ -394,11 +397,11 @@ async fn bash_is_a_highlighted_command_block_otherwise() {
         .collect();
     assert_eq!(
         wire[0]["content"][0]["content"]["text"],
-        format!("```sh\n{CMD}\n```")
+        "```sh\necho hi\nsleep 0.1\necho oops >&2\n```"
     );
     assert_eq!(
         wire[1]["content"][0]["content"]["text"],
-        format!("```sh\n{CMD}\n```")
+        "```sh\necho hi\nsleep 0.1\necho oops >&2\n```"
     );
     // Nothing streams to it: the output comes with the end.
     assert!(wire.iter().all(|v| v.get("_meta").is_none()), "{wire:?}");

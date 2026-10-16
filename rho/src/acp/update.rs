@@ -230,6 +230,7 @@ pub(super) fn red(text: &str) -> String {
 /// The command as a fenced `sh` block, so Zed highlights it. The fence is
 /// longer than any backtick run in the command.
 pub(super) fn command_block(command: &str) -> String {
+    let command = super::shell::format(command);
     let (mut run, mut longest) = (0, 0);
     for c in command.chars() {
         run = if c == '`' { run + 1 } else { 0 };
