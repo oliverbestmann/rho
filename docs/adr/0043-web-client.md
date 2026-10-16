@@ -46,6 +46,8 @@ gets no special API.
   behind any server, and needs TLS (a proxy or Tailscale) away from
   localhost. (Since 2026-10-16 the nix package builds `web/` and
   `rho daemon --listen` serves it, see `acp_ws::web_dir`; the files need
-  no token, the WebSocket does.)
+  no token, the WebSocket does. Files with a content hash in their name
+  are cached as immutable for a year, everything else is `no-cache`, and
+  a missing hashed file is a 404 rather than the page.)
 - Features that ACP lacks (busy state, usage details) need rho metadata
   in `_meta.rho`. Other clients don't show them.

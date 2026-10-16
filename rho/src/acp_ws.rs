@@ -22,10 +22,12 @@ use std::time::Duration;
 use agent_client_protocol::{ConnectTo, Lines};
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{Request, State};
+use axum::handler::HandlerWithoutStateExt;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::Listener;
@@ -35,7 +37,7 @@ use futures::{SinkExt, StreamExt, future, stream};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::tungstenite;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 
 use crate::acp::Hub;
 use crate::agent::Agent;
@@ -84,9 +86,19 @@ where
 {
     let mut app = Router::new().route("/", get(upgrade));
     if let Some(dir) = &web {
-        // The client's routes (`/session/...`) are its page too.
-        let files = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
-        app = app.fallback_service(files);
+        // The client's routes (`/session/...`) are its page too, but a missing
+        // hashed file (an old chunk after an update) is a 404, not the page.
+        let page_dir = dir.clone();
+        let index = async move |uri: Uri| {
+            if is_hashed(uri.path()) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            page(&page_dir).await
+        };
+        let files = ServeDir::new(dir).fallback(index.into_service());
+        app = app
+            .fallback_service(files)
+            .layer(middleware::from_fn(cache_control));
     }
     let app = app.with_state(Arc::new(Server {
         agent,
@@ -323,6 +335,36 @@ async fn page(dir: &Path) -> Response {
     }
 }
 
+/// Files named with a content hash (`main-TW4DQLKJ.js`) never change, so the
+/// browser may keep them. Everything else, like `index.html`, is checked again
+/// on each load; the client's routes fall back to it, so they are included.
+async fn cache_control(req: Request, next: Next) -> Response {
+    let hashed = is_hashed(req.uri().path());
+    let mut res = next.run(req).await;
+    let value = if hashed && res.status().is_success() {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    } else {
+        HeaderValue::from_static("no-cache")
+    };
+    res.headers_mut().insert(header::CACHE_CONTROL, value);
+    res
+}
+
+/// Angular's `outputHashing` names: `<name>-<8 characters>.js` or `.css`.
+fn is_hashed(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    let hashed = stem.split_once('-').is_some_and(|(_, hash)| {
+        hash.len() == 8
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    });
+    hashed && matches!(ext, "js" | "css")
+}
+
 fn authorized(headers: &HeaderMap, token: &str) -> bool {
     let bearer = headers
         .get(header::AUTHORIZATION)
@@ -372,4 +414,32 @@ fn lines(
         })
     });
     Lines::new(tx, rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_hashed;
+
+    #[test]
+    fn only_hashed_build_files_are_cached() {
+        for path in [
+            "/main-TW4DQLKJ.js",
+            "/chunk-BuJJfRT-.js",
+            "/chunk-pYaf--lm.js",
+            "/styles-CCIXP5GJ.css",
+        ] {
+            assert!(is_hashed(path), "{path}");
+        }
+        for path in [
+            "/",
+            "/index.html",
+            "/favicon.ico",
+            "/session/abc",
+            "/chunk-short.js",
+            "/main.js",
+            "/main-TW4DQLKJ.map",
+        ] {
+            assert!(!is_hashed(path), "{path}");
+        }
+    }
 }
