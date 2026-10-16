@@ -123,7 +123,8 @@ async fn sessions_are_saved_and_resumed() {
     assert_eq!(stored, resumed.history);
     assert_eq!(stored.len(), 6);
     let page = store.list(Some(&cwd), None, 10).await.unwrap();
-    assert_eq!(page.sessions.len(), 2);
+    // "empty" has no messages, so it is not listed.
+    assert_eq!(page.sessions.len(), 1);
     assert_eq!(page.sessions[0].title.as_deref(), Some("A title"));
 
     // Wrong cwd or id.

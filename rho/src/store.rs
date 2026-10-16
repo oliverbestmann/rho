@@ -302,7 +302,8 @@ impl Store {
         .await
     }
 
-    /// Sessions by last update, newest first, optionally only those in `cwd`.
+    /// Sessions with messages by last update, newest first, optionally only
+    /// those in `cwd`.
     /// `cursor` is `Page::next` of the previous page.
     pub async fn list(
         &self,
@@ -323,6 +324,7 @@ impl Store {
                 "SELECT {COLUMNS} FROM sessions
                  WHERE (?1 IS NULL OR cwd = ?1)
                    AND (?2 IS NULL OR (updated_at, id) < (?2, ?3))
+                   AND EXISTS (SELECT 1 FROM messages WHERE session_id = sessions.id)
                  ORDER BY updated_at DESC, id DESC LIMIT ?4"
             );
             let (at, id) = after.unzip();
@@ -1007,8 +1009,15 @@ mod tests {
         let store = Store::memory().unwrap();
         for (id, cwd) in [("a", "/w"), ("b", "/other"), ("c", "/w"), ("d", "/w")] {
             store.save_state(state(id, cwd)).await.unwrap();
+            let hi = vec![msg(Role::User, "hi")];
+            store
+                .save_messages(&SessionId::new(id), 0, 0, hi)
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
+        // Newest, but empty: not listed.
+        store.save_state(state("e", "/w")).await.unwrap();
         let ids = |p: &Page| {
             p.sessions
                 .iter()
