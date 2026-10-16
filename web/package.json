@@ -20,6 +20,8 @@
     "@angular/material": "^22.2.3",
     "@angular/platform-browser": "^22.2.0",
     "@angular/router": "^22.2.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "diff": "^9.0.0",
     "marked": "^18.1.1",
     "rxjs": "~7.8.0",

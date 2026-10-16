@@ -35,6 +35,21 @@ describe('SessionState', () => {
     expect(s.entries().length).toBe(1);
   });
 
+  it('collects terminal output from meta', () => {
+    const s = new SessionState();
+    const meta = (data: string) => ({ terminal_output: { terminal_id: 't1', data } });
+    s.apply({
+      sessionUpdate: 'tool_call',
+      toolCallId: 't1',
+      title: 'Bash',
+      _meta: { terminal_info: { terminal_id: 't1', cwd: '/w' } },
+    });
+    s.apply({ sessionUpdate: 'tool_call_update', toolCallId: 't1', _meta: meta('$ ls\n') });
+    s.apply({ sessionUpdate: 'tool_call_update', toolCallId: 't1', _meta: meta('a\n') });
+    const e = s.entries()[0];
+    expect(e.kind === 'tool' ? e.terminal() : undefined).toBe('$ ls\na\n');
+  });
+
   it('follows rho running in session info meta', () => {
     const s = new SessionState();
     s.apply({ sessionUpdate: 'session_info_update', _meta: { rho: { running: true } } });

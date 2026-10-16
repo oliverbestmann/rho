@@ -37,6 +37,10 @@ parses ANSI escapes.
 - Clients without terminals, like the web client, get nothing streamed;
   their tool call content is replaced on each update, so streaming would
   resend everything each time.
+- Note (2026-10-16): the web client now says it supports
+  `_meta.terminal_output` too and renders the output with xterm.js and its
+  fit addon. Both load only when a terminal card is opened. The `rho` CLI
+  prints the chunks to stderr.
 
 ## Consequences
 
@@ -44,4 +48,4 @@ parses ANSI escapes.
   interleave stdout and stderr differently from the model's copy.
 - Other tools can stream with `stream_output`; only terminal cards show it.
 - The web client shows Bash output only at the end, until it gets its own
-  streaming.
+  streaming. (No longer true, see the note above.)

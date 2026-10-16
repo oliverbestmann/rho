@@ -4,6 +4,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MarkdownPipe } from '../markdown';
+import { TerminalView } from './terminal';
 import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
 
 /** A tool call: status and title, its output when expanded. */
@@ -15,13 +16,15 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
     MatExpansionModule,
     MatIconModule,
     MatProgressSpinnerModule,
+    TerminalView,
   ],
   template: `
     @let c = call();
+    @let t = terminal();
     <mat-expansion-panel
       class="tool"
       hideToggle
-      [disabled]="!hasBody(c)"
+      [disabled]="!t && !hasBody(c)"
       [class.failed]="c.status === 'failed'"
     >
       <mat-expansion-panel-header>
@@ -37,7 +40,11 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
         </mat-panel-title>
       </mat-expansion-panel-header>
       <ng-template matExpansionPanelContent>
-        <div class="markdown" [innerHTML]="c | toolBody | markdown"></div>
+        @if (t !== undefined) {
+          <app-terminal [data]="t" />
+        } @else {
+          <div class="markdown" [innerHTML]="c | toolBody | markdown"></div>
+        }
       </ng-template>
     </mat-expansion-panel>
   `,
@@ -45,6 +52,8 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
 })
 export class ToolCard {
   readonly call = input.required<acp.ToolCall>();
+  /** Output for a terminal card, shown with xterm.js instead of markdown. */
+  readonly terminal = input<string>();
   protected readonly icon = toolIcon;
   protected readonly hasBody = hasBody;
 }

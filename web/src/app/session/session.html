@@ -38,7 +38,7 @@
                   <app-thought-card [text]="entry.text()" />
                 }
                 @case ('tool') {
-                  <app-tool-card [call]="entry.call()" />
+                  <app-tool-card [call]="entry.call()" [terminal]="entry.terminal()" />
                 }
               }
             }

@@ -3,7 +3,12 @@ import type * as acp from '@agentclientprotocol/sdk';
 
 export type Entry =
   | { kind: 'user' | 'agent' | 'thought'; text: WritableSignal<string> }
-  | { kind: 'tool'; call: WritableSignal<acp.ToolCall> };
+  | {
+      kind: 'tool';
+      call: WritableSignal<acp.ToolCall>;
+      /** Terminal output, from rho's `_meta.terminal_output`; undefined if not a terminal. */
+      terminal: WritableSignal<string | undefined>;
+    };
 
 /** The transcript of one session, built from its `session/update`s. */
 export class SessionState {
@@ -16,7 +21,7 @@ export class SessionState {
   readonly commands = signal<acp.AvailableCommand[]>([]);
   /** A turn runs, from any client; rho sends it in `_meta.rho.running`. */
   readonly running = signal(false);
-  private readonly tools = new Map<string, WritableSignal<acp.ToolCall>>();
+  private readonly tools = new Map<string, Extract<Entry, { kind: 'tool' }>>();
 
   apply(u: acp.SessionUpdate) {
     switch (u.sessionUpdate) {
@@ -31,14 +36,19 @@ export class SessionState {
         break;
       case 'tool_call': {
         const { sessionUpdate: _, ...call } = u;
-        this.tool(call.toolCallId).set(call);
+        const tool = this.tool(call.toolCallId);
+        tool.call.set(call);
+        if (u._meta?.['terminal_info']) tool.terminal.set('');
+        this.terminal(tool, u._meta);
         break;
       }
       case 'tool_call_update': {
         const { sessionUpdate: _, ...fields } = u;
         // Only the fields that are set change.
         const set = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null));
-        this.tool(u.toolCallId).update((c) => ({ ...c, ...set }));
+        const tool = this.tool(u.toolCallId);
+        tool.call.update((c) => ({ ...c, ...set }));
+        this.terminal(tool, u._meta);
         break;
       }
       case 'session_info_update': {
@@ -73,23 +83,39 @@ export class SessionState {
 
   /** The tool call with this id, if known. */
   call(id: string): acp.ToolCall | undefined {
-    return this.tools.get(id)?.();
+    return this.tools.get(id)?.call();
   }
 
   /** The tool call with this id; a new one at the end if unknown. */
-  private tool(id: string): WritableSignal<acp.ToolCall> {
-    let call = this.tools.get(id);
-    if (!call) {
-      call = signal<acp.ToolCall>({ toolCallId: id, title: '' });
-      this.tools.set(id, call);
-      this.entries.update((e) => [...e, { kind: 'tool', call: call! }]);
+  private tool(id: string) {
+    let tool = this.tools.get(id);
+    if (!tool) {
+      const t = {
+        kind: 'tool' as const,
+        call: signal<acp.ToolCall>({ toolCallId: id, title: '' }),
+        terminal: signal<string | undefined>(undefined),
+      };
+      this.tools.set(id, t);
+      this.entries.update((e) => [...e, t]);
+      tool = t;
     }
-    return call;
+    return tool;
+  }
+
+  /** Appends `_meta.terminal_output.data`, the output rho streams to terminal clients. */
+  private terminal(tool: Extract<Entry, { kind: 'tool' }>, meta: Meta) {
+    const out = meta?.['terminal_output'] as { data?: unknown } | undefined;
+    if (typeof out?.data === 'string') {
+      const data = out.data;
+      tool.terminal.update((t) => (t ?? '') + data);
+    }
   }
 }
 
+type Meta = { [key: string]: unknown } | null | undefined;
+
 /** `_meta.rho.running`, where rho says whether a turn runs; undefined if not sent. */
-export function rhoRunning(meta: { [key: string]: unknown } | null | undefined) {
+export function rhoRunning(meta: Meta) {
   const rho = meta?.['rho'];
   const running =
     typeof rho === 'object' && rho ? (rho as { running?: unknown }).running : undefined;

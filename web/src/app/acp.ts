@@ -244,7 +244,8 @@ export class Acp {
     try {
       await conn.agent.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: { elicitation: { form: {} } },
+        // `terminal_output`: Bash output streams in as Zed's terminal `_meta`.
+        clientCapabilities: { elicitation: { form: {} }, _meta: { terminal_output: true } },
         clientInfo: { name: 'rho-web', version: '0.1.0' },
       });
     } catch (e) {
