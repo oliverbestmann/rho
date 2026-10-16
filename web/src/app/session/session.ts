@@ -16,45 +16,43 @@ import {
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import * as acp from '@agentclientprotocol/sdk';
-import { TextFieldModule } from '@angular/cdk/text-field';
-import {
-  MatAutocompleteModule,
-  MatAutocompleteSelectedEvent,
-} from '@angular/material/autocomplete';
 import { MatButtonModule } from '@angular/material/button';
-import { MatExpansionModule } from '@angular/material/expansion';
-import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
-import { MatInputModule } from '@angular/material/input';
-import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { MatSelectChange, MatSelectModule } from '@angular/material/select';
+import { MatSelectChange } from '@angular/material/select';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, Ask, errorText } from '../acp';
-import { MarkdownPipe } from '../markdown';
+import { listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
-import { dir, isRunning, listSessions } from '../sessions/list';
-import { ago } from '../time';
-import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
+import { Composer } from './composer';
+import { ContextUsage } from './context-usage';
+import { ChatMessage } from './message';
+import { OptionSelect } from './option-select';
+import { QueuedList } from './queued-list';
+import { SessionSwitcher } from './session-switcher';
+import { ThoughtCard } from './thought-card';
+import { ToolCard } from './tool-card';
+import { Working } from './working';
 
+/** The open session: loads it from rho and passes its state to the parts. */
 @Component({
   selector: 'app-session',
   imports: [
     RouterLink,
     AskCard,
-    MarkdownPipe,
-    ToolBodyPipe,
-    TextFieldModule,
-    MatAutocompleteModule,
+    ChatMessage,
+    Composer,
+    ContextUsage,
+    OptionSelect,
+    QueuedList,
+    SessionSwitcher,
+    ThoughtCard,
+    ToolCard,
+    Working,
     MatButtonModule,
-    MatExpansionModule,
-    MatFormFieldModule,
     MatIconModule,
-    MatInputModule,
-    MatMenuModule,
     MatProgressSpinnerModule,
-    MatSelectModule,
     MatToolbarModule,
   ],
   templateUrl: './session.html',
@@ -76,16 +74,7 @@ export class Session {
   /** Model, thinking and profile selectors, hidden behind a button. */
   protected readonly showOptions = linkedSignal({ source: this.id, computation: () => false });
 
-  /** Slash command suggestions for the first word, when it starts with `/`. */
-  protected readonly suggestions = computed(() => {
-    const draft = this.draft();
-    const match = /^\/(\S*)$/.exec(draft);
-    if (!match) return [];
-    const prefix = match[1].toLowerCase();
-    return (this.opened()?.state.commands() ?? [])
-      .filter((c) => c.name.toLowerCase().startsWith(prefix))
-      .slice(0, 8);
-  });
+  protected readonly commands = computed(() => this.opened()?.state.commands() ?? []);
   /** Synchronous, unlike a resource: a session opened before shows at once. */
   protected readonly opened = computed(() => {
     const agent = this.acp.agent();
@@ -97,9 +86,6 @@ export class Session {
     return !!o && !o.loading() && !o.error();
   });
 
-  protected readonly ago = ago;
-  protected readonly isRunning = isRunning;
-  protected readonly dir = dir;
   /** For the switcher; reloaded each time it opens. */
   protected readonly sessions = resource({
     params: () => this.acp.agent(),
@@ -150,7 +136,7 @@ export class Session {
 
   protected readonly usage = computed(() => {
     const u = this.opened()?.state.usage();
-    return u && u.size > 0 ? Math.round((100 * u.used) / u.size) : undefined;
+    return u && u.size > 0 ? u : undefined;
   });
 
   /** A turn runs, so a send waits in the queue; like `Acp.next`. */
@@ -200,22 +186,6 @@ export class Session {
     wait(3);
   }
 
-  protected readonly icon = toolIcon;
-  protected readonly hasBody = hasBody;
-
-  protected onKey(e: KeyboardEvent) {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      this.send();
-    }
-  }
-
-  protected pick(e: MatAutocompleteSelectedEvent) {
-    const name = (e.option.value as acp.AvailableCommand).name;
-    // A command without input gets a trailing space; one with input a space to type into.
-    this.draft.set(`/${name} `);
-  }
-
   /** Sends the draft, or queues it while a turn runs. */
   protected send() {
     const text = this.draft().trim();
@@ -249,14 +219,6 @@ export class Session {
       // Back to the value rho still has.
       change.source.value = option.currentValue;
     }
-  }
-
-  /** The choices of a select option, flat or grouped. */
-  protected groups(option: acp.SessionConfigOption & { type: 'select' }) {
-    const o = option.options;
-    return o.length && 'group' in o[0]
-      ? (o as acp.SessionConfigSelectGroup[])
-      : [{ group: '', name: '', options: o as acp.SessionConfigSelectOption[] }];
   }
 
   protected cancel() {

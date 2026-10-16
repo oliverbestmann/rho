@@ -22,83 +22,14 @@
   overscroll-behavior: contain;
 }
 
+.top {
+  gap: 8px;
+}
+
 .title {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.usage {
-  font: var(--mat-sys-label-large);
-  color: var(--mat-sys-on-surface-variant);
-}
-
-// The open session in the switcher.
-.current {
-  background: var(--mat-sys-secondary-container);
-  color: var(--mat-sys-on-secondary-container);
-}
-
-.switch-busy {
-  display: inline-block;
-  vertical-align: middle;
-  margin-left: 12px;
-}
-
-// Its own line under the title.
-.switch-time {
-  display: block;
-  font: var(--mat-sys-body-small);
-  color: var(--mat-sys-on-surface-variant);
-}
-
-// Like a chat typing indicator, where the next output appears.
-.working {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 16px;
-  color: var(--mat-sys-on-surface-variant);
-  font: var(--mat-sys-body-medium);
-
-  .dots {
-    display: flex;
-    gap: 4px;
-  }
-
-  i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: currentColor;
-    animation: pulse 1.2s infinite ease-in-out;
-
-    &:nth-child(2) {
-      animation-delay: 0.2s;
-    }
-
-    &:nth-child(3) {
-      animation-delay: 0.4s;
-    }
-  }
-}
-
-@keyframes pulse {
-  0%,
-  80%,
-  100% {
-    opacity: 0.25;
-  }
-  40% {
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .working i {
-    animation: none;
-    opacity: 0.6;
-  }
 }
 
 main {
@@ -110,76 +41,6 @@ main {
   box-sizing: border-box;
   margin: 0 auto;
   padding: 16px;
-}
-
-.user {
-  align-self: flex-end;
-  max-width: 85%;
-  padding: 2px 16px;
-  border-radius: var(--mat-sys-corner-large);
-  background: var(--mat-sys-primary-container);
-  color: var(--mat-sys-on-primary-container);
-}
-
-.agent {
-  align-self: flex-start;
-  max-width: 100%;
-  box-sizing: border-box;
-  padding: 2px 16px;
-  border-radius: var(--mat-sys-corner-large);
-  background: var(--mat-sys-tertiary-container);
-  color: var(--mat-sys-on-tertiary-container);
-}
-
-// About 10 lines; column-reverse keeps it pinned to the newest line, like the list.
-.thought-scroll {
-  max-height: 10lh;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column-reverse;
-}
-
-.thought .markdown {
-  color: var(--mat-sys-on-surface-variant);
-  font-style: italic;
-}
-
-// Material 3 "filled" card: no elevation, just a tinted surface.
-.tool {
-  --mat-expansion-container-background-color: var(--mat-sys-surface-container);
-  --mat-expansion-container-shape: var(--mat-sys-corner-medium);
-  --mat-expansion-header-collapsed-state-height: 44px;
-  --mat-expansion-header-expanded-state-height: 44px;
-  // Disabled only means "nothing to expand", so it should not look greyed out.
-  --mat-expansion-header-disabled-state-text-color: var(--mat-sys-on-surface);
-  box-shadow: none !important;
-  color: var(--mat-sys-on-surface);
-
-  mat-panel-title {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-    font: var(--mat-sys-body-medium);
-  }
-
-  .tool-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .status {
-    flex: none;
-    font-size: 20px;
-    width: 20px;
-    height: 20px;
-    color: var(--mat-sys-on-surface-variant);
-  }
-
-  &.failed .status {
-    color: var(--mat-sys-error);
-  }
 }
 
 .error {
@@ -216,7 +77,7 @@ footer {
     gap: 8px;
     @include mat.form-field-density(-4);
 
-    mat-form-field {
+    app-option-select {
       flex: none;
       width: 112px;
     }
@@ -226,55 +87,4 @@ footer {
       min-width: 0;
     }
   }
-
-  // One line per queued message, cut off at the end.
-  .queued {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-
-    li {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding-left: 12px;
-      color: var(--mat-sys-on-surface-variant);
-      font: var(--mat-sys-body-medium);
-    }
-
-    .queued-icon {
-      flex: none;
-      font-size: 20px;
-      width: 20px;
-      height: 20px;
-    }
-
-    .queued-text {
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
-
-  .compose {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-
-    .composer {
-      flex: 1;
-    }
-  }
-}
-
-.slash-name {
-  font: var(--mat-sys-body-small);
-  font-weight: bold;
-  margin-right: 12px;
-}
-
-.slash-description {
-  color: var(--mat-sys-on-surface-variant);
-  font: var(--mat-sys-body-small);
 }

@@ -9,7 +9,7 @@ export type Entry =
 export class SessionState {
   readonly entries = signal<Entry[]>([]);
   readonly title = signal<string | undefined>(undefined);
-  readonly usage = signal<{ used: number; size: number } | undefined>(undefined);
+  readonly usage = signal<acp.UsageUpdate | undefined>(undefined);
   /** Model, thinking level and other session settings. */
   readonly options = signal<acp.SessionConfigOption[]>([]);
   /** Slash commands advertised by the agent. */
@@ -54,7 +54,7 @@ export class SessionState {
         this.commands.set(u.availableCommands);
         break;
       case 'usage_update':
-        this.usage.set({ used: u.used, size: u.size });
+        this.usage.set({ used: u.used, size: u.size, cost: u.cost });
         break;
     }
   }

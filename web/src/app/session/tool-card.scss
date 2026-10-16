@@ -1,0 +1,43 @@
+// Shared by the tool and thought cards.
+
+:host {
+  display: block;
+}
+
+// Material 3 "filled" card: no elevation, just a tinted surface.
+.tool {
+  --mat-expansion-container-background-color: var(--mat-sys-surface-container);
+  --mat-expansion-container-shape: var(--mat-sys-corner-medium);
+  --mat-expansion-header-collapsed-state-height: 44px;
+  --mat-expansion-header-expanded-state-height: 44px;
+  // Disabled only means "nothing to expand", so it should not look greyed out.
+  --mat-expansion-header-disabled-state-text-color: var(--mat-sys-on-surface);
+  box-shadow: none !important;
+  color: var(--mat-sys-on-surface);
+
+  mat-panel-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    font: var(--mat-sys-body-medium);
+  }
+
+  .tool-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status {
+    flex: none;
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+    color: var(--mat-sys-on-surface-variant);
+  }
+
+  &.failed .status {
+    color: var(--mat-sys-error);
+  }
+}
