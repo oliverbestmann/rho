@@ -94,7 +94,7 @@ impl Tool for Start {
         ToolSpec {
             name: BACKGROUND_TASK,
             description: format!(
-                "Run a shell command in the background (e.g. a long build, or a while loop waiting for a process). Returns a task id immediately. When the command exits or times out, you get a message with the id, exit status and the last {TAIL_LINES} output lines. Sandboxed like Bash."
+                "Run a shell command in the background (e.g. a long build, or a while loop waiting for a process). Returns a task id immediately. When the command exits or times out, you get a message with the id, exit status and the last {TAIL_LINES} output lines, even after your turn has ended. Do not sleep or poll to wait for it: do other work or end your turn. Sandboxed like Bash."
             ),
             input_schema: input_schema::<StartInput>(),
         }
