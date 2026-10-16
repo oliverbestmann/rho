@@ -175,8 +175,15 @@ struct WriteInput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct BashInput {
     command: String,
+    /// environment variables to set for the command
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+    /// start from an empty environment that keeps only HOME, USER, PATH, LANG and TERM (plus env)
+    #[serde(default)]
+    clean_env: bool,
     /// working directory, absolute or relative to the session's; default the session's
     cwd: Option<String>,
     /// seconds, default 120
@@ -374,6 +381,9 @@ impl Tool for Write {
 
 pub struct Bash;
 
+/// Variables a `cleanEnv` command keeps.
+const CLEAN_ENV: [&str; 5] = ["HOME", "USER", "PATH", "LANG", "TERM"];
+
 impl Tool for Bash {
     fn kind(&self) -> ToolKind {
         ToolKind::Execute
@@ -415,6 +425,15 @@ impl Tool for Bash {
             // Its own group, so a timeout or cancel can kill what it started.
             .process_group(0)
             .kill_on_drop(true);
+        if i.clean_env {
+            cmd.env_clear();
+            for key in CLEAN_ENV {
+                if let Some(value) = std::env::var_os(key) {
+                    cmd.env(key, value);
+                }
+            }
+        }
+        cmd.envs(&i.env);
         ctx.sandbox_command(&mut cmd)
             .context("setting up the sandbox")?;
         let mut child = cmd.spawn()?;
@@ -573,6 +592,17 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "environment variables to set for the command",
+                        "default": {}
+                    },
+                    "cleanEnv": {
+                        "type": "boolean",
+                        "description": "start from an empty environment that keeps only HOME, USER, PATH, LANG and TERM (plus env)",
+                        "default": false
+                    },
                     "cwd": {"type": ["string", "null"], "description": "working directory, absolute or relative to the session's; default the session's"},
                     "timeout": {"type": ["number", "null"], "format": "double", "description": "seconds, default 120"},
                     "description": {"type": "string", "description": "what the command does, at most 10 words; shown to the user as its title"},
@@ -657,6 +687,19 @@ mod tests {
             let err = Bash.run(input, &ctx(dir.path())).await.unwrap_err();
             assert!(err.to_string().contains("positive"), "{err}");
         }
+    }
+
+    #[tokio::test]
+    async fn bash_sets_and_clears_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = async |input| Bash.run(input, &ctx(dir.path())).await.unwrap().output;
+        let cmd = "echo \"$FOO|${RHO_BASH_TEST-unset}|${PATH:+path}\"";
+        // SAFETY: no other test reads or writes this variable.
+        unsafe { std::env::set_var("RHO_BASH_TEST", "x") };
+        let out = run(json!({"command": cmd, "env": {"FOO": "bar"}})).await;
+        assert!(out.starts_with("bar|x|path"), "{out}");
+        let out = run(json!({"command": cmd, "env": {"FOO": "bar"}, "cleanEnv": true})).await;
+        assert!(out.starts_with("bar|unset|path"), "{out}");
     }
 
     /// Whether `pid` is gone (or a zombie, waiting to be reaped).
