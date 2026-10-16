@@ -33,7 +33,7 @@ struct Input {
     glob: Option<String>,
     /// Directory to search (default: cwd)
     path: Option<String>,
-    /// files_with_matches (default): only the file names; content: the matching lines; count: matches per file
+    /// files_with_matches (default): only the file names; content: the matching lines as path:line:text; count: matches per file
     #[serde(default)]
     output_mode: OutputMode,
     /// Lines of context around each match (content mode only)
@@ -173,6 +173,8 @@ fn args(i: &Input) -> Vec<String> {
         OutputMode::FilesWithMatches => args.push("--files-with-matches".into()),
         OutputMode::Count => args.push("--count".into()),
         OutputMode::Content => {
+            // Line numbers let the model Read or Edit around a match.
+            args.push("--line-number".into());
             if let Some(n) = i.context.filter(|n| *n > 0) {
                 args.extend(["--context".into(), n.to_string()]);
             }
@@ -233,6 +235,7 @@ mod tests {
             [
                 "--regexp",
                 "-x",
+                "--line-number",
                 "--context",
                 "2",
                 "--color",
@@ -298,7 +301,7 @@ mod tests {
         assert_eq!(out.output, "./a.txt");
         let content = json!({"pattern": "wor", "outputMode": "content"});
         let out = Grep.run(content, &ctx).await.unwrap();
-        assert_eq!(out.output, "./a.txt:world");
+        assert_eq!(out.output, "./a.txt:2:world");
         let count = json!({"pattern": "o", "glob": "*.txt", "outputMode": "count"});
         assert_eq!(Grep.run(count, &ctx).await.unwrap().output, "./a.txt:2");
         // Newest first.
