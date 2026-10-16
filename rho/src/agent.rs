@@ -61,6 +61,13 @@ pub enum AgentEvent<'a> {
         /// From `Tool::titled`: `input.description` titles the call.
         titled: bool,
     },
+    /// Output of a running tool call, from `Context::stream_output`; the
+    /// `ToolEnd` output still has all of it.
+    ToolStream {
+        id: &'a ToolCallId,
+        chunk: &'a str,
+        stderr: bool,
+    },
     ToolEnd {
         id: &'a ToolCallId,
         output: &'a str,
@@ -742,8 +749,10 @@ impl Agent {
             ctx,
             id: Some(call.id.clone()),
         };
+        ctx.set_tool_call(Some(call.id.clone()));
         let out = self.decide_and_run(session, call, tool).await;
         pending.id = None;
+        ctx.set_tool_call(None);
         ctx.emit(AgentEvent::ToolEnd {
             id: &call.id,
             output: &out.output,
@@ -858,6 +867,7 @@ impl Drop for Pending<'_> {
         let Some(id) = &self.id else {
             return;
         };
+        self.ctx.set_tool_call(None);
         self.ctx.emit(AgentEvent::ToolEnd {
             id,
             output: "cancelled",

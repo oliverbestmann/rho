@@ -170,9 +170,14 @@ pub(super) fn image_block(source: &ImageSource) -> ContentBlock {
 pub(super) enum Shown {
     /// Markdown content: the command as a fenced block, or `Tool::describe`.
     Text(String),
-    /// A terminal card, with output and exit code sent on `ToolEnd` (Zed's
-    /// `_meta` terminal protocol, as pi-acp does).
-    Terminal { cwd: PathBuf, command: String },
+    /// A terminal card (Zed's `_meta` terminal protocol, as pi-acp does).
+    /// The command and output stream in as `terminal_output`; `ToolEnd`
+    /// sends the exit code, and the output unless it `streamed`.
+    Terminal {
+        cwd: PathBuf,
+        command: String,
+        streamed: bool,
+    },
 }
 
 impl Shown {
@@ -190,6 +195,7 @@ impl Shown {
             Some(cwd) if *name == tools::BASH => Self::Terminal {
                 cwd: input["cwd"].as_str().map_or(cwd.into(), |d| cwd.join(d)),
                 command: command.into(),
+                streamed: false,
             },
             _ => Self::Text(command_block(command)),
         })
@@ -204,6 +210,21 @@ impl Shown {
             other => other.clone(),
         }
     }
+}
+
+/// Adds `data` to a terminal card. Zed shows only the title in the card's
+/// header, so the command goes first in the output, seen when it is opened.
+pub(super) fn terminal_output(id: &provider::ToolCallId, data: &str) -> SessionUpdate {
+    SessionUpdate::ToolCallUpdate(
+        ToolCallUpdate::new(id.to_string(), ToolCallUpdateFields::new()).meta(meta(
+            serde_json::json!({"terminal_output": {"terminal_id": id, "data": data}}),
+        )),
+    )
+}
+
+/// `text` in red for a terminal, as stderr is shown.
+pub(super) fn red(text: &str) -> String {
+    format!("\x1b[31m{text}\x1b[0m")
 }
 
 /// The command as a fenced `sh` block, so Zed highlights it. The fence is
@@ -321,7 +342,7 @@ pub(super) fn to_update(
         } => {
             let title = || title(name, input, titled);
             let call = match shown {
-                Some(Shown::Terminal { cwd, command }) => ToolCall::new(
+                Some(Shown::Terminal { cwd, command, .. }) => ToolCall::new(
                     id.to_string(),
                     call_description(input, titled).map_or(command.clone(), |_| title()),
                 )
@@ -349,6 +370,8 @@ pub(super) fn to_update(
                     .raw_input(input.clone()),
             )
         }
+        // Only for terminals; `AcpFrontend::send` caps and colours them first.
+        AgentEvent::ToolStream { id, chunk, .. } => terminal_output(id, chunk),
         AgentEvent::ToolEnd {
             id,
             output,
@@ -357,10 +380,19 @@ pub(super) fn to_update(
             images,
         } => {
             let fields = ToolCallUpdateFields::new().status(status(is_error));
-            if let Some(Shown::Terminal { .. }) = shown {
+            if let Some(Shown::Terminal { streamed, .. }) = shown {
+                // Streamed output is shown already; an error may add a line,
+                // like the exit status or a timeout.
+                let data = match (*streamed, is_error) {
+                    (false, _) => output.to_string(),
+                    (true, true) => {
+                        red(&format!("\n{}", output.lines().last().unwrap_or_default()))
+                    }
+                    (true, false) => String::new(),
+                };
                 return SessionUpdate::ToolCallUpdate(
                     ToolCallUpdate::new(id.to_string(), fields).meta(meta(serde_json::json!({
-                        "terminal_output": {"terminal_id": id, "data": output},
+                        "terminal_output": {"terminal_id": id, "data": data},
                         "terminal_exit": {
                             "terminal_id": id,
                             "exit_code": exit_code(output, is_error),
@@ -604,6 +636,27 @@ mod tests {
         );
         assert_eq!(wire["_meta"]["terminal_exit"]["exit_code"], 3);
         assert!(wire.get("content").is_none());
+
+        // Streamed output is not sent again, only an error's last line.
+        let Shown::Terminal { cwd, command, .. } = shown.clone() else {
+            unreachable!()
+        };
+        let streamed = Shown::Terminal {
+            cwd,
+            command,
+            streamed: true,
+        };
+        let end = AgentEvent::ToolEnd {
+            id: &ToolCallId::new("t1"),
+            output: "boom\n[exit status: 3]",
+            is_error: true,
+            diff: None,
+            images: &[],
+        };
+        assert_eq!(
+            update(end, Some(&streamed))["_meta"]["terminal_output"]["data"],
+            "\x1b[31m\n[exit status: 3]\x1b[0m"
+        );
 
         // Other tools and clients without the capability keep the fenced block.
         assert!(matches!(

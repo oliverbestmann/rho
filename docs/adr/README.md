@@ -62,3 +62,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0052](0052-hold-notices-until-the-session-is-known.md) | Hold a starting session's notices until the client knows it | Accepted |
 | [0053](0053-commands-in-the-agent-and-a-redact-hook.md) | Slash commands run in the agent; extensions redact through a hook | Accepted |
 | [0054](0054-plan-approval-as-permission-request.md) | Plan approval is a permission request on the tool call again | Accepted |
+| [0055](0055-streamed-bash-output.md) | Bash output streams into Zed's terminal card | Accepted |

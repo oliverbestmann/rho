@@ -293,13 +293,16 @@ async fn models_json_limits_and_defaults_models_by_path() {
     timed(client).await;
 }
 
+/// Output on both streams, stderr after stdout.
+const CMD: &str = "echo hi; sleep 0.1; echo oops >&2";
+
 fn bash_run() -> Vec<Vec<Event>> {
     vec![
         vec![
             Event::Block(Content::ToolUse {
                 id: ToolCallId::new("t1"),
                 name: ToolName::new("Bash"),
-                input: json!({"command": "echo hi", "description": "Say hi"}),
+                input: json!({"command": CMD, "description": "Say hi"}),
             }),
             Event::Done(StopReason::ToolUse),
         ],
@@ -361,12 +364,19 @@ async fn bash_is_a_terminal_for_clients_that_ask_for_it() {
         // Not the turn's usage notice.
         .filter(|v| v["toolCallId"] == "t1")
         .collect();
-    assert_eq!(wire.len(), 2, "{wire:?}");
     assert_eq!(wire[0]["title"], "Say hi");
     assert_eq!(wire[0]["content"][0]["type"], "terminal");
     assert_eq!(wire[0]["_meta"]["terminal_info"]["terminal_id"], "t1");
-    assert_eq!(wire[1]["_meta"]["terminal_output"]["data"], "hi\n");
-    assert_eq!(wire[1]["_meta"]["terminal_exit"]["exit_code"], 0);
+    // The command first, then the output as it came, stderr in red.
+    let shown: String = wire[1..]
+        .iter()
+        .filter_map(|v| v["_meta"]["terminal_output"]["data"].as_str())
+        .collect();
+    assert_eq!(shown, format!("$ {CMD}\nhi\n\x1b[31moops\n\x1b[0m"));
+    assert_eq!(
+        wire.last().unwrap()["_meta"]["terminal_exit"]["exit_code"],
+        0
+    );
 }
 
 #[tokio::test]
@@ -384,13 +394,15 @@ async fn bash_is_a_highlighted_command_block_otherwise() {
         .collect();
     assert_eq!(
         wire[0]["content"][0]["content"]["text"],
-        "```sh\necho hi\n```"
+        format!("```sh\n{CMD}\n```")
     );
     assert_eq!(
         wire[1]["content"][0]["content"]["text"],
-        "```sh\necho hi\n```"
+        format!("```sh\n{CMD}\n```")
     );
-    assert_eq!(wire[1]["content"][1]["content"]["text"], "hi\n");
+    // Nothing streams to it: the output comes with the end.
+    assert!(wire.iter().all(|v| v.get("_meta").is_none()), "{wire:?}");
+    assert_eq!(wire[1]["content"][1]["content"]["text"], "hi\noops\n");
 }
 
 /// Asks one form and returns the answers as JSON.

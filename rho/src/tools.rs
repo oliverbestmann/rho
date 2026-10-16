@@ -422,7 +422,10 @@ impl Tool for Bash {
         let mut group = KillGroup(child.id());
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let done = async {
-            let (out, err) = tokio::try_join!(read_capped(stdout), read_capped(stderr))?;
+            let (out, err) = tokio::try_join!(
+                read_streamed(stdout, ctx, false),
+                read_streamed(stderr, ctx, true)
+            )?;
             std::io::Result::Ok((child.wait().await?, out, err))
         };
         let Ok(done) = tokio::time::timeout(timeout, done).await else {
@@ -442,20 +445,47 @@ impl Tool for Bash {
     }
 }
 
-/// Reads `stream` to its end but keeps only what `truncate` can use, so
-/// a huge output does not pile up in memory.
-async fn read_capped(stream: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
+/// Reads `stream` to its end and streams it to the user, but keeps only what
+/// `truncate` can use, so a huge output does not pile up in memory.
+async fn read_streamed(
+    stream: Option<impl AsyncRead + Unpin>,
+    ctx: &Context,
+    stderr: bool,
+) -> std::io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
     let Some(mut stream) = stream else {
-        return Ok(buf);
+        return Ok(kept);
     };
-    (&mut stream)
-        .take(MAX_OUTPUT as u64 + 1)
-        .read_to_end(&mut buf)
-        .await?;
-    // Drained, so the command does not block on a full pipe.
-    tokio::io::copy(&mut stream, &mut tokio::io::sink()).await?;
-    Ok(buf)
+    let (mut chunk, mut pending) = (vec![0; 8192], Vec::new());
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        let room = (MAX_OUTPUT + 1).saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..n.min(room)]);
+        pending.extend_from_slice(&chunk[..n]);
+        let whole = utf8_prefix(&pending);
+        if whole > 0 {
+            ctx.stream_output(&String::from_utf8_lossy(&pending[..whole]), stderr);
+            pending.drain(..whole);
+        }
+    }
+    if !pending.is_empty() {
+        ctx.stream_output(&String::from_utf8_lossy(&pending), stderr);
+    }
+    Ok(kept)
+}
+
+/// How much of `bytes` can be shown now: all but a character cut off at
+/// the end, which the next read completes.
+fn utf8_prefix(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        // Not UTF-8 at all: shown with replacement characters.
+        Err(_) => bytes.len(),
+    }
 }
 
 /// Kills the process group led by this pid when dropped.
@@ -517,7 +547,7 @@ impl Tool for RequestAccess {
 mod tests {
     use super::{
         Access, Bash, Context, MAX_OUTPUT, Read, ReadImage, RequestAccess, Tool, Write, lines,
-        truncate,
+        truncate, utf8_prefix,
     };
     use crate::provider::ImageSource;
     use crate::store::SessionId;
@@ -768,6 +798,14 @@ mod tests {
         );
         let out = lines(&"y".repeat(MAX_OUTPUT + 1), 1, None);
         assert!(out.ends_with("y[output truncated; read on with offset 2]"));
+    }
+
+    #[test]
+    fn utf8_prefix_holds_back_a_cut_char() {
+        let e = "é".as_bytes();
+        assert_eq!(utf8_prefix(b"ab"), 2);
+        assert_eq!(utf8_prefix(&[b'a', e[0]]), 1);
+        assert_eq!(utf8_prefix(&[b'a', 0xff, b'b']), 3);
     }
 
     #[test]

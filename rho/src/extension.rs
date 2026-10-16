@@ -437,6 +437,8 @@ struct Inner {
     extensions: OnceLock<Vec<Arc<dyn DynExtension>>>,
     /// Extension state by type, see `Context::state`.
     states: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    /// The tool call that runs now, for `Context::stream_output`.
+    tool_call: Mutex<Option<ToolCallId>>,
 }
 
 impl Context {
@@ -463,7 +465,26 @@ impl Context {
             info: Mutex::default(),
             extensions: OnceLock::new(),
             states: Mutex::default(),
+            tool_call: Mutex::default(),
         }))
+    }
+
+    /// Shows output of the running tool call as it arrives. The tool's
+    /// result still goes to the model; this is only for the user.
+    pub fn stream_output(&self, chunk: &str, stderr: bool) {
+        let id = self.0.tool_call.lock().unwrap().clone();
+        if let Some(id) = id {
+            self.emit(AgentEvent::ToolStream {
+                id: &id,
+                chunk,
+                stderr,
+            });
+        }
+    }
+
+    /// Set by the agent loop while a tool runs; tool calls run one at a time.
+    pub(crate) fn set_tool_call(&self, id: Option<ToolCallId>) {
+        *self.0.tool_call.lock().unwrap() = id;
     }
 
     pub(crate) fn set_extensions(&self, extensions: Vec<Arc<dyn DynExtension>>) {

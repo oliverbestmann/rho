@@ -23,7 +23,20 @@ use crate::provider::{ToolCallId, ToolName};
 use crate::tools::DynTool;
 
 use super::ConnId;
-use super::update::{LastUsage, Shown, busy_update, form_answers, form_schema, to_update};
+use super::update::{
+    LastUsage, Shown, busy_update, form_answers, form_schema, red, terminal_output, to_update,
+};
+
+/// Output a terminal card shows of one call, so a flood does not swamp the
+/// client; the model's copy is cut separately.
+const STREAM_CAP: usize = 1024 * 1024;
+
+/// What a running terminal call has shown: `$ command`, then the output.
+struct Streamed {
+    text: String,
+    /// The tool streamed output, so `ToolEnd` need not send it.
+    from_tool: bool,
+}
 
 /// A connection that opened the session.
 #[derive(Clone)]
@@ -78,6 +91,8 @@ pub(super) struct AcpFrontend {
     /// call's content, so it has to repeat the command or the questions.
     /// Terminals stay terminals here, see `Shown::for_viewer`.
     shown: Mutex<HashMap<ToolCallId, Shown>>,
+    /// By id, for viewers that attach while the call runs.
+    streamed: Mutex<HashMap<ToolCallId, Streamed>>,
     published: Mutex<Published>,
     /// A run is registered (see `Hub::start_run`).
     busy: AtomicBool,
@@ -96,6 +111,7 @@ impl AcpFrontend {
             ready: broadcast::channel(16).0,
             running: Mutex::default(),
             shown: Mutex::default(),
+            streamed: Mutex::default(),
             published: Mutex::default(),
             busy: AtomicBool::new(false),
             tools: OnceLock::new(),
@@ -135,9 +151,18 @@ impl AcpFrontend {
             self.deliver(v, update, To::Only(conn));
         }
         if !caught_up {
-            for (_, terminal, plain) in self.running.lock().unwrap().iter() {
+            for (id, terminal, plain) in self.running.lock().unwrap().iter() {
                 let update = if v.terminal { terminal } else { plain };
                 self.deliver(v, update.clone(), To::Only(conn));
+                let shown = self
+                    .streamed
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .map(|s| s.text.clone());
+                if let Some(text) = shown.filter(|_| v.terminal) {
+                    self.deliver(v, terminal_output(id, &text), To::Only(conn));
+                }
             }
             if self.busy.load(Ordering::Relaxed) {
                 self.deliver(v, busy_update(true), To::Only(conn));
@@ -206,6 +231,9 @@ impl AcpFrontend {
         if matches!(ev, AgentEvent::Profile(_)) && self.options().is_empty() {
             return;
         }
+        if let AgentEvent::ToolStream { id, chunk, stderr } = ev {
+            return self.stream(id, chunk, stderr, to);
+        }
         let n = self.notices.fetch_add(1, Ordering::Relaxed);
         let shown = match &ev {
             AgentEvent::ToolStart {
@@ -224,7 +252,14 @@ impl AcpFrontend {
                 }
                 shown
             }
-            AgentEvent::ToolEnd { id, .. } => self.shown.lock().unwrap().remove(*id),
+            AgentEvent::ToolEnd { id, .. } => {
+                let from_tool = self.streamed.lock().unwrap().remove(*id);
+                let mut shown = self.shown.lock().unwrap().remove(*id);
+                if let Some(Shown::Terminal { streamed, .. }) = &mut shown {
+                    *streamed = from_tool.is_some_and(|s| s.from_tool);
+                }
+                shown
+            }
             _ => None,
         };
         // Built even without viewers: it records what a later one is sent.
@@ -251,6 +286,52 @@ impl AcpFrontend {
         for v in self.viewers.lock().unwrap().iter_mut() {
             if to.includes(v.conn) {
                 let update = if v.terminal { &terminal } else { &plain };
+                self.deliver(v, update.clone(), to);
+            }
+        }
+        if let (AgentEvent::ToolStart { id, .. }, Some(Shown::Terminal { command, .. })) =
+            (&ev, &shown)
+        {
+            let text = format!("$ {command}\n");
+            self.send_terminal(id, &text, to);
+            let started = Streamed {
+                text,
+                from_tool: false,
+            };
+            self.streamed.lock().unwrap().insert((*id).clone(), started);
+        }
+    }
+
+    /// Streamed output of a terminal call, stderr in red, up to `STREAM_CAP`.
+    fn stream(&self, id: &ToolCallId, chunk: &str, stderr: bool, to: To) {
+        let data = {
+            let mut streamed = self.streamed.lock().unwrap();
+            // Not a terminal, or it ended.
+            let Some(s) = streamed.get_mut(id) else {
+                return;
+            };
+            s.from_tool = true;
+            if s.text.len() >= STREAM_CAP {
+                return;
+            }
+            let mut data = if stderr {
+                red(chunk)
+            } else {
+                chunk.to_string()
+            };
+            if s.text.len() + data.len() >= STREAM_CAP {
+                data.push_str("\n[more output not shown]\n");
+            }
+            s.text.push_str(&data);
+            data
+        };
+        self.send_terminal(id, &data, to);
+    }
+
+    fn send_terminal(&self, id: &ToolCallId, data: &str, to: To) {
+        let update = terminal_output(id, data);
+        for v in self.viewers.lock().unwrap().iter_mut() {
+            if v.terminal && to.includes(v.conn) {
                 self.deliver(v, update.clone(), to);
             }
         }

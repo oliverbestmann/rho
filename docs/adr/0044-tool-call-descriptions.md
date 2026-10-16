@@ -29,6 +29,10 @@ as its title". That is `Read`, `Write`, `Edit`, `Bash`, `BackgroundTask`,
   title. (Since 2026-10-15 MCP tools without their own `description`
   input get rho's, required; `Mcp` strips it before the call goes to the
   server and the tool is `titled`.)
+- Zed's terminal card shows only the title in its header and only the
+  output when opened, so for a `Bash` terminal card the output starts
+  with `$ <command>` (see ADR 0055). Clients without terminals get the
+  command as a `sh` block.
 
 ## Consequences
 
