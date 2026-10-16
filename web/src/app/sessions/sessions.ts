@@ -4,10 +4,11 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, errorText } from '../acp';
 import { ago } from '../time';
-import { dir, listSessions } from './list';
+import { dir, isRunning, listSessions } from './list';
 
 @Component({
   selector: 'app-sessions',
@@ -17,6 +18,7 @@ import { dir, listSessions } from './list';
     MatIconModule,
     MatListModule,
     MatProgressBarModule,
+    MatProgressSpinnerModule,
     MatToolbarModule,
   ],
   template: `
@@ -43,23 +45,77 @@ import { dir, listSessions } from './list';
           [queryParams]="{ cwd: s.cwd, title: s.title }"
         >
           @if (waiting().has(s.sessionId)) {
-            <mat-icon matListItemIcon class="waiting" aria-label="Waiting for an answer"
-              >help</mat-icon
-            >
+            <span matListItemAvatar class="avatar waiting" aria-label="Waiting for an answer">
+              <mat-icon>help</mat-icon>
+            </span>
+          } @else if (isRunning(s)) {
+            <span matListItemAvatar class="avatar" aria-label="Running">
+              <mat-spinner diameter="20" />
+            </span>
+          } @else {
+            <span matListItemAvatar class="avatar"><mat-icon>chat_bubble</mat-icon></span>
           }
           <span matListItemTitle>{{ s.title || 'Untitled' }}</span>
-          <span matListItemLine>{{ dir(s.cwd) }} · {{ ago(s.updatedAt) }}</span>
+          <span matListItemLine [title]="s.cwd">{{ dir(s.cwd) }}</span>
+          <span matListItemMeta class="time">{{ ago(s.updatedAt) }}</span>
         </a>
       } @empty {
         @if (sessions.hasValue()) {
-          <p class="message">No sessions yet.</p>
+          <div class="empty">
+            <mat-icon>forum</mat-icon>
+            <p>No sessions yet.</p>
+          </div>
         }
       }
     </mat-nav-list>
   `,
   styles: `
+    mat-toolbar {
+      background: var(--mat-sys-surface);
+    }
     .title {
       flex: 1;
+      font: var(--mat-sys-headline-small);
+    }
+    mat-nav-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 8px 16px 24px;
+    }
+    a.mat-mdc-list-item {
+      border-radius: var(--mat-sys-corner-large);
+      background: var(--mat-sys-surface-container-low);
+    }
+    .avatar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--mat-sys-primary-container);
+      color: var(--mat-sys-on-primary-container);
+      --mat-progress-spinner-active-indicator-color: currentColor;
+    }
+    .avatar.waiting {
+      background: var(--mat-sys-tertiary-container);
+      color: var(--mat-sys-on-tertiary-container);
+    }
+    .time {
+      font: var(--mat-sys-label-medium);
+      color: var(--mat-sys-on-surface-variant);
+    }
+    .empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px;
+      color: var(--mat-sys-on-surface-variant);
+    }
+    .empty mat-icon {
+      width: 48px;
+      height: 48px;
+      font-size: 48px;
     }
     .message {
       padding: 16px;
@@ -68,9 +124,6 @@ import { dir, listSessions } from './list';
     .error {
       color: var(--mat-sys-error);
     }
-    .waiting {
-      color: var(--mat-sys-tertiary);
-    }
   `,
 })
 export class Sessions {
@@ -78,6 +131,7 @@ export class Sessions {
   private readonly router = inject(Router);
   protected readonly ago = ago;
   protected readonly dir = dir;
+  protected readonly isRunning = isRunning;
   protected readonly errorText = errorText;
 
   protected readonly sessions = resource({
