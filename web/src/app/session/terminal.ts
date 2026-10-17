@@ -14,6 +14,12 @@ import type { FitAddon } from '@xterm/addon-fit';
 @Component({
   selector: 'app-terminal',
   template: '',
+  host: {
+    // xterm's touch handling (on document) blocks page scrolling over it.
+    '(touchstart)': '$event.stopPropagation()',
+    '(touchmove)': '$event.stopPropagation()',
+    '(touchend)': '$event.stopPropagation()',
+  },
   styles: `
     :host {
       display: block;
