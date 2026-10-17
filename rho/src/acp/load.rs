@@ -174,7 +174,10 @@ fn replay_history(
                 },
                 Content::Image { source } => user.push(image_block(source)),
                 Content::Text { text } => emit(AgentEvent::Text(text)),
-                Content::Thinking { thinking, .. } => emit(AgentEvent::Thinking(thinking)),
+                Content::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                    emit(AgentEvent::Thinking(thinking))
+                }
+                Content::Thinking { .. } => {}
                 Content::ToolUse { id, name, input } => {
                     let tool = frontend.tools.get().and_then(|t| t.get(name));
                     let description = tool.and_then(|t| t.describe(input));

@@ -244,6 +244,7 @@ impl Session {
         let mut content: Vec<Content> = Vec::new();
         let mut stop = StopReason::EndTurn;
         let mut usage = Usage::default();
+        let mut thought = false;
         while let Some(event) = stream.next().await {
             match event? {
                 Event::TextDelta(delta) => {
@@ -253,7 +254,13 @@ impl Session {
                         _ => content.push(Content::text(delta)),
                     }
                 }
-                Event::ThinkingDelta(delta) => ctx.emit(AgentEvent::Thinking(&delta)),
+                // Blank thinking (e.g. omitted or an empty summary part) would
+                // show an empty thought; later whitespace separates words.
+                Event::ThinkingDelta(delta) if thought || !delta.trim().is_empty() => {
+                    thought = true;
+                    ctx.emit(AgentEvent::Thinking(&delta));
+                }
+                Event::ThinkingDelta(_) => {}
                 Event::Block(block) => content.push(block),
                 Event::Usage(u) => {
                     // A request can report usage more than once; each

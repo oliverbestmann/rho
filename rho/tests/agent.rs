@@ -27,7 +27,11 @@ fn tool_then_answer() -> Vec<Vec<Event>> {
     };
     vec![
         vec![
+            // Leading blank thinking is not shown, later whitespace is.
+            Event::ThinkingDelta("".into()),
+            Event::ThinkingDelta("\n\n".into()),
             Event::ThinkingDelta("need a tool".into()),
+            Event::ThinkingDelta(" ".into()),
             Event::Block(thinking),
             text("Let me look."),
             Event::Block(Content::ToolUse {
@@ -76,8 +80,10 @@ async fn agent_runs_tools_and_feeds_results_back() {
     let history = &session.history;
     assert_eq!(stop, StopReason::EndTurn);
     assert!(log.iter().any(|l| l.contains("ToolStart")), "{log:?}");
-    assert!(
-        log.contains(&r#"Thinking("need a tool")"#.to_string()),
+    let thoughts: Vec<_> = log.iter().filter(|l| l.starts_with("Thinking")).collect();
+    assert_eq!(
+        thoughts,
+        [r#"Thinking("need a tool")"#, r#"Thinking(" ")"#],
         "{log:?}"
     );
     assert_eq!(log.iter().filter(|l| l.starts_with("Usage")).count(), 2);
@@ -261,7 +267,7 @@ async fn acp_session_streams_text_and_tool_calls() {
                         }
                     }
                     assert_eq!(text, "Let me look.The tool said from-tool.");
-                    assert_eq!(thoughts, "need a tool");
+                    assert_eq!(thoughts, "need a tool ");
                     // used = whole prompt + output; size = provider's default window.
                     assert_eq!(used, vec![(1015, 200_000), (1037, 200_000)]);
                     // The tool, then the turn's usage notice.
