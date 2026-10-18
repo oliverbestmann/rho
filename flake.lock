@@ -18,7 +18,25 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "zvec-grep": "zvec-grep"
+      }
+    },
+    "zvec-grep": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792055110,
+        "narHash": "sha256-udRYd0Qh+5LTUjWuhmQF9BOGr/ZYX0mhVLjypR76kTk=",
+        "owner": "zvec-ai",
+        "repo": "zvec-grep",
+        "rev": "2d7d2ac220d1baf840694d937fea7054d091e33d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "zvec-ai",
+        "repo": "zvec-grep",
+        "rev": "2d7d2ac220d1baf840694d937fea7054d091e33d",
+        "type": "github"
       }
     }
   },

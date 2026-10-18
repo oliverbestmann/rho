@@ -1,10 +1,17 @@
 {
   description = "rho - an ACP native agent";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # zg for SemanticSearch, built below.
+    zvec-grep = {
+      url = "github:zvec-ai/zvec-grep/2d7d2ac220d1baf840694d937fea7054d091e33d";
+      flake = false;
+    };
+  };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, zvec-grep, ... }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "x86_64-linux"
@@ -40,9 +47,51 @@
             preBuild = pkgs.lib.optionalString pkgs.stdenv.isLinux "autoPatchelf node_modules/sass-embedded-linux-*";
             installPhase = "cp -r dist/web/browser $out";
           };
+          target = pkgs.stdenv.hostPlatform.rust.rustcTarget;
+          # zvec-rust-sys would download this in its build script; the nix sandbox has no network.
+          zvec = pkgs.stdenv.mkDerivation {
+            pname = "zvec-prebuilt";
+            version = "0.7.2";
+            src = pkgs.fetchurl {
+              url = "https://github.com/zvec-ai/zvec-rust/releases/download/v0.7.2/zvec-prebuilt-${target}.tar.gz";
+              hash =
+                {
+                  x86_64-unknown-linux-gnu = "sha256-EjveZO2LquXqgTkHr1qzV1ETKB64H8pTEPKKD+T/uSs=";
+                  aarch64-unknown-linux-gnu = "sha256-fIrdghvCR+zbemiNRWrmD03KkQeOlCCEMAdXvy2dkfs=";
+                  aarch64-apple-darwin = "sha256-X9Etdlm0lb9rBroXOHbkANrh3BnV4E6EaDgcgoZ+pH8=";
+                }
+                .${target};
+            };
+            sourceRoot = ".";
+            nativeBuildInputs = pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.autoPatchelfHook;
+            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+            installPhase = "mkdir -p $out && cp -r . $out";
+          };
+          # The zvec-grep CLI, as in zvec-grep's rust/flake.nix.
+          zg = pkgs.rustPlatform.buildRustPackage {
+            pname = "zg";
+            version = "0.0.1";
+            src = "${zvec-grep}/rust";
+            cargoLock.lockFile = "${zvec-grep}/rust/Cargo.lock";
+            cargoBuildFlags = [ "-p" "zg" ];
+            doCheck = false;
+            nativeBuildInputs = with pkgs; [
+              rustPlatform.bindgenHook
+              cmake
+              pkg-config
+              perl
+              git
+            ];
+            dontUseCmakeConfigure = true;
+            ZVEC_LIB_DIR = "${zvec}";
+            ZVEC_AUTO_BUILD = "0";
+            # Link nixpkgs onnxruntime instead of letting ort-sys download its static build.
+            ORT_LIB_PATH = "${pkgs.onnxruntime}/lib";
+            ORT_PREFER_DYNAMIC_LINK = "1";
+          };
         in
         {
-          inherit web;
+          inherit web zg;
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "rho";
             version = "0.1.0";
@@ -61,6 +110,9 @@
             RHO_WEB_DIR = "${web}";
             # Tests run in the dev shell; some need the network or a writable home.
             doCheck = false;
+            # SemanticSearch looks up `zg` on the PATH.
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postInstall = "wrapProgram $out/bin/rho --prefix PATH : ${zg}/bin";
           };
         }
       );
