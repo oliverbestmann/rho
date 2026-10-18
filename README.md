@@ -8,8 +8,8 @@ A small ACP-native coding agent in Rust. Prototype.
 - Claude through a Pro/Max subscription (OAuth), with adaptive thinking and
   prompt caching. Claude and GPT models through GitHub Copilot.
 - `models.json` limits the models a session may use, by path.
-- A web client in `web/` for following and answering sessions from a
-  phone, through the daemon.
+- A web client in `web/` for following, answering and starting sessions
+  from a phone, through the daemon.
 - Built-in tools: `Read`, `ReadImage`, `Write`, `Edit` (exact replacements),
   `Bash`, `RequestAccess`.
 - Deny-by-default Landlock sandbox per session. The user approves more
@@ -539,7 +539,9 @@ shared agent, so the extensions (memory, MCP, ...) and open sessions are
 shared. It replaces the earlier web view (ADR 0020): to follow a Zed
 session from a phone, load it in the web client (`web/`) or acp-ui. The
 nix package bundles the web client and serves it on `http://ADDR/`
-(`RHO_WEB_DIR` points to another build).
+(`RHO_WEB_DIR` points to another build). Connections on this listener
+start sessions only under `~` or `/tmp` (ADR 0057); the socket has no
+such limit.
 
 Every client needs the token, also from this machine, since any website can
 open a WebSocket to localhost. It is `RHO_ACP_TOKEN`, else

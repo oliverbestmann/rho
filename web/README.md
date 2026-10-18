@@ -5,6 +5,8 @@ a phone or browser. Angular, Material 3 and `@agentclientprotocol/sdk` over
 WebSocket.
 
 - Lists the sessions, newest first.
+- Starts a session in a directory under `~` or `/tmp`, with completion
+  per level and folder creation (ADR 0057).
 - Opens a session (`session/load`): transcript, tool calls, usage.
 - Sends prompts and stops turns.
 - Answers permission requests and forms, also ones raised while away.

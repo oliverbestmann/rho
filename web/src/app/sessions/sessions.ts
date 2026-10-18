@@ -24,6 +24,7 @@ import { dir, isRunning, listSessions } from './list';
   template: `
     <mat-toolbar>
       <span class="title">Sessions</span>
+      <a matIconButton routerLink="/new" aria-label="New session"><mat-icon>add</mat-icon></a>
       <button matIconButton aria-label="Refresh" (click)="sessions.reload()">
         <mat-icon>refresh</mat-icon>
       </button>

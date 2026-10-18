@@ -104,7 +104,7 @@ async fn a_second_connection_follows_and_continues_a_session() {
     let a_updates = Updates::default();
     let a_cwd = cwd.clone();
     let a = tokio::spawn(client!(a_updates).connect_with(
-        rho::acp::agent_in(agent.clone(), hub.clone()),
+        rho::acp::agent_in(agent.clone(), hub.clone(), false),
         async move |cx: ConnectionTo<_>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
@@ -127,7 +127,7 @@ async fn a_second_connection_follows_and_continues_a_session() {
     tokio::time::timeout(
         Duration::from_secs(10),
         client!(b_updates).connect_with(
-            rho::acp::agent_in(agent.clone(), hub.clone()),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -206,7 +206,7 @@ async fn a_turn_outlives_its_connection() {
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
         Client.builder().connect_with(
-            rho::acp::agent_in(agent.clone(), hub.clone()),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -232,7 +232,7 @@ async fn a_turn_outlives_its_connection() {
     tokio::time::timeout(
         Duration::from_secs(10),
         client!(b_updates).connect_with(
-            rho::acp::agent_in(agent.clone(), hub.clone()),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -318,7 +318,7 @@ async fn a_question_waits_for_the_next_connection() {
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(
-                rho::acp::agent_in(agent.clone(), hub.clone()),
+                rho::acp::agent_in(agent.clone(), hub.clone(), false),
                 async |cx: ConnectionTo<_>| {
                     cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                         .block_task()
@@ -373,7 +373,7 @@ async fn a_question_waits_for_the_next_connection() {
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(
-                rho::acp::agent_in(agent.clone(), hub.clone()),
+                rho::acp::agent_in(agent.clone(), hub.clone(), false),
                 async |cx: ConnectionTo<_>| {
                     cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                         .block_task()
@@ -425,7 +425,7 @@ async fn a_config_change_reaches_the_other_viewers() {
     let a_updates = Updates::default();
     let a_cwd = cwd.clone();
     let a = tokio::spawn(client!(a_updates).connect_with(
-        rho::acp::agent_in(agent.clone(), hub.clone()),
+        rho::acp::agent_in(agent.clone(), hub.clone(), false),
         async move |cx: ConnectionTo<_>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
@@ -454,7 +454,7 @@ async fn a_config_change_reaches_the_other_viewers() {
     tokio::time::timeout(
         Duration::from_secs(10),
         client!(b_updates).connect_with(
-            rho::acp::agent_in(agent.clone(), hub.clone()),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -493,4 +493,28 @@ async fn a_config_change_reaches_the_other_viewers() {
             .iter()
             .any(|u| matches!(u, SessionUpdate::ConfigOptionUpdate(_)))
     );
+}
+
+#[tokio::test]
+async fn web_connections_start_sessions_only_under_home_or_tmp() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = agent(Scripted::new(vec![]), &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+    for web_limits in [true, false] {
+        let started = Client
+            .builder()
+            .connect_with(
+                rho::acp::agent_in(agent.clone(), hub.clone(), web_limits),
+                async |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    cx.send_request(NewSessionRequest::new("/"))
+                        .block_task()
+                        .await
+                },
+            )
+            .await;
+        assert_eq!(started.is_ok(), !web_limits, "web_limits {web_limits}");
+    }
 }

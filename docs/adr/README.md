@@ -64,3 +64,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0054](0054-plan-approval-as-permission-request.md) | Plan approval is a permission request on the tool call again | Accepted |
 | [0055](0055-streamed-bash-output.md) | Bash output streams into Zed's terminal card | Accepted |
 | [0056](0056-semantic-search-via-zg.md) | Semantic code search via the zg CLI | Accepted |
+| [0057](0057-new-sessions-from-the-web.md) | New sessions from the web client, under ~ or /tmp | Accepted |

@@ -315,7 +315,9 @@ async fn upgrade(
     ws.protocols([SUBPROTOCOL])
         .on_upgrade(async move |socket| {
             eprintln!("rho acp: connection opened");
-            let acp = crate::acp::agent_in(server.agent.clone(), server.hub.clone());
+            // Only the TCP listener, where the web client connects, has a token.
+            let web_limits = server.token.is_some();
+            let acp = crate::acp::agent_in(server.agent.clone(), server.hub.clone(), web_limits);
             match acp.connect_to(lines(socket)).await {
                 Ok(()) => eprintln!("rho acp: connection closed"),
                 Err(e) => eprintln!("rho acp: connection ended: {e}"),

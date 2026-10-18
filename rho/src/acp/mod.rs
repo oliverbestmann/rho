@@ -25,6 +25,7 @@ use crate::provider::{self, Content, ImageSource};
 use crate::store::{self, Store};
 
 mod config;
+mod dirs;
 mod frontend;
 mod hub;
 mod load;
@@ -61,6 +62,8 @@ struct State {
     hub: Arc<Hub>,
     conn: ConnId,
     caps: ClientCaps,
+    /// The web client's connection: new sessions only under `$HOME` or `/tmp`.
+    web_limits: bool,
 }
 
 impl State {
@@ -88,17 +91,18 @@ impl Drop for State {
 /// Builds the ACP agent with its own hub; connect it to a transport, e.g.
 /// `Stdio::new()`.
 pub fn agent(agent: Arc<Agent>) -> impl ConnectTo<Client> {
-    agent_in(agent, Arc::default())
+    agent_in(agent, Arc::default(), false)
 }
 
 /// Builds the ACP agent for one connection; connections on the same `hub`
-/// share open sessions.
-pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
+/// share open sessions. `web_limits`: see `State`.
+pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl ConnectTo<Client> {
     let state = Arc::new(State {
         agent,
         hub,
         conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
         caps: ClientCaps::default(),
+        web_limits,
     });
     let (init_state, new_state, prompt_state, config_state, cancel_state) = (
         state.clone(),
@@ -156,6 +160,16 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
             async move |req: NewSessionRequest,
                         responder: Responder<NewSessionResponse>,
                         cx: ConnectionTo<Client>| {
+                if new_state.web_limits {
+                    let roots = dirs::roots();
+                    let checked = std::iter::once(&req.cwd)
+                        .chain(&req.additional_directories)
+                        .try_for_each(|d| dirs::allowed(d, &roots).map(drop));
+                    if let Err(e) = checked {
+                        return responder
+                            .respond_with_error(Error::invalid_params().data(format!("{e:#}")));
+                    }
+                }
                 // Unique across processes: sessions are stored by id.
                 let id = store::SessionId::generate();
                 let sid = SessionId::new(id.as_str());
@@ -345,6 +359,33 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>) -> impl ConnectTo<Client> {
                             .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
                     }
                 })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: dirs::DirsRequest, responder: Responder<dirs::DirsResponse>, cx| {
+                cx.spawn(async move {
+                    let found =
+                        tokio::task::spawn_blocking(move || dirs::dirs(&req.path, &dirs::roots()))
+                            .await;
+                    match found {
+                        Ok(Ok(r)) => responder.respond(r),
+                        Ok(Err(e)) => responder
+                            .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
+                        Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
+                    }
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: dirs::MkdirRequest, responder: Responder<dirs::MkdirResponse>, _cx| {
+                match dirs::mkdir(&req.path, &dirs::roots()) {
+                    Ok(dir) => responder.respond(dirs::MkdirResponse { dir }),
+                    Err(e) => {
+                        responder.respond_with_error(Error::invalid_params().data(format!("{e:#}")))
+                    }
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )
