@@ -62,7 +62,7 @@ Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
-  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
+  `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
   `Skills`, `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
@@ -403,6 +403,10 @@ Ports of the other pi extensions:
   Code's. Both run `rg`, sandboxed like `Bash`, 50 lines by default.
 - `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,
   sandboxed, so the module cache and `GOCACHE` must be accessible.
+- `SemanticSearch` searches code by meaning with zvec-grep when `zg` is on
+  `PATH`. It runs `zg --mode direct` sandboxed, with access to
+  `~/.zvec-grep` and the index added per call, and creates an index at the
+  search directory if none above it is readable (ADR 0056).
 - `FetchUrl` (pi's `fetch_url`) fetches a URL; HTML becomes markdown via
   `htmd`. The network is not sandboxed.
 - `Memory` (pi's `memory`) stores memories in `memory.db` in the config dir,

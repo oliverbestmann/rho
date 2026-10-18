@@ -16,6 +16,7 @@ mod ponytail;
 mod project_context;
 mod ripgrep_find;
 mod secrets;
+mod semantic_search;
 mod session_title;
 mod skills;
 
@@ -31,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(go_check::GoCheck::default()),
             Arc::new(ripgrep_find::RipgrepFind),
             Arc::new(go_doc::GoDoc),
+            Arc::new(semantic_search::SemanticSearch),
             Arc::new(fetch_url::FetchUrl),
             Arc::new(mcp::Mcp::from_config()),
             Arc::new(memory::Memory::default()),
