@@ -10,9 +10,6 @@ import {
 import type { Terminal as Xterm } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 
-/** Most rows shown; more output scrolls. */
-const MAX_ROWS = 24;
-
 /** Terminal output rendered by xterm.js, which loads on first use. */
 @Component({
   selector: 'app-terminal',
@@ -84,12 +81,12 @@ export class TerminalView {
     this.written = data.length;
   }
 
-  /** Width from the fit addon; height grows with the output up to `MAX_ROWS`. */
+  /** Width from the fit addon; height grows with the output, so it never scrolls. */
   private resize() {
     const term = this.term;
     const cols = this.fit?.proposeDimensions()?.cols;
     if (!term || !cols) return;
-    const rows = Math.min(Math.max(term.buffer.active.length, 1), MAX_ROWS);
+    const rows = Math.max(term.buffer.active.length, 1);
     if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
   }
 }
