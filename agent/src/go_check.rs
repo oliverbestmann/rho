@@ -1,6 +1,7 @@
 //! After the agent settles in a Go module, runs `go test` and `go vet`. On
 //! failure the output goes back to the model and the run continues, at most
 //! `MAX_FAILURES` times in a row per prompt (pi's go-check has no limit).
+//! The model gets the end of the output, as an automated message.
 //!
 //! The checks run the model's code, so they run in the session's sandbox,
 //! like Bash: the module cache and `GOCACHE` must be writable (`~/go`,
@@ -8,12 +9,35 @@
 //! have changed there, and `go` could not write its cache.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
 
-use rho::extension::{Context, Extension, PromptSetup, Settle};
+use rho::extension::{
+    CommandName, Context, Extension, PromptSetup, SessionSetup, Settle, SlashCommand,
+};
 
 /// Failed checks in a row (per session) before giving back to the user.
-pub const MAX_FAILURES: u32 = 3;
+pub const MAX_FAILURES: u32 = 1;
+/// Each check is killed after this.
+const TIMEOUT: Duration = Duration::from_secs(300);
+/// How much of a failed check's output the model gets, from the end, where
+/// `go test` puts the failures and the summary.
+const TAIL_LINES: usize = 50;
+const TAIL_BYTES: usize = 50 * 1024;
+
+/// The last `TAIL_LINES` lines of `text`, at most `TAIL_BYTES`, marked if cut.
+fn tail(text: &str) -> String {
+    let text = text.trim();
+    let start = text
+        .rmatch_indices('\n')
+        .nth(TAIL_LINES - 1)
+        .map_or(0, |(i, _)| i + 1)
+        .max(text.ceil_char_boundary(text.len().saturating_sub(TAIL_BYTES)));
+    if start == 0 {
+        return text.into();
+    }
+    format!("[earlier output cut]\n{}", &text[start..])
+}
 
 pub struct GoCheck {
     /// The `go` binary; tests use a mock.
@@ -24,6 +48,12 @@ pub struct GoCheck {
 #[derive(Default)]
 struct Failures(AtomicU32);
 
+/// Turned off with `/go:check` for this session.
+#[derive(Default)]
+struct Disabled(AtomicBool);
+
+const TOGGLE: CommandName = CommandName::from_static("go:check");
+
 impl Default for GoCheck {
     fn default() -> Self {
         Self { go: "go".into() }
@@ -33,6 +63,29 @@ impl Default for GoCheck {
 const CHECKS: [[&str; 2]; 2] = [["test", "./..."], ["vet", "./..."]];
 
 impl Extension for GoCheck {
+    async fn session_start(&self, session: &mut SessionSetup) {
+        if session.ctx.cwd().join("go.mod").exists() {
+            session.commands.push(SlashCommand {
+                name: TOGGLE,
+                description: "Turn the go test / go vet check at the end of a turn off or on"
+                    .into(),
+                hint: None,
+            });
+        }
+    }
+
+    async fn command(&self, ctx: &Context, name: &CommandName, _args: &str) -> Option<String> {
+        if *name != TOGGLE {
+            return None;
+        }
+        // fetch_xor flips it and returns the old value.
+        let was_off = ctx.state::<Disabled>().0.fetch_xor(true, Ordering::Relaxed);
+        Some(format!(
+            "The go check at the end of a turn is {} for this session.",
+            if was_off { "on" } else { "off" }
+        ))
+    }
+
     /// A new prompt means the user is back in the loop: allow retries again.
     async fn before_prompt(&self, ctx: &Context, _prompt: &mut PromptSetup) {
         ctx.state::<Failures>().0.store(0, Ordering::Relaxed);
@@ -41,7 +94,11 @@ impl Extension for GoCheck {
     async fn before_settle(&self, ctx: &Context, settle: &Settle<'_>) -> Option<String> {
         // Skip pure Q&A runs: only check after tools that may have changed files.
         let changed = settle.tools_called.iter().any(|t| *t != rho::tools::READ);
-        if !changed || ctx.profile().read_only || !ctx.cwd().join("go.mod").exists() {
+        if !changed
+            || ctx.state::<Disabled>().0.load(Ordering::Relaxed)
+            || ctx.profile().read_only
+            || !ctx.cwd().join("go.mod").exists()
+        {
             return None;
         }
 
@@ -54,8 +111,17 @@ impl Extension for GoCheck {
                 .current_dir(ctx.cwd())
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true);
+            // shortcut: kill_on_drop kills `go`, not test binaries it started;
+            // kill the process group like Bash if they linger.
             let out = match ctx.sandbox_command(&mut cmd) {
-                Ok(()) => cmd.output().await,
+                Ok(()) => tokio::time::timeout(TIMEOUT, cmd.output())
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(std::io::Error::other(format!(
+                            "timed out after {}s",
+                            TIMEOUT.as_secs()
+                        )))
+                    }),
                 Err(e) => Err(std::io::Error::other(format!(
                     "setting up the sandbox: {e:#}"
                 ))),
@@ -66,7 +132,7 @@ impl Extension for GoCheck {
                     failed = true;
                     let text =
                         String::from_utf8_lossy(&o.stdout) + String::from_utf8_lossy(&o.stderr);
-                    results.push(format!("❌ {label}\n{}", text.trim()));
+                    results.push(format!("❌ {label}\n{}", tail(&text)));
                 }
                 Err(e) => {
                     failed = true;
@@ -87,13 +153,15 @@ impl Extension for GoCheck {
         if failures > MAX_FAILURES {
             ctx.notify(
                 "go check",
-                &format!("Still failing after {MAX_FAILURES} attempts; leaving it to you."),
+                "Still failing after the model's fix; leaving it to you.",
                 true,
             );
             return None;
         }
         Some(format!(
-            "Automatic `go test ./...` / `go vet ./...` check after your last change failed:\n\n{summary}\n\nPlease fix."
+            "<system-reminder>\nThis is not a message from the user. When your turn ended, rho ran \
+             `go test ./...` and `go vet ./...` automatically, and they failed:\n\n{summary}\n\n\
+             Please fix the failures. The checks run once more when you end your turn.\n</system-reminder>"
         ))
     }
 }
@@ -172,6 +240,34 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn tail_keeps_the_end() {
+        assert_eq!(tail("\na\nb\n"), "a\nb");
+        let lines: Vec<String> = (1..=60).map(|i| i.to_string()).collect();
+        let out = tail(&lines.join("\n"));
+        assert!(out.starts_with("[earlier output cut]\n11\n") && out.ends_with("\n60"));
+        let out = tail(&"é".repeat(TAIL_BYTES));
+        assert_eq!(out.len(), "[earlier output cut]\n".len() + TAIL_BYTES);
+    }
+
+    #[tokio::test]
+    async fn command_toggles_the_check() {
+        let bin = tempfile::tempdir().unwrap();
+        let go = GoCheck {
+            go: mock_go(bin.path(), "exit 1\n"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        passing_module(dir.path());
+        let ctx = ctx(dir.path());
+        let toggle = async || go.command(&ctx, &TOGGLE, "").await.unwrap();
+        assert!(toggle().await.contains("off"));
+        assert_eq!(check_in(&go, &ctx, &["Write"]).await, None);
+        assert!(toggle().await.contains("on"));
+        assert!(check_in(&go, &ctx, &["Write"]).await.is_some());
+        let other = CommandName::new("other");
+        assert!(go.command(&ctx, &other, "").await.is_none());
+    }
+
     #[tokio::test]
     async fn skipped_in_read_only_profiles() {
         let dir = tempfile::tempdir().unwrap();
@@ -240,10 +336,7 @@ pub(crate) mod tests {
             "test ./...\nvet ./...\n"
         );
 
-        // Gives up after MAX_FAILURES in a row ...
-        for _ in 1..MAX_FAILURES {
-            assert!(check_in(&go, &ctx, &["Write"]).await.is_some());
-        }
+        // Gives up when it fails again ...
         assert_eq!(check_in(&go, &ctx, &["Write"]).await, None);
         // ... until the user prompts again.
         let mut prompt = PromptSetup {

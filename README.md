@@ -366,7 +366,9 @@ async fn main() -> anyhow::Result<()> {
 - `state::<T>()` - the session's `T` (created with `Default`, dropped with the
   session), for per-session extension state; use a type private to the extension.
 
-`GoCheck` continues the run at most 3 times in a row per prompt; pi's
+`GoCheck` continues the run at most once in a row per prompt, with the last
+50 lines (at most 50 KB) of the failed checks (`/go:check` turns it off or on
+for the session); pi's
 go-check has no limit (neither pi nor rho limits the turns of a run).
 `go test` / `go vet` run sandboxed like `Bash`, so the module cache,
 `GOCACHE` and the temp dir must be writable; they are skipped in read-only

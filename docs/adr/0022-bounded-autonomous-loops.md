@@ -17,7 +17,8 @@ then burn quota indefinitely.
   ending the run with `StopReason::MaxTurns`; long legitimate runs hit it.)
 - `GoCheck` (runs `go test ./...` and `go vet ./...` after a run in a Go
   module that used a tool other than `Read`) continues the run with the
-  failures at most `MAX_FAILURES = 3` times in a row per session. Then it
+  failures at most `MAX_FAILURES = 1` time in a row per session (the last
+  50 lines, at most 50 KB, each check killed after 5 minutes). Then it
   tells the user it gives up. The count resets on a passing check and in
   `before_prompt`, i.e. on a new prompt but also on a run started by a
   triggered message (e.g. a finished background task).
