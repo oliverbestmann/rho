@@ -22,6 +22,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectChange } from '@angular/material/select';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { Acp, Ask, errorText, Opened } from '../acp';
 import { listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
@@ -54,6 +55,7 @@ import { Working } from './working';
     MatIconModule,
     MatProgressSpinnerModule,
     MatToolbarModule,
+    MatTooltipModule,
   ],
   templateUrl: './session.html',
   styleUrl: './session.scss',

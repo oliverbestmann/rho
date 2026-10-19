@@ -2,7 +2,9 @@
   <a matIconButton routerLink="/" aria-label="Back">
     <mat-icon>arrow_back</mat-icon>
   </a>
-  <span class="title">{{ title() }}</span>
+  <span class="title" [matTooltip]="title()" #tip="matTooltip" (click)="tip.toggle()">{{
+    title()
+  }}</span>
   @if (usage(); as usage) {
     <app-context-usage [usage]="usage" />
   }
