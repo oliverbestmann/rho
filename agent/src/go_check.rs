@@ -9,7 +9,7 @@
 //! have changed there, and `go` could not write its cache.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use rho::extension::{
@@ -48,9 +48,8 @@ pub struct GoCheck {
 #[derive(Default)]
 struct Failures(AtomicU32);
 
-/// Turned off with `/go:check` for this session.
-#[derive(Default)]
-struct Disabled(AtomicBool);
+/// `Context::stored` key, `true` while `/go:check` turned the check off.
+const OFF: &str = "go-check.off";
 
 const TOGGLE: CommandName = CommandName::from_static("go:check");
 
@@ -78,8 +77,8 @@ impl Extension for GoCheck {
         if *name != TOGGLE {
             return None;
         }
-        // fetch_xor flips it and returns the old value.
-        let was_off = ctx.state::<Disabled>().0.fetch_xor(true, Ordering::Relaxed);
+        let was_off = ctx.stored::<bool>(OFF).unwrap_or(false);
+        ctx.set_stored(OFF, !was_off);
         Some(format!(
             "The go check at the end of a turn is {} for this session.",
             if was_off { "on" } else { "off" }
@@ -95,7 +94,7 @@ impl Extension for GoCheck {
         // Skip pure Q&A runs: only check after tools that may have changed files.
         let changed = settle.tools_called.iter().any(|t| *t != rho::tools::READ);
         if !changed
-            || ctx.state::<Disabled>().0.load(Ordering::Relaxed)
+            || ctx.stored::<bool>(OFF).unwrap_or(false)
             || ctx.profile().read_only
             || !ctx.cwd().join("go.mod").exists()
         {

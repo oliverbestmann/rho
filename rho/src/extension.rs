@@ -437,6 +437,8 @@ struct Inner {
     extensions: OnceLock<Vec<Arc<dyn DynExtension>>>,
     /// Extension state by type, see `Context::state`.
     states: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    /// Extension values saved with the session, see `Context::stored`.
+    stored: Mutex<serde_json::Map<String, Value>>,
     /// The tool call that runs now, for `Context::stream_output`.
     tool_call: Mutex<Option<ToolCallId>>,
 }
@@ -465,6 +467,7 @@ impl Context {
             info: Mutex::default(),
             extensions: OnceLock::new(),
             states: Mutex::default(),
+            stored: Mutex::default(),
             tool_call: Mutex::default(),
         }))
     }
@@ -625,6 +628,29 @@ impl Context {
             .entry(TypeId::of::<T>())
             .or_insert_with(|| Arc::new(T::default()));
         state.clone().downcast().expect("slots are keyed by type")
+    }
+
+    /// The value an extension saved under `key` with `set_stored`, also in
+    /// an earlier run of a resumed session. `None` if there is none or it does
+    /// not parse as `T`. Prefix keys with the extension, e.g. `go-check.off`.
+    pub fn stored<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        let stored = self.0.stored.lock().unwrap();
+        serde_json::from_value(stored.get(key)?.clone()).ok()
+    }
+
+    /// Keeps `value` under `key` with the session: it is saved with the
+    /// session and back after a resume. Use `state` for what need not last.
+    pub fn set_stored(&self, key: &str, value: impl serde::Serialize) {
+        let value = serde_json::to_value(value).expect("stored values serialize");
+        self.0.stored.lock().unwrap().insert(key.into(), value);
+    }
+
+    pub(crate) fn all_stored(&self) -> serde_json::Map<String, Value> {
+        self.0.stored.lock().unwrap().clone()
+    }
+
+    pub(crate) fn restore_stored(&self, values: serde_json::Map<String, Value>) {
+        *self.0.stored.lock().unwrap() = values;
     }
 
     pub fn session_id(&self) -> &SessionId {

@@ -98,6 +98,11 @@ CREATE TABLE diffs (
 
 CREATE INDEX diffs_by_age ON diffs (created_at);
 "#,
+    r#"
+-- `Context::set_stored` values of extensions, a JSON object.
+ALTER TABLE sessions ADD COLUMN extension_state TEXT NOT NULL DEFAULT '{}'
+    CHECK (json_valid(extension_state) AND json_type(extension_state) = 'object');
+"#,
 ];
 
 /// Edit diffs older than this are deleted; the edit then shows its output only.
@@ -105,8 +110,8 @@ const DIFF_DAYS: i64 = 7;
 
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
     output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
-    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, features, created_at, \
-    updated_at";
+    last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, features, \
+    extension_state, created_at, updated_at";
 
 pub const MASK: &str = "REDACTED";
 
@@ -135,6 +140,8 @@ pub struct SessionInfo {
     pub profile: ProfileId,
     /// The features that are on.
     pub features: Vec<FeatureId>,
+    /// Values extensions keep with the session, see `Context::set_stored`.
+    pub extension_state: serde_json::Map<String, serde_json::Value>,
     /// Unix milliseconds.
     pub created_at: i64,
     pub updated_at: i64,
@@ -171,6 +178,7 @@ pub(crate) struct State {
     pub cost: f64,
     pub profile: ProfileId,
     pub features: Vec<FeatureId>,
+    pub extension_state: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A stored session ready to continue: its info, the `seq` of the first
@@ -435,9 +443,10 @@ impl Store {
                 "INSERT INTO sessions (id, cwd, additional_dirs, title, model, thinking,
                      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                      last_input_tokens, last_output_tokens, last_cache_read_tokens,
-                     last_cache_write_tokens, cost, profile, features, created_at, updated_at)
+                     last_cache_write_tokens, cost, profile, features, extension_state,
+                     created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?17, ?18, ?16, ?16)
+                     ?15, ?17, ?18, ?19, ?16, ?16)
                  ON CONFLICT (id) DO UPDATE SET
                      additional_dirs = excluded.additional_dirs,
                      title = COALESCE(excluded.title, title),
@@ -454,6 +463,7 @@ impl Store {
                      cost = excluded.cost,
                      profile = excluded.profile,
                      features = excluded.features,
+                     extension_state = excluded.extension_state,
                      updated_at = excluded.updated_at",
                 params![
                     s.id,
@@ -474,6 +484,7 @@ impl Store {
                     now,
                     s.profile,
                     serde_json::to_string(&s.features)?,
+                    serde_json::to_string(&s.extension_state)?,
                 ],
             )?;
             Ok(())
@@ -700,6 +711,7 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
     let thinking: String = r.get("thinking")?;
     let dirs: String = r.get("additional_dirs")?;
     let features: String = r.get("features")?;
+    let extension_state: String = r.get("extension_state")?;
     let usage = |col| r.get::<_, i64>(col).map(|n| n as u64);
     let info = SessionInfo {
         id: r.get("id")?,
@@ -724,6 +736,7 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
         epoch: r.get("epoch")?,
         profile: r.get("profile")?,
         features: vec![],
+        extension_state: Default::default(),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     };
@@ -731,6 +744,7 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
         Ok(SessionInfo {
             additional_dirs: serde_json::from_str(&dirs)?,
             features: serde_json::from_str(&features)?,
+            extension_state: serde_json::from_str(&extension_state)?,
             thinking: thinking.parse()?,
             ..info
         })
@@ -825,6 +839,10 @@ mod tests {
             cost: 0.5,
             profile: ProfileId::new("plan"),
             features: vec![FeatureId::new("ssh")],
+            extension_state: serde_json::json!({"go-check.off": true})
+                .as_object()
+                .unwrap()
+                .clone(),
         }
     }
 
@@ -853,6 +871,10 @@ mod tests {
         assert_eq!(loaded.info.last_usage.cache_write, 8);
         assert_eq!(loaded.info.profile, ProfileId::new("plan"));
         assert_eq!(loaded.info.features, [FeatureId::new("ssh")]);
+        assert_eq!(
+            loaded.info.extension_state["go-check.off"],
+            serde_json::json!(true)
+        );
 
         assert_eq!(
             store.next_epoch(&SessionId::new("s")).await.unwrap(),

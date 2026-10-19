@@ -4,8 +4,6 @@
 //! titled with the call's `description`, else the command. One approval,
 //! or `/git:allow`, allows all git mutations for the rest of the session.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use rho::extension::{
     CommandName, Context, Decision, Extension, SessionSetup, SlashCommand, ToolCall,
 };
@@ -17,9 +15,8 @@ pub struct GitGate;
 
 const ALLOW: CommandName = CommandName::from_static("git:allow");
 
-/// Set once the user allowed git mutations in this session.
-#[derive(Default)]
-struct Allowed(AtomicBool);
+/// `Context::stored` key, `true` once the user allowed git mutations in this session.
+const ALLOWED: &str = "git-gate.allowed";
 
 /// Tools whose `command` input runs in a shell.
 const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
@@ -77,7 +74,7 @@ impl Extension for GitGate {
         if *name != ALLOW {
             return None;
         }
-        ctx.state::<Allowed>().0.store(true, Ordering::Relaxed);
+        ctx.set_stored(ALLOWED, true);
         Some("Git commit, push and tag are allowed for the rest of the session.".into())
     }
 
@@ -89,8 +86,7 @@ impl Extension for GitGate {
         if !mutates_git(command) {
             return Decision::Allow;
         }
-        let allowed = ctx.state::<Allowed>();
-        if allowed.0.load(Ordering::Relaxed) {
+        if ctx.stored::<bool>(ALLOWED) == Some(true) {
             return Decision::Allow;
         }
         let title = call.input["description"]
@@ -99,7 +95,7 @@ impl Extension for GitGate {
             .filter(|d| !d.is_empty())
             .unwrap_or(command);
         if ctx.confirm(Some(&call.id), title).await {
-            allowed.0.store(true, Ordering::Relaxed);
+            ctx.set_stored(ALLOWED, true);
             Decision::Allow
         } else {
             Decision::Block("Git operation not approved by the user".into())

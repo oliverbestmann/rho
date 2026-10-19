@@ -54,6 +54,8 @@ impl Agent {
             }
             _ if session.commands.iter().any(|c| c.name.as_str() == name) => {
                 self.command(session, &CommandName::new(name), args).await;
+                // It may have changed `Context::set_stored` values.
+                session.save().await;
                 Ok(())
             }
             _ => return None,

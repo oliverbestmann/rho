@@ -92,6 +92,7 @@ impl Session {
             cost: self.cost,
             profile: self.ctx.profile().id,
             features: self.ctx.active_features(),
+            extension_state: self.ctx.all_stored(),
         };
         let messages = self.history[from..].to_vec();
         let diffs = std::mem::take(&mut p.diffs);

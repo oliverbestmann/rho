@@ -411,6 +411,7 @@ impl Agent {
                     .notify("Feature unavailable", &format!("{e:#}"), true);
             }
         }
+        session.ctx.restore_stored(info.extension_state);
         session.seen = Some((info.profile, info.features));
         session.thinking = info.thinking;
         session.usage = info.usage;

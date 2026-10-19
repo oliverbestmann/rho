@@ -90,6 +90,7 @@ async fn sessions_are_saved_and_resumed() {
         .unwrap();
     session.ctx.set_title("A title");
     session.thinking = rho::provider::Thinking::Low;
+    session.ctx.set_stored("test.flag", true);
     session.save().await;
     let history = session.history.clone();
     assert_eq!(history.len(), 4);
@@ -103,6 +104,7 @@ async fn sessions_are_saved_and_resumed() {
     assert_eq!(resumed.usage.input, 10);
     assert_eq!(resumed.thinking, rho::provider::Thinking::Low);
     assert_eq!(resumed.ctx.title().as_deref(), Some("A title"));
+    assert_eq!(resumed.ctx.stored::<bool>("test.flag"), Some(true));
 
     agent
         .run(&mut resumed, vec![Content::text("more")])
