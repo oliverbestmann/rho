@@ -23,6 +23,12 @@ describe('MarkdownPipe', () => {
     );
   });
 
+  it('gives a fence its language only once closed', () => {
+    expect(md.transform('```rs\nlet <a>')).toBe('<pre><code>let &lt;a&gt;</code></pre>\n');
+    expect(md.transform('```rs\nlet a\n```')).toContain('<code class="language-rs">');
+    expect(md.transform('text\n\n~~~~rs\nlet a\n~~~~\n')).toContain('class="language-rs"');
+  });
+
   it('produces nothing the sanitizer strips', () => {
     const warn = vi.spyOn(console, 'warn');
     const text = [

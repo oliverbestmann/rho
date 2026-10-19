@@ -102,6 +102,50 @@ app-root {
     }
   }
 
+  // highlight.js tokens, GitHub's colours for light and dark.
+  .hljs-comment,
+  .hljs-quote,
+  .hljs-meta {
+    color: light-dark(#6e7781, #8b949e);
+  }
+
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-built_in,
+  .hljs-literal {
+    color: light-dark(#cf222e, #ff7b72);
+  }
+
+  .hljs-string,
+  .hljs-regexp,
+  .hljs-addition {
+    color: light-dark(#0a3069, #a5d6ff);
+  }
+
+  .hljs-number,
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-variable,
+  .hljs-symbol {
+    color: light-dark(#0550ae, #79c0ff);
+  }
+
+  .hljs-title,
+  .hljs-section {
+    color: light-dark(#8250df, #d2a8ff);
+  }
+
+  .hljs-type,
+  .hljs-params,
+  .hljs-name,
+  .hljs-tag {
+    color: light-dark(#953800, #ffa657);
+  }
+
+  .hljs-deletion {
+    color: light-dark(#82071e, #ffa198);
+  }
+
   table {
     border-collapse: collapse;
   }

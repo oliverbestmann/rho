@@ -3,6 +3,7 @@ import type * as acp from '@agentclientprotocol/sdk';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
 import { TerminalView } from './terminal';
 import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
@@ -11,6 +12,7 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
 @Component({
   selector: 'app-tool-card',
   imports: [
+    HighlightCode,
     MarkdownPipe,
     ToolBodyPipe,
     MatExpansionModule,
@@ -43,7 +45,8 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
         @if (t !== undefined) {
           <app-terminal [data]="t" />
         } @else {
-          <div class="markdown" [innerHTML]="c | toolBody | markdown"></div>
+          @let html = c | toolBody | markdown;
+          <div class="markdown" [innerHTML]="html" [appHighlight]="html"></div>
         }
       </ng-template>
     </mat-expansion-panel>

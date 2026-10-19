@@ -38,4 +38,21 @@ describe('toolBody', () => {
     const body = toolBody({ toolCallId: 't', title: 'Read', kind: 'read', content: [text('# x')] });
     expect(body).toBe('# x');
   });
+
+  it('fences a read file with its extension', () => {
+    const read = (path: string, status: acp.ToolCallStatus = 'completed') =>
+      toolBody({
+        toolCallId: 't',
+        title: 'Read',
+        kind: 'read',
+        status,
+        locations: [{ path }],
+        content: [text('# x')],
+      });
+    expect(read('/w/src/main.RS')).toBe('```rs\n# x\n```');
+    expect(read('/w/Makefile')).toBe('```makefile\n# x\n```');
+    expect(read('/w/Dockerfile')).toBe('```dockerfile\n# x\n```');
+    expect(read('/w/.env')).toBe('```\n# x\n```');
+    expect(read('/w/a.rs', 'failed')).toBe('# x');
+  });
 });

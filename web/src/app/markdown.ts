@@ -11,7 +11,11 @@ const marked = new Marked({
   renderer: {
     html: ({ text }) => escape(text),
     // Diff lines as blocks with a class each, for added/removed colours.
-    code({ text, lang }) {
+    code({ text, lang, raw }) {
+      // A fence still streaming in has no language, so it is highlighted once closed.
+      if (lang && !/\n *(`{3,}|~{3,})\s*$/.test(raw)) {
+        return `<pre><code>${escape(text)}</code></pre>\n`;
+      }
       if (lang !== 'diff') return false;
       const lines = text
         .split('\n')

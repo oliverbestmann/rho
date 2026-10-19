@@ -1,12 +1,16 @@
 import { Component, input } from '@angular/core';
+import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
 
 /** A chat bubble, right for the user and left for the agent. */
 @Component({
   selector: 'app-message',
-  imports: [MarkdownPipe],
+  imports: [HighlightCode, MarkdownPipe],
   host: { '[class]': 'from()' },
-  template: `<div class="markdown" [innerHTML]="text() | markdown"></div>`,
+  template: `
+    @let html = text() | markdown;
+    <div class="markdown" [innerHTML]="html" [appHighlight]="html"></div>
+  `,
   styles: `
     :host {
       display: block;

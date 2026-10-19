@@ -24,6 +24,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Acp, Ask, errorText, Opened } from '../acp';
+import { loadHighlighter } from '../highlight';
 import { listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
 import { Composer } from './composer';
@@ -182,6 +183,7 @@ export class Session {
       untracked(() => (this.scroller().nativeElement.scrollTop = 0));
     });
     afterNextRender(() => {
+      void loadHighlighter(); // in the background, not waited for
       const el = this.scroller().nativeElement;
       const onScroll = () => this.atBottom.set(el.scrollTop > -80);
       el.addEventListener('scroll', onScroll, { passive: true });
