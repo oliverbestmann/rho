@@ -447,7 +447,7 @@ async fn read_text<'a>(
 async fn acp_confirm_uses_request_permission() {
     // A tool call keeps its content; our own card gets the rest of the title.
     acp_confirm(false, "t1", "Run it?\nIt echoes hi.", None).await;
-    acp_confirm(true, "confirm", "Run it?", Some("It echoes hi.")).await;
+    acp_confirm(true, "confirm-", "Run it?", Some("It echoes hi.")).await;
 }
 
 async fn acp_confirm(
@@ -466,7 +466,8 @@ async fn acp_confirm(
             async move |req: RequestPermissionRequest,
                         responder: Responder<RequestPermissionResponse>,
                         _cx| {
-                assert_eq!(&*req.tool_call.tool_call_id.0, call_id);
+                // Own cards get a fresh `confirm-<hex>` id each.
+                assert!(req.tool_call.tool_call_id.0.starts_with(call_id));
                 let fields = &req.tool_call.fields;
                 assert_eq!(fields.title.as_deref(), Some(title));
                 let text = fields.content.as_ref().map(|c| match &c[..] {

@@ -398,12 +398,13 @@ impl Frontend for AcpFrontend {
                     .title(first.to_string())
                     .content(vec![rest.into()]);
             }
-            let call = ToolCallUpdate::new(
-                tool_call_id
-                    .map_or("confirm", ToolCallId::as_str)
-                    .to_string(),
-                fields,
-            );
+            // A fresh id per card: clients update a known id in place, so a
+            // fixed one would show a new question at the first card's place.
+            let id = match tool_call_id {
+                Some(id) => id.as_str().to_string(),
+                None => format!("confirm-{:016x}", getrandom::u64().unwrap_or_default()),
+            };
+            let call = ToolCallUpdate::new(id, fields);
             let request = RequestPermissionRequest::new(
                 self.sid.clone(),
                 call,
