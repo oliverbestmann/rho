@@ -43,8 +43,8 @@
             npmDepsHash = "sha256-VTuVhxoXHyQ1tPH+p9wNr7Qol3EKbZAWURmQa7e3CuE=";
             NG_CLI_ANALYTICS = "false";
             # sass-embedded ships a prebuilt `dart`, linked for FHS systems.
-            nativeBuildInputs = pkgs.lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
-            preBuild = pkgs.lib.optionalString pkgs.stdenv.isLinux "autoPatchelf node_modules/sass-embedded-linux-*";
+            nativeBuildInputs = pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.autoPatchelfHook;
+            preBuild = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "autoPatchelf node_modules/sass-embedded-linux-*";
             installPhase = "cp -r dist/web/browser $out";
           };
           target = pkgs.stdenv.hostPlatform.rust.rustcTarget;
