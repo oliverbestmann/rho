@@ -277,10 +277,8 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                 };
                 // The other connections on the session see the prompt too.
                 for block in &req.prompt {
-                    frontend.send_update(
-                        SessionUpdate::UserMessageChunk(ContentChunk::new(block.clone())),
-                        To::Except(conn),
-                    );
+                    let update = SessionUpdate::UserMessageChunk(ContentChunk::new(block.clone()));
+                    frontend.echo(update, conn);
                 }
                 let agent = prompt_state.agent.clone();
                 // Not on the connection: the turn goes on if it drops, and
@@ -308,7 +306,13 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         }
                         Ok(Err(e)) => responder.respond_with_internal_error(format!("{e:#}")),
                         Err(_aborted) => {
+                            // Saved now, so a restart does not call them interrupted.
+                            crate::agent::close_open_calls(
+                                &mut session.history,
+                                crate::agent::CANCELLED,
+                            );
                             session.ctx.notify(NoteType::Info, INTERRUPTED, "", false);
+                            session.save().await;
                             responder
                                 .respond(PromptResponse::new(StopReason::Cancelled).usage(usage))
                         }
@@ -443,9 +447,7 @@ fn register(
     let (watch, registration) = AbortHandle::new_pair();
     let inbox = watch_inbox(agent.clone(), hub.clone(), sid.clone(), ctx.clone());
     tokio::spawn(Abortable::new(inbox, registration));
-    // shortcut: two connections resuming the same closed session at once get
-    // one session each and the later one wins the map; fine for one editor per
-    // session, needs a pending-open marker if that changes.
+    // Stored sessions open under `Hub::opening`, so this is the only one.
     hub.sessions.lock().unwrap().insert(
         sid.clone(),
         Entry {
@@ -534,18 +536,36 @@ async fn watch_inbox(agent: Arc<Agent>, hub: Arc<Hub>, sid: SessionId, ctx: Cont
         if !ctx.has_triggered() {
             continue;
         }
-        let Some((session, _, _run, registration)) = hub.start_run(&sid, None) else {
+        if !run_unprompted(&agent, &hub, &sid, &ctx).await {
             return;
-        };
-        let mut session = session.lock().await;
-        // A prompt may have consumed the message while we waited for the lock.
-        let turn = agent.run_triggered(&mut session);
-        match Abortable::new(turn, registration).await {
-            Ok(Some(Err(e))) => ctx.notify(NoteType::Info, "rho", &format!("{e:#}"), true),
-            Err(_aborted) => ctx.notify(NoteType::Info, INTERRUPTED, "", false),
-            _ => {}
         }
     }
+}
+
+/// A run without a prompt, see `Agent::run_triggered`. `false` if the
+/// session is gone.
+pub(super) async fn run_unprompted(
+    agent: &Arc<Agent>,
+    hub: &Arc<Hub>,
+    sid: &SessionId,
+    ctx: &Context,
+) -> bool {
+    let Some((session, _, _run, registration)) = hub.start_run(sid, None) else {
+        return false;
+    };
+    let mut session = session.lock().await;
+    // A prompt may have consumed the message while we waited for the lock.
+    let turn = agent.run_triggered(&mut session);
+    match Abortable::new(turn, registration).await {
+        Ok(Some(Err(e))) => ctx.notify(NoteType::Info, "rho", &format!("{e:#}"), true),
+        Err(_aborted) => {
+            crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
+            ctx.notify(NoteType::Info, INTERRUPTED, "", false);
+            session.save().await;
+        }
+        _ => {}
+    }
+    true
 }
 
 /// `/name [args]` -> `Some((name, args))`.

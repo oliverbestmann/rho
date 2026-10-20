@@ -311,21 +311,36 @@ async fn compaction_starts_a_new_epoch() {
     // The messages before the compaction are kept.
     let conn = rusqlite::Connection::open(&db).unwrap();
     let rows: Vec<(i64, i64)> = conn
-        .prepare("SELECT seq, epoch FROM messages WHERE session_id = 's' ORDER BY seq")
+        .prepare("SELECT seq, epoch FROM items WHERE session_id = 's' ORDER BY seq")
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    // The turn report before the compaction is the old epoch's last message.
-    assert_eq!(rows, [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 1)]);
+    // One row per block: prompt, text and tool call, result, answer, then
+    // the turn report as the old epoch's last; the summary and its notice.
+    assert_eq!(
+        rows,
+        [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (4, 0),
+            (5, 0),
+            (6, 1),
+            (7, 1)
+        ]
+    );
 }
 
 #[tokio::test]
-async fn acp_load_replays_all_epochs() {
+async fn acp_load_replays_the_current_and_the_previous_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
-    let mut responses = tool_then_answer();
+    let mut responses = vec![vec![text("First."), Event::Done(StopReason::EndTurn)]];
+    responses.push(vec![text("the first summary")]);
+    responses.extend(tool_then_answer());
     responses.push(vec![text("the summary")]);
     responses.push(vec![text("After."), Event::Done(StopReason::EndTurn)]);
     let agent = Arc::new(agent(Scripted::new(responses), &db));
@@ -334,6 +349,12 @@ async fn acp_load_replays_all_epochs() {
         .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
         .await
         .unwrap();
+    // Epoch 0 is not shown.
+    agent
+        .run(&mut session, vec![Content::text("first")])
+        .await
+        .unwrap();
+    agent.compact(&mut session, "").await.unwrap();
     agent
         .run(&mut session, vec![Content::text("hi")])
         .await
@@ -379,6 +400,7 @@ async fn acp_load_replays_all_epochs() {
     assert_eq!(
         shown,
         [
+            "tool: Compacted (test/m, cache warm) input 0 + cache read 0 + cache write 0 | output 0\n\nthe first summary",
             "user: hi",
             "agent: Let me look.",
             "tool: Bash echo from-tool ```sh\necho from-tool\n```",
@@ -501,12 +523,14 @@ async fn acp_saves_notices_when_the_session_is_dropped() {
     let mut agent = agent(Scripted::new(vec![answer]), &db);
     agent.extensions.push(Arc::new(Grab(Arc::clone(&grabbed))));
     let agent = Arc::new(agent);
+    // One hub, like the daemon: separate ones would race for the store.
+    let hub = Arc::new(rho::acp::Hub::default());
 
     let new_cwd = cwd.clone();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
         Client.builder().connect_with(
-            rho::acp::agent(agent.clone()),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -533,7 +557,7 @@ async fn acp_saves_notices_when_the_session_is_dropped() {
     tokio::time::timeout(
         Duration::from_secs(10),
         Client.builder().connect_with(
-            rho::acp::agent(agent.clone()),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -563,6 +587,18 @@ async fn acp_saves_notices_when_the_session_is_dropped() {
 
 /// Loads session "s" over ACP and returns the replayed updates.
 async fn load(agent: Arc<Agent>, cwd: &Path) -> Vec<SessionUpdate> {
+    load_with(agent, cwd, false).await
+}
+
+/// `load` by a client that shows terminals if `terminal`.
+async fn load_with(agent: Arc<Agent>, cwd: &Path, terminal: bool) -> Vec<SessionUpdate> {
+    let mut caps = agent_client_protocol::schema::v1::ClientCapabilities::new();
+    caps.meta = terminal.then(|| {
+        json!({"terminal_output": true})
+            .as_object()
+            .cloned()
+            .unwrap()
+    });
     let updates = Updates::default();
     let record = updates.clone();
     let cwd = cwd.to_path_buf();
@@ -580,9 +616,11 @@ async fn load(agent: Arc<Agent>, cwd: &Path) -> Vec<SessionUpdate> {
             .connect_with(
                 rho::acp::agent(agent.clone()),
                 async |cx: ConnectionTo<_>| {
-                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                        .block_task()
-                        .await?;
+                    cx.send_request(
+                        InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps),
+                    )
+                    .block_task()
+                    .await?;
                     cx.send_request(LoadSessionRequest::new("s", cwd))
                         .block_task()
                         .await?;
@@ -743,4 +781,273 @@ async fn acp_lists_and_loads_saved_sessions() {
             content: vec![Content::text("more")]
         }
     );
+}
+
+/// One response that runs `echo first`, then `sleep 30`.
+fn two_calls() -> Vec<Event> {
+    let bash = |id: &str, command: &str| {
+        Event::Block(Content::ToolUse {
+            id: ToolCallId::new(id),
+            name: ToolName::new("Bash"),
+            input: json!({"command": command, "description": "Run it"}),
+        })
+    };
+    vec![
+        text("Two calls."),
+        bash("t1", "echo first"),
+        bash("t2", "sleep 30"),
+        Event::Done(StopReason::ToolUse),
+    ]
+}
+
+/// Runs `two_calls` until `t2` has started, then drops the run, like a
+/// cancel or a restart does.
+async fn stop_during_t2(agent: &Agent, session: &mut rho::agent::Session, db: &Path) {
+    stop_in(agent, session, db, "t2").await
+}
+
+/// Prompts "hi" until tool call `id` has started, then drops the run.
+async fn stop_in(agent: &Agent, session: &mut rho::agent::Session, db: &Path, id: &str) {
+    let run = agent.run(session, vec![Content::text("hi")]);
+    let started = async {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        loop {
+            let at: Option<i64> = conn
+                .query_row(
+                    "SELECT started_at FROM items WHERE tool_call_id = ?1
+                         AND json_extract(block, '$.type') = 'tool_use'",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            if at.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        _ = run => panic!("the run ended"),
+        _ = tokio::time::timeout(Duration::from_secs(10), started) => {}
+    }
+}
+
+fn result(id: &str, content: &str, is_error: bool) -> Content {
+    Content::ToolResult {
+        tool_use_id: ToolCallId::new(id),
+        content: content.into(),
+        is_error,
+        images: vec![],
+    }
+}
+
+#[tokio::test]
+async fn a_restart_during_tool_calls_keeps_the_response_and_the_finished_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let responses = vec![
+        two_calls(),
+        vec![text("Ok."), Event::Done(StopReason::EndTurn)],
+    ];
+    let provider = Scripted::new(responses);
+    let agent = agent(provider.clone(), &db);
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    stop_during_t2(&agent, &mut session, &db).await;
+    // The process ends: nothing more is saved.
+    std::mem::forget(session);
+
+    let mut resumed = agent
+        .resume_session(&SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    assert_eq!(resumed.history.len(), 3, "{:#?}", resumed.history);
+    assert_eq!(resumed.history[1].content.len(), 3, "text and both calls");
+    let results: Vec<_> = resumed.history[2]
+        .content
+        .iter()
+        .filter(|c| matches!(c, Content::ToolResult { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        results,
+        [
+            result("t1", "first\n", false),
+            result("t2", "interrupted: rho stopped while this call ran", true),
+        ]
+    );
+
+    // The next prompt goes after the results; the request is valid.
+    agent
+        .run(&mut resumed, vec![Content::text("next")])
+        .await
+        .unwrap();
+    let requests = provider.requests.lock().unwrap();
+    let last = requests[1].messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.content[..2], results[..]);
+    assert_eq!(last.content.last(), Some(&Content::text("next")));
+}
+
+#[tokio::test]
+async fn a_cancelled_tool_call_gets_a_result_with_the_next_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let responses = vec![
+        two_calls(),
+        vec![text("Ok."), Event::Done(StopReason::EndTurn)],
+    ];
+    let provider = Scripted::new(responses);
+    let agent = agent(provider.clone(), &db);
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    stop_during_t2(&agent, &mut session, &db).await;
+
+    agent
+        .run(&mut session, vec![Content::text("next")])
+        .await
+        .unwrap();
+    let last = provider.requests.lock().unwrap()[1]
+        .messages
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        last.content,
+        [
+            result("t1", "first\n", false),
+            result(
+                "t2",
+                "cancelled: the run was stopped before this call finished",
+                true
+            ),
+            Content::text("next"),
+        ]
+    );
+    // And it is saved like that.
+    drop(session);
+    let store = rho::store::Store::open(&db).unwrap();
+    let history = store.history(&SessionId::new("s")).await.unwrap();
+    assert_eq!(history[2].content[..2], last.content[..2]);
+}
+
+#[tokio::test]
+async fn acp_load_replays_the_streamed_terminal_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let call = Event::Block(Content::ToolUse {
+        id: ToolCallId::new("t1"),
+        name: ToolName::new("Bash"),
+        input: json!({"command": "echo hi; sleep 0.1; echo oops >&2", "description": "Say hi"}),
+    });
+    let responses = vec![
+        vec![call, Event::Done(StopReason::ToolUse)],
+        vec![text("Done."), Event::Done(StopReason::EndTurn)],
+    ];
+    let agent = Arc::new(agent(Scripted::new(responses), &db));
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    drop(session);
+
+    let wire: Vec<serde_json::Value> = load_with(agent, &cwd, true)
+        .await
+        .into_iter()
+        .map(|u| serde_json::to_value(u).unwrap())
+        .filter(|v| v["toolCallId"] == "t1")
+        .collect();
+    let shown: String = wire
+        .iter()
+        .filter_map(|v| v["_meta"]["terminal_output"]["data"].as_str())
+        .collect();
+    // As it streamed (the sleep keeps the pipes in order), stderr in red;
+    // the end sends only the exit code.
+    assert_eq!(
+        shown,
+        "$ echo hi\n  sleep 0.1\n  echo oops >&2\nhi\n\x1b[31moops\n\x1b[0m"
+    );
+    assert_eq!(
+        wire.last().unwrap()["_meta"]["terminal_exit"]["exit_code"],
+        0
+    );
+}
+
+/// A read-only tool that hangs if `hang`, else answers "read".
+struct Look {
+    hang: bool,
+}
+
+impl rho::tools::Tool for Look {
+    fn spec(&self) -> rho::provider::ToolSpec {
+        rho::provider::ToolSpec {
+            name: ToolName::new("Look"),
+            description: "reads".into(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+    fn kind(&self) -> rho::tools::ToolKind {
+        rho::tools::ToolKind::Read
+    }
+    async fn run(
+        &self,
+        _input: serde_json::Value,
+        _ctx: &rho::extension::Context,
+    ) -> anyhow::Result<rho::extension::ToolOutput> {
+        if self.hang {
+            std::future::pending::<()>().await;
+        }
+        Ok("read".into())
+    }
+}
+
+#[tokio::test]
+async fn a_read_cut_off_by_a_restart_runs_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let look = Event::Block(Content::ToolUse {
+        id: ToolCallId::new("t1"),
+        name: ToolName::new("Look"),
+        input: json!({}),
+    });
+    let provider = Scripted::new(vec![
+        vec![look, Event::Done(StopReason::ToolUse)],
+        vec![text("Seen."), Event::Done(StopReason::EndTurn)],
+    ]);
+    let with = |hang| {
+        let mut a = agent(provider.clone(), &db);
+        a.tools = vec![Arc::new(Look { hang })];
+        a
+    };
+    let before = with(true);
+    let mut session = before
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    stop_in(&before, &mut session, &db, "t1").await;
+    std::mem::forget(session);
+
+    let after = with(false);
+    let mut resumed = after
+        .resume_session(&SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    assert!(resumed.resuming());
+    after.run_triggered(&mut resumed).await.unwrap().unwrap();
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests[1].messages.last().unwrap().content,
+        [result("t1", "read", false)]
+    );
+    // The answer, then the turn report.
+    let n = resumed.history.len();
+    assert_eq!(resumed.history[n - 2].content, [Content::text("Seen.")]);
 }

@@ -60,6 +60,11 @@ pub trait Tool: Send + Sync {
     fn titled(&self) -> bool {
         false
     }
+    /// A call that rho's stop (a restart) cut off may run again when the
+    /// session continues: the tool only reads, or only asks the user.
+    fn repeatable(&self) -> bool {
+        matches!(self.kind(), ToolKind::Read | ToolKind::Search)
+    }
 }
 
 /// What a tool does, for the client's icon (ACP `ToolKind`).
@@ -83,6 +88,7 @@ pub trait DynTool: Send + Sync {
     fn rules(&self) -> &'static [&'static str];
     fn kind(&self) -> ToolKind;
     fn titled(&self) -> bool;
+    fn repeatable(&self) -> bool;
 }
 
 impl<T: Tool> DynTool for T {
@@ -103,6 +109,9 @@ impl<T: Tool> DynTool for T {
     }
     fn titled(&self) -> bool {
         Tool::titled(self)
+    }
+    fn repeatable(&self) -> bool {
+        Tool::repeatable(self)
     }
 }
 
@@ -553,6 +562,11 @@ struct RequestAccessInput {
 pub struct RequestAccess;
 
 impl Tool for RequestAccess {
+    /// It only asks; the grant follows the answer.
+    fn repeatable(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: REQUEST_ACCESS,

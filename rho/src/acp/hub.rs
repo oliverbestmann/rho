@@ -45,6 +45,10 @@ impl Drop for Entry {
 pub struct Hub {
     pub(super) sessions: Mutex<HashMap<SessionId, Entry>>,
     next_run: AtomicU64,
+    /// Held while a stored session opens, so two connections that open it at
+    /// once share one session. shortcut: all opens wait for each other; a
+    /// lock per session if session starts get slow.
+    pub(super) opening: tokio::sync::Mutex<()>,
 }
 
 impl Hub {

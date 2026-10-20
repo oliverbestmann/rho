@@ -370,6 +370,17 @@ pub struct Settle<'a> {
     pub tools_called: &'a [ToolName],
 }
 
+/// Output a terminal card shows of one call (and the store keeps), so a
+/// flood does not swamp the client; the model's copy is cut separately.
+pub(crate) const STREAM_CAP: usize = 1024 * 1024;
+/// Ends output cut at `STREAM_CAP`.
+pub(crate) const STREAM_CUT: &str = "\n[more output not shown]\n";
+
+/// `text` in red for a terminal, as stderr is shown.
+pub(crate) fn red(text: &str) -> String {
+    format!("\x1b[31m{text}\x1b[0m")
+}
+
 /// The user-facing side of a session (CLI printer, ACP connection).
 pub trait Frontend: Send + Sync {
     fn event(&self, event: AgentEvent<'_>);
@@ -398,6 +409,9 @@ pub trait Frontend: Send + Sync {
     fn ask<'a>(&'a self, _form: &'a Form) -> BoxFuture<'a, FormReply> {
         Box::pin(async { FormReply::Unsupported })
     }
+
+    /// The history was compacted; what follows is a new epoch.
+    fn compacted(&self) {}
 }
 
 /// A frontend that shows nothing and approves nothing.
@@ -440,8 +454,9 @@ struct Inner {
     states: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     /// Extension values saved with the session, see `Context::stored`.
     stored: Mutex<serde_json::Map<String, Value>>,
-    /// The tool call that runs now, for `Context::stream_output`.
-    tool_call: Mutex<Option<ToolCallId>>,
+    /// The tool call that runs now and what it streamed so far (stderr in
+    /// red, up to `STREAM_CAP`), for `Context::stream_output`.
+    tool_call: Mutex<Option<(ToolCallId, String)>>,
     /// Notices not in the history yet, as `Content::UserNote`; `None`
     /// until the session is set up, so setup notices are not saved again
     /// on every resume.
@@ -481,19 +496,33 @@ impl Context {
     /// Shows output of the running tool call as it arrives. The tool's
     /// result still goes to the model; this is only for the user.
     pub fn stream_output(&self, chunk: &str, stderr: bool) {
-        let id = self.0.tool_call.lock().unwrap().clone();
-        if let Some(id) = id {
-            self.emit(AgentEvent::ToolStream {
-                id: &id,
-                chunk,
-                stderr,
-            });
-        }
+        let id = {
+            let mut call = self.0.tool_call.lock().unwrap();
+            let Some((id, shown)) = call.as_mut() else {
+                return;
+            };
+            if shown.len() < STREAM_CAP {
+                let data = if stderr { red(chunk) } else { chunk.into() };
+                shown.push_str(&data);
+                if shown.len() >= STREAM_CAP {
+                    shown.push_str(STREAM_CUT);
+                }
+            }
+            id.clone()
+        };
+        self.emit(AgentEvent::ToolStream {
+            id: &id,
+            chunk,
+            stderr,
+        });
     }
 
     /// Set by the agent loop while a tool runs; tool calls run one at a time.
-    pub(crate) fn set_tool_call(&self, id: Option<ToolCallId>) {
-        *self.0.tool_call.lock().unwrap() = id;
+    /// Returns what the call that ends streamed, if anything.
+    pub(crate) fn set_tool_call(&self, id: Option<ToolCallId>) -> Option<String> {
+        let new = id.map(|id| (id, String::new()));
+        let old = std::mem::replace(&mut *self.0.tool_call.lock().unwrap(), new);
+        old.map(|(_, shown)| shown).filter(|s| !s.is_empty())
     }
 
     pub(crate) fn set_extensions(&self, extensions: Vec<Arc<dyn DynExtension>>) {
@@ -744,6 +773,10 @@ impl Context {
 
     pub fn emit(&self, event: AgentEvent<'_>) {
         self.0.frontend.event(event);
+    }
+
+    pub(crate) fn compacted(&self) {
+        self.0.frontend.compacted();
     }
 
     /// Show something to the user without sending it to the model. It is

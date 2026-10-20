@@ -103,9 +103,40 @@ CREATE INDEX diffs_by_age ON diffs (created_at);
 ALTER TABLE sessions ADD COLUMN extension_state TEXT NOT NULL DEFAULT '{}'
     CHECK (json_valid(extension_state) AND json_type(extension_state) = 'object');
 "#,
+    r#"
+-- One row per content block, saved as soon as it is in the history (ADR
+-- 0060). Consecutive blocks of one role are one message. `messages` is no
+-- longer read or written; its rows were not moved.
+CREATE TABLE items (
+    session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL CHECK (seq >= 0),
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    -- One Content as JSON, the provider wire format.
+    block TEXT NOT NULL CHECK (json_valid(block) AND json_type(block) = 'object'),
+    -- Text and tool calls as plain text, for search.
+    text TEXT NOT NULL,
+    -- Of tool_use and tool_result blocks.
+    tool_call_id TEXT,
+    -- When a tool_use started to run, after its hooks allowed it.
+    started_at INTEGER,
+    -- What clients show besides the block, a JSON object, kept for
+    -- `DIFF_DAYS`: `{"terminal": ...}`, the output a tool_result's call
+    -- streamed.
+    display TEXT CHECK (display IS NULL OR json_valid(display)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+) STRICT;
+
+CREATE INDEX items_by_epoch ON items (session_id, epoch, seq);
+CREATE INDEX items_by_call ON items (session_id, tool_call_id)
+    WHERE tool_call_id IS NOT NULL;
+CREATE INDEX items_with_display ON items (created_at) WHERE display IS NOT NULL;
+"#,
 ];
 
-/// Edit diffs older than this are deleted; the edit then shows its output only.
+/// Edit diffs and streamed outputs older than this are deleted; the call
+/// then shows its output for the model only.
 const DIFF_DAYS: i64 = 7;
 
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
@@ -182,11 +213,68 @@ pub(crate) struct State {
 }
 
 /// A stored session ready to continue: its info, the `seq` of the first
-/// message of the current epoch, and that epoch's messages.
+/// item of the current epoch, and that epoch's messages.
 pub(crate) struct Loaded {
     pub info: SessionInfo,
     pub base: i64,
     pub history: Vec<Message>,
+    /// Tool calls of the epoch that started to run, see `Store::mark_started`.
+    pub started: Vec<ToolCallId>,
+}
+
+/// A stored block with its row's `seq`, `epoch` and `created_at`.
+type BlockRow = (i64, i64, Role, Content, i64);
+
+/// Joins consecutive blocks of one role and epoch into messages; a
+/// message's `seq` and `created_at` are its first block's.
+fn group(rows: Vec<BlockRow>) -> Vec<StoredMessage> {
+    let mut out: Vec<StoredMessage> = vec![];
+    for (seq, epoch, role, block, created_at) in rows {
+        match out.last_mut() {
+            Some(m) if m.epoch == epoch && m.message.role == role => m.message.content.push(block),
+            _ => out.push(StoredMessage {
+                seq,
+                epoch,
+                message: Message {
+                    role,
+                    content: vec![block],
+                },
+                created_at,
+            }),
+        }
+    }
+    out
+}
+
+fn role_str(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    }
+}
+
+/// Reads `seq, epoch, role, block, created_at` rows.
+fn read_blocks(rows: &mut rusqlite::Rows, id: &SessionId) -> Result<Vec<BlockRow>> {
+    let mut out = vec![];
+    while let Some(row) = rows.next()? {
+        let seq: i64 = row.get(0)?;
+        let role = match row.get_ref(2)?.as_str()? {
+            "user" => Role::User,
+            _ => Role::Assistant,
+        };
+        let block = serde_json::from_str(row.get_ref(3)?.as_str()?)
+            .with_context(|| format!("session {id}: item {seq}"))?;
+        out.push((seq, row.get(1)?, role, block, row.get(4)?));
+    }
+    Ok(out)
+}
+
+fn tool_call_id(block: &Content) -> Option<&ToolCallId> {
+    match block {
+        Content::ToolUse { id, .. } => Some(id),
+        Content::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+        _ => None,
+    }
 }
 
 /// `$RHO_SESSIONS_DB`, else `sessions.db` in the config dir.
@@ -231,6 +319,47 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// Lock files of the databases this process opened, held until it exits.
+static LOCKS: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(vec![]);
+
+/// Takes `<path>.lock` for this process: one process writes a database, so
+/// open sessions are never written by two. Several stores of one process
+/// share it.
+fn lock(path: &Path) -> Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("resolving {}", dir.display()))?;
+    let mut name = path
+        .file_name()
+        .context("no database file name")?
+        .to_owned();
+    name.push(".lock");
+    let lock_path = dir.join(name);
+    let mut locks = LOCKS.lock().unwrap();
+    if locks.iter().any(|(p, _)| *p == lock_path) {
+        return Ok(());
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {}", lock_path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "{} is in use by another rho process (the daemon?); connect through it with `rho acp --daemon`",
+            path.display()
+        ),
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("locking {}", lock_path.display()));
+        }
+    }
+    locks.push((lock_path, file));
+    Ok(())
+}
+
 fn path_str(path: &Path) -> Result<&str> {
     path.to_str()
         .with_context(|| format!("path is not UTF-8: {}", path.display()))
@@ -247,6 +376,7 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
+        lock(&path)?;
         let conn =
             Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
         Self::init(conn, path)
@@ -332,7 +462,7 @@ impl Store {
                 "SELECT {COLUMNS} FROM sessions
                  WHERE (?1 IS NULL OR cwd = ?1)
                    AND (?2 IS NULL OR (updated_at, id) < (?2, ?3))
-                   AND EXISTS (SELECT 1 FROM messages WHERE session_id = sessions.id)
+                   AND EXISTS (SELECT 1 FROM items WHERE session_id = sessions.id)
                  ORDER BY updated_at DESC, id DESC LIMIT ?4"
             );
             let (at, id) = after.unzip();
@@ -354,32 +484,17 @@ impl Store {
         Ok(self.load(id).await?.map(|l| l.history).unwrap_or_default())
     }
 
-    /// All messages of the session, older epochs included, by `seq`.
+    /// All messages of the session, older epochs included, by `seq`. A
+    /// message's `seq` is that of its first block, so they have gaps.
     pub async fn messages(&self, id: &SessionId) -> Result<Vec<StoredMessage>> {
         let id = id.clone();
         self.call(move |c| {
             let mut stmt = c.prepare(
-                "SELECT seq, epoch, role, content, created_at FROM messages
+                "SELECT seq, epoch, role, block, created_at FROM items
                  WHERE session_id = ?1 ORDER BY seq",
             )?;
-            let mut rows = stmt.query([&id])?;
-            let mut out = vec![];
-            while let Some(row) = rows.next()? {
-                let seq: i64 = row.get(0)?;
-                let role = match row.get_ref(2)?.as_str()? {
-                    "user" => Role::User,
-                    _ => Role::Assistant,
-                };
-                let content = serde_json::from_str(row.get_ref(3)?.as_str()?)
-                    .with_context(|| format!("session {id}: message {seq}"))?;
-                out.push(StoredMessage {
-                    seq,
-                    epoch: row.get(1)?,
-                    message: Message { role, content },
-                    created_at: row.get(4)?,
-                });
-            }
-            Ok(out)
+            let rows = read_blocks(&mut stmt.query([&id])?, &id)?;
+            Ok(group(rows))
         })
         .await
     }
@@ -394,42 +509,38 @@ impl Store {
             };
             let info = info?;
             let mut stmt = tx.prepare(
-                "SELECT seq, role, content FROM messages
+                "SELECT seq, epoch, role, block, created_at FROM items
                  WHERE session_id = ?1 AND epoch = ?2 ORDER BY seq",
             )?;
-            let mut base = None;
-            let mut history = vec![];
-            let mut rows = stmt.query(params![id, info.epoch])?;
-            while let Some(row) = rows.next()? {
-                let seq: i64 = row.get(0)?;
-                if let Some(base) = base
-                    && seq != base + history.len() as i64
-                {
-                    bail!("session {id}: messages are not contiguous at seq {seq}");
-                }
-                base.get_or_insert(seq);
-                let role = match row.get_ref(1)?.as_str()? {
-                    "user" => Role::User,
-                    _ => Role::Assistant,
-                };
-                let content: Vec<Content> = serde_json::from_str(row.get_ref(2)?.as_str()?)
-                    .with_context(|| format!("session {id}: message {seq}"))?;
-                history.push(Message { role, content });
-            }
-            drop(rows);
+            let rows = read_blocks(&mut stmt.query(params![id, info.epoch])?, &id)?;
             drop(stmt);
-            let base = match base {
-                Some(b) => b,
+            // Saves append and rewrite from a `seq` on, so a gap is a bug.
+            for (i, (seq, ..)) in rows.iter().enumerate() {
+                if *seq != rows[0].0 + i as i64 {
+                    bail!("session {id}: items are not contiguous at seq {seq}");
+                }
+            }
+            let base = match rows.first() {
+                Some(r) => r.0,
                 None => tx.query_row(
-                    "SELECT COALESCE(MAX(seq) + 1, 0) FROM messages WHERE session_id = ?1",
+                    "SELECT COALESCE(MAX(seq) + 1, 0) FROM items WHERE session_id = ?1",
                     [&id],
                     |r| r.get(0),
                 )?,
             };
+            let mut stmt = tx.prepare(
+                "SELECT tool_call_id FROM items WHERE session_id = ?1 AND epoch = ?2
+                     AND started_at IS NOT NULL",
+            )?;
+            let started = stmt
+                .query_map(params![id, info.epoch], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let history = group(rows).into_iter().map(|m| m.message).collect();
             Ok(Some(Loaded {
                 info,
                 base,
                 history,
+                started,
             }))
         })
         .await
@@ -492,38 +603,37 @@ impl Store {
         .await
     }
 
-    /// Replaces the session's messages from `seq` on with `messages`.
-    pub(crate) async fn save_messages(
+    /// Replaces the session's items from `seq` on with `blocks`; with `seq`
+    /// past the end it appends.
+    pub(crate) async fn save_items(
         &self,
         id: &SessionId,
         epoch: i64,
         seq: i64,
-        messages: Vec<Message>,
+        blocks: Vec<(Role, Content)>,
     ) -> Result<()> {
         let id = id.clone();
         self.call(move |c| {
             let now = now_ms();
             let tx = c.transaction()?;
             tx.execute(
-                "DELETE FROM messages WHERE session_id = ?1 AND seq >= ?2",
+                "DELETE FROM items WHERE session_id = ?1 AND seq >= ?2",
                 params![id, seq],
             )?;
             let mut insert = tx.prepare(
-                "INSERT INTO messages (session_id, seq, epoch, role, content, text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO items (session_id, seq, epoch, role, block, text, tool_call_id,
+                     created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
-            for (i, m) in messages.iter().enumerate() {
-                let role = match m.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+            for (i, (role, block)) in blocks.iter().enumerate() {
                 insert.execute(params![
                     id,
                     seq + i as i64,
                     epoch,
-                    role,
-                    serde_json::to_string(&m.content)?,
-                    plain_text(&m.content),
+                    role_str(*role),
+                    serde_json::to_string(block)?,
+                    plain_text(std::slice::from_ref(block)),
+                    tool_call_id(block),
                     now,
                 ])?;
             }
@@ -550,7 +660,7 @@ impl Store {
                 |r| r.get(0),
             )?;
             let base = tx.query_row(
-                "SELECT COALESCE(MAX(seq) + 1, 0) FROM messages WHERE session_id = ?1",
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM items WHERE session_id = ?1",
                 [&id],
                 |r| r.get(0),
             )?;
@@ -589,6 +699,80 @@ impl Store {
         .await
     }
 
+    /// `save_items` with the blocks of `messages`.
+    #[cfg(test)]
+    async fn save_messages(
+        &self,
+        id: &SessionId,
+        epoch: i64,
+        seq: i64,
+        messages: Vec<Message>,
+    ) -> Result<()> {
+        let blocks = messages
+            .into_iter()
+            .flat_map(|m| m.content.into_iter().map(move |b| (m.role, b)))
+            .collect();
+        self.save_items(id, epoch, seq, blocks).await
+    }
+
+    /// Notes that tool call `call` started to run: after a restart it must
+    /// not run again unless its tool allows that.
+    pub(crate) async fn mark_started(&self, id: &SessionId, call: &ToolCallId) -> Result<()> {
+        let (id, call) = (id.clone(), call.clone());
+        self.call(move |c| {
+            c.execute(
+                "UPDATE items SET started_at = ?3
+                 WHERE session_id = ?1 AND tool_call_id = ?2
+                     AND json_extract(block, '$.type') = 'tool_use'",
+                params![id, call, now_ms()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Saves what tool calls streamed with their results, and deletes
+    /// outputs older than `DIFF_DAYS`.
+    pub(crate) async fn save_outputs(
+        &self,
+        id: &SessionId,
+        outputs: Vec<(ToolCallId, String)>,
+    ) -> Result<()> {
+        let id = id.clone();
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            tx.execute(
+                "UPDATE items SET display = NULL WHERE display IS NOT NULL AND created_at < ?1",
+                [now_ms() - DIFF_DAYS * 24 * 3600 * 1000],
+            )?;
+            for (call, output) in &outputs {
+                tx.execute(
+                    "UPDATE items SET display = json_object('terminal', ?3)
+                     WHERE session_id = ?1 AND tool_call_id = ?2
+                         AND json_extract(block, '$.type') = 'tool_result'",
+                    params![id, call, output],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The saved streamed outputs of the session's tool calls, by call.
+    pub async fn outputs(&self, id: &SessionId) -> Result<HashMap<ToolCallId, String>> {
+        let id = id.clone();
+        self.call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT tool_call_id, json_extract(display, '$.terminal') FROM items
+                 WHERE session_id = ?1 AND json_extract(display, '$.terminal') IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+    }
+
     /// The session's saved Edit diffs, by tool call.
     pub async fn diffs(&self, id: &SessionId) -> Result<HashMap<ToolCallId, Diff>> {
         let id = id.clone();
@@ -609,10 +793,10 @@ impl Store {
         .await
     }
 
-    /// Replaces `phrase` with `MASK` in all messages, diffs and titles of all
+    /// Replaces `phrase` with `MASK` in all items, diffs and titles of all
     /// sessions, see `redact_content`. Deleted bytes are zeroed and the WAL
     /// is checkpointed, so no copy stays in the files. Returns the number of
-    /// changed messages and sessions.
+    /// changed blocks and sessions.
     pub(crate) async fn redact(&self, phrase: &str) -> Result<(usize, usize)> {
         let phrase = phrase.to_string();
         // The content column is serde_json output, so it holds the phrase escaped the same way.
@@ -624,13 +808,14 @@ impl Store {
             let mut rows = vec![];
             {
                 let mut stmt = tx.prepare(
-                    "SELECT session_id, seq, content FROM messages WHERE instr(content, ?1) > 0",
+                    "SELECT session_id, seq, block FROM items WHERE instr(block, ?1) > 0",
                 )?;
                 let mut q = stmt.query([&escaped])?;
                 while let Some(r) = q.next()? {
                     let (id, seq): (SessionId, i64) = (r.get(0)?, r.get(1)?);
-                    let mut content: Vec<Content> = serde_json::from_str(r.get_ref(2)?.as_str()?)
-                        .with_context(|| format!("session {id}: message {seq}"))?;
+                    let block: Content = serde_json::from_str(r.get_ref(2)?.as_str()?)
+                        .with_context(|| format!("session {id}: item {seq}"))?;
+                    let mut content = vec![block];
                     if redact_content(&mut content, &phrase) {
                         rows.push((id, seq, content));
                     }
@@ -639,8 +824,13 @@ impl Store {
             let mut sessions = std::collections::HashSet::new();
             for (id, seq, content) in &rows {
                 tx.execute(
-                    "UPDATE messages SET content = ?3, text = ?4 WHERE session_id = ?1 AND seq = ?2",
-                    params![id, seq, serde_json::to_string(content)?, plain_text(content)],
+                    "UPDATE items SET block = ?3, text = ?4 WHERE session_id = ?1 AND seq = ?2",
+                    params![
+                        id,
+                        seq,
+                        serde_json::to_string(&content[0])?,
+                        plain_text(content)
+                    ],
                 )?;
                 sessions.insert(id.clone());
             }
@@ -659,6 +849,15 @@ impl Store {
                  RETURNING session_id",
             )?;
             for id in stmt.query_map([phrase.as_str(), MASK], |r| r.get(0))? {
+                sessions.insert(id?);
+            }
+            drop(stmt);
+            // As JSON, the phrase is escaped like in the blocks.
+            let mut stmt = tx.prepare(
+                "UPDATE items SET display = replace(display, ?1, ?2) WHERE instr(display, ?1) > 0
+                 RETURNING session_id",
+            )?;
+            for id in stmt.query_map([escaped.as_str(), MASK], |r| r.get(0))? {
                 sessions.insert(id?);
             }
             drop(stmt);
@@ -752,9 +951,10 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
 }
 
 /// Replaces `phrase` with `MASK` in text, tool calls and tool results.
-/// Thinking blocks containing it are dropped: changed text would break their
-/// signature. Returns whether anything changed.
-pub(crate) fn redact_content(content: &mut Vec<Content>, phrase: &str) -> bool {
+/// Thinking blocks containing it become a `MASK` text: changed thinking
+/// would break its signature, and keeping the block count keeps the stored
+/// items in line with the history. Returns whether anything changed.
+pub(crate) fn redact_content(content: &mut [Content], phrase: &str) -> bool {
     fn replace(s: &mut String, phrase: &str) -> bool {
         let hit = s.contains(phrase);
         if hit {
@@ -770,16 +970,13 @@ pub(crate) fn redact_content(content: &mut Vec<Content>, phrase: &str) -> bool {
             _ => false,
         }
     }
-    let before = content.len();
-    content
-        .retain(|c| !matches!(c, Content::Thinking { thinking, .. } if thinking.contains(phrase)));
-    let mut changed = content.len() != before;
-    // The API rejects empty messages, and dropping one would break role alternation.
-    if content.is_empty() && changed {
-        content.push(Content::text(MASK));
-    }
+    let mut changed = false;
     for c in content.iter_mut() {
         changed |= match c {
+            Content::Thinking { thinking, .. } if thinking.contains(phrase) => {
+                *c = Content::text(MASK);
+                true
+            }
             Content::Text { text } | Content::SystemNote { text } => replace(text, phrase),
             Content::UserNote { title, text, .. } => replace(title, phrase) | replace(text, phrase),
             Content::ToolUse { input, .. } => walk(input, phrase),
@@ -941,18 +1138,19 @@ mod tests {
         };
         let history = vec![msg(Role::User, "x s3cr\"et y"), assistant, result];
         store.save_messages(&id, 0, 0, history).await.unwrap();
-        store.next_epoch(&id).await.unwrap();
+        // Four blocks: the assistant message has two.
+        assert_eq!(store.next_epoch(&id).await.unwrap(), (1, 4));
         store
             .save_messages(
                 &id,
                 1,
-                3,
+                4,
                 vec![msg(Role::User, "s3cr\"et"), msg(Role::Assistant, "ok")],
             )
             .await
             .unwrap();
 
-        assert_eq!(store.redact("s3cr\"et").await.unwrap(), (4, 1));
+        assert_eq!(store.redact("s3cr\"et").await.unwrap(), (5, 1));
         let all = store.messages(&id).await.unwrap();
         let json =
             serde_json::to_string(&all.iter().map(|m| &m.message).collect::<Vec<_>>()).unwrap();
@@ -1064,6 +1262,28 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 36);
         assert_eq!(&a[14..15], "7");
+    }
+
+    #[test]
+    fn a_database_is_locked_for_other_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let lock_path = dir.path().join("sessions.db.lock");
+        // Another process: its own open file description on the lock file.
+        let other = std::fs::File::create(&lock_path).unwrap();
+        other.lock().unwrap();
+        let err = Store::open(&path).err().expect("locked");
+        assert!(
+            format!("{err:#}").contains("another rho process"),
+            "{err:#}"
+        );
+        other.unlock().unwrap();
+
+        let _a = Store::open(&path).unwrap();
+        // This process opens it again; another one cannot.
+        let _b = Store::open(&path).unwrap();
+        let other = std::fs::File::open(&lock_path).unwrap();
+        assert!(other.try_lock().is_err());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use crate::extension::Diff;
+use crate::provider::Content;
 use crate::provider::{NoteType, ToolCallId};
 use crate::store::{State, Store};
 
@@ -12,18 +13,22 @@ use super::Session;
 pub(super) struct Persist {
     pub(super) store: Store,
     pub(super) epoch: i64,
-    /// `seq` of `history[0]`.
+    /// `seq` of the first block of `history[0]`.
     pub(super) base: i64,
     /// Messages saved, and the block count of the last one: `push_user` can
     /// merge into it.
     pub(super) saved: usize,
     pub(super) last_len: usize,
+    /// Blocks saved in this epoch.
+    pub(super) blocks: usize,
     /// The session row exists.
     pub(super) created: bool,
     /// A save failed and the user was told; not repeated.
     failed: bool,
     /// Edit diffs not saved yet.
     pub(super) diffs: Vec<(ToolCallId, Diff)>,
+    /// Streamed output of tool calls, not saved yet.
+    pub(super) outputs: Vec<(ToolCallId, String)>,
 }
 
 impl Persist {
@@ -35,11 +40,22 @@ impl Persist {
             base: 0,
             saved: 0,
             last_len: 0,
+            blocks: 0,
             created: false,
             failed: false,
             diffs: vec![],
+            outputs: vec![],
         }
     }
+}
+
+/// The blocks of `messages` with their role, in order.
+fn blocks_of(
+    messages: &[crate::provider::Message],
+) -> impl Iterator<Item = (crate::provider::Role, Content)> + '_ {
+    messages
+        .iter()
+        .flat_map(|m| m.content.iter().map(|b| (m.role, b.clone())))
 }
 
 impl Session {
@@ -81,15 +97,26 @@ impl Session {
             return Ok(());
         };
         let id = self.ctx.session_id().clone();
-        // Rewrite the last saved message if it grew, and drop rows past the
-        // end if the history shrank.
-        let from = match p.saved.checked_sub(1) {
-            Some(last) if self.history.get(last).map(|m| m.content.len()) != Some(p.last_len) => {
-                last
-            }
-            _ => p.saved,
-        }
-        .min(self.history.len());
+        // The history only grows (blocks appended to the last message, new
+        // messages), so the new blocks are appended. Anything else rewrites
+        // the epoch.
+        let grew = self.history.len() >= p.saved
+            && p.saved
+                .checked_sub(1)
+                .is_none_or(|last| self.history[last].content.len() >= p.last_len);
+        let (seq, blocks) = if grew {
+            let tail = p
+                .saved
+                .checked_sub(1)
+                .map_or(&[][..], |last| &self.history[last].content[p.last_len..]);
+            let role = p.saved.checked_sub(1).map(|last| self.history[last].role);
+            let mut blocks: Vec<_> = tail.iter().map(|b| (role.unwrap(), b.clone())).collect();
+            blocks.extend(blocks_of(&self.history[p.saved..]));
+            (p.base + p.blocks as i64, blocks)
+        } else {
+            (p.base, blocks_of(&self.history).collect())
+        };
+        let count = blocks.len();
         let state = State {
             id: id.clone(),
             cwd: self.roots[0].clone(),
@@ -104,16 +131,20 @@ impl Session {
             features: self.ctx.active_features(),
             extension_state: self.ctx.all_stored(),
         };
-        let messages = self.history[from..].to_vec();
         let diffs = std::mem::take(&mut p.diffs);
+        let outputs = std::mem::take(&mut p.outputs);
         p.store.save_state(state).await?;
-        p.store
-            .save_messages(&id, p.epoch, p.base + from as i64, messages)
-            .await?;
+        if !blocks.is_empty() || !grew {
+            p.store.save_items(&id, p.epoch, seq, blocks).await?;
+        }
         if !diffs.is_empty() {
             p.store.save_diffs(&id, diffs).await?;
         }
+        if !outputs.is_empty() {
+            p.store.save_outputs(&id, outputs).await?;
+        }
         p.created = true;
+        p.blocks = (seq - p.base) as usize + count;
         p.saved = self.history.len();
         p.last_len = self.history.last().map_or(0, |m| m.content.len());
         Ok(())
@@ -127,7 +158,7 @@ impl Session {
         {
             match p.store.next_epoch(self.ctx.session_id()).await {
                 Ok((epoch, base)) => {
-                    (p.epoch, p.base, p.saved, p.last_len) = (epoch, base, 0, 0);
+                    (p.epoch, p.base, p.saved, p.last_len, p.blocks) = (epoch, base, 0, 0, 0);
                 }
                 Err(e) => {
                     self.ctx

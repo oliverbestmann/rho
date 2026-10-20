@@ -17,7 +17,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent_client_protocol::{ConnectTo, Lines};
 use anyhow::{Context, Result};
@@ -51,7 +50,6 @@ const BEARER: &str = "bearer.";
 pub const DAEMON_DIR: &str = "daemon";
 const SOCKET_FILE: &str = "acp.sock";
 const LOCK_FILE: &str = "lock";
-const LOG_FILE: &str = "log";
 
 struct Server {
     agent: Arc<Agent>,
@@ -156,61 +154,18 @@ pub fn socket_path(dir: &Path) -> PathBuf {
     dir.join(SOCKET_FILE)
 }
 
-/// `rho acp --daemon`: connects to the daemon in `dir`, starting it with
-/// `daemon_args` if none answers, and pumps stdio through until either side
-/// ends.
-pub async fn connect_stdio(dir: &Path, daemon_args: &[String]) -> Result<()> {
+/// `rho acp --daemon`: connects to the daemon in `dir` and pumps stdio
+/// through until either side ends. The daemon runs on its own (a systemd
+/// user service); this does not start one.
+pub async fn connect_stdio(dir: &Path) -> Result<()> {
     let socket = socket_path(dir);
-    let stream = match tokio::net::UnixStream::connect(&socket).await {
-        Ok(s) => {
-            if !daemon_args.is_empty() {
-                eprintln!("rho acp: daemon already running, ignoring {daemon_args:?}");
-            }
-            s
-        }
-        Err(_) => {
-            start_daemon(dir, daemon_args)?;
-            wait_for(&socket).await?
-        }
-    };
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .with_context(|| format!("no rho daemon on {}; start `rho daemon`", socket.display()))?;
     let (ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
         .await
         .context("connecting to the rho daemon")?;
     pump(tokio::io::stdin(), tokio::io::stdout(), ws).await
-}
-
-fn start_daemon(dir: &Path, args: &[String]) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-    private_dir(dir)?;
-    let log_path = dir.join(LOG_FILE);
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("opening {}", log_path.display()))?;
-    std::process::Command::new(std::env::current_exe()?)
-        .arg("daemon")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        // Not killed with the editor's process group.
-        .process_group(0)
-        .spawn()
-        .context("starting the rho daemon")?;
-    Ok(())
-}
-
-async fn wait_for(socket: &Path) -> Result<tokio::net::UnixStream> {
-    let mut last = None;
-    for _ in 0..50 {
-        match tokio::net::UnixStream::connect(socket).await {
-            Ok(s) => return Ok(s),
-            Err(e) => last = Some(e),
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Err(last.unwrap()).with_context(|| format!("rho daemon did not answer on {}", socket.display()))
 }
 
 /// Lines from `input` go out as text frames; frames come in as lines on

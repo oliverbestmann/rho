@@ -1,6 +1,6 @@
 # 35. `/redact` masks a phrase in every store
 
-- Status: Accepted, amended by 0053
+- Status: Accepted, amended by 0053, 0060
 - Date: 2026-10-15
 
 ## Context

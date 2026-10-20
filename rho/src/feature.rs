@@ -261,6 +261,11 @@ struct RequestFeatureInput {
 pub struct RequestFeature;
 
 impl Tool for RequestFeature {
+    /// It only asks; the grant follows the answer.
+    fn repeatable(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: REQUEST_FEATURE,

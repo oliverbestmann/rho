@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol::schema::v1::{
-    CreateElicitationRequest, ElicitationAction, ElicitationFormMode, ElicitationSessionScope,
-    PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
-    SessionConfigOption, SessionId, SessionNotification, SessionUpdate, ToolCallUpdate,
-    ToolCallUpdateFields,
+    ContentChunk, CreateElicitationRequest, ElicitationAction, ElicitationFormMode,
+    ElicitationSessionScope, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
+    RequestPermissionRequest, SessionConfigOption, SessionId, SessionNotification, SessionUpdate,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{Client, ConnectionTo, JsonRpcRequest};
 use futures::StreamExt;
@@ -18,18 +18,14 @@ use futures::stream::FuturesUnordered;
 use tokio::sync::broadcast;
 
 use crate::agent::AgentEvent;
-use crate::extension::{BoxFuture, Form, FormReply, Frontend};
+use crate::extension::{BoxFuture, Form, FormReply, Frontend, STREAM_CAP, STREAM_CUT, red};
 use crate::provider::{ToolCallId, ToolName};
 use crate::tools::DynTool;
 
 use super::update::{
-    LastUsage, Shown, busy_update, form_answers, form_schema, red, terminal_output, to_update,
+    LastUsage, Shown, busy_update, form_answers, form_schema, terminal_output, to_update,
 };
 use super::{ConnId, shell};
-
-/// Output a terminal card shows of one call, so a flood does not swamp the
-/// client; the model's copy is cut separately.
-const STREAM_CAP: usize = 1024 * 1024;
 
 /// What a running terminal call has shown: `$ command`, then the output.
 struct Streamed {
@@ -55,12 +51,15 @@ pub(super) struct Viewer {
     pub(super) held: Option<Vec<SessionUpdate>>,
 }
 
-/// Which viewers an update goes to.
+/// Which viewers an update goes to. `All` and `Record` also add it to the
+/// transcript.
 #[derive(Clone, Copy)]
 pub(super) enum To {
     All,
     Only(ConnId),
     Except(ConnId),
+    /// Nobody: the history of a session that opens, for later viewers.
+    Record,
 }
 
 impl To {
@@ -69,7 +68,80 @@ impl To {
             To::All => true,
             To::Only(c) => c == conn,
             To::Except(c) => c != conn,
+            To::Record => false,
         }
+    }
+
+    fn records(self) -> bool {
+        matches!(self, To::All | To::Record)
+    }
+}
+
+/// What the session showed, for viewers that attach: the current and the
+/// previous epoch. They get it from here, not from the store, so it has
+/// what is not saved yet (streamed text, a running call's output), and
+/// nothing comes twice or goes missing between a read and a save.
+#[derive(Default)]
+struct Transcript {
+    entries: Vec<Entry>,
+    /// Where the previous and the current epoch start in `entries`.
+    epochs: [usize; 2],
+}
+
+enum Entry {
+    Text(String),
+    Thinking(String),
+    /// For terminal viewers, and for the others.
+    Update {
+        terminal: Box<SessionUpdate>,
+        plain: Box<SessionUpdate>,
+    },
+    /// Output of a call shown as a terminal, for terminal viewers.
+    Output {
+        id: ToolCallId,
+        data: String,
+    },
+}
+
+impl Transcript {
+    /// Adds `entry`, merged into the last one if it continues it.
+    fn push(&mut self, entry: Entry) {
+        // Not into the previous epoch.
+        let last = (self.entries.len() > self.epochs[1])
+            .then(|| self.entries.last_mut())
+            .flatten();
+        match (last, entry) {
+            (Some(Entry::Text(s)), Entry::Text(t))
+            | (Some(Entry::Thinking(s)), Entry::Thinking(t)) => s.push_str(&t),
+            (
+                Some(Entry::Output { id, data }),
+                Entry::Output {
+                    id: next,
+                    data: more,
+                },
+            ) if *id == next => data.push_str(&more),
+            (_, entry) => self.entries.push(entry),
+        }
+    }
+
+    /// A compaction: the epoch before the current one is dropped.
+    fn new_epoch(&mut self) {
+        self.entries.drain(..self.epochs[1]);
+        self.epochs = [0, self.entries.len()];
+    }
+
+    fn updates(&self, terminal: bool) -> impl Iterator<Item = SessionUpdate> + '_ {
+        self.entries.iter().filter_map(move |e| match e {
+            Entry::Text(t) => Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                t.as_str().into(),
+            ))),
+            Entry::Thinking(t) => Some(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+                t.as_str().into(),
+            ))),
+            Entry::Update { terminal: t, .. } if terminal => Some((**t).clone()),
+            Entry::Update { plain, .. } => Some((**plain).clone()),
+            Entry::Output { id, data } => terminal.then(|| terminal_output(id, data)),
+        })
     }
 }
 
@@ -83,10 +155,9 @@ pub(super) struct AcpFrontend {
     /// Viewers that got ready, for the confirmations and forms waiting for
     /// an answer.
     ready: broadcast::Sender<Viewer>,
-    /// The `tool_call` updates (with and without terminal) of the running
-    /// tool calls. A viewer that attaches during a turn replays the store,
-    /// which has them only after the tools ran.
-    running: Mutex<Vec<(ToolCallId, SessionUpdate, SessionUpdate)>>,
+    /// Locked after `viewers`, so a viewer gets each update once: from
+    /// here when it attaches, or live.
+    transcript: Mutex<Transcript>,
     /// How running tool calls were shown, by id. `ToolEnd` replaces the
     /// call's content, so it has to repeat the command or the questions.
     /// Terminals stay terminals here, see `Shown::for_viewer`.
@@ -109,7 +180,7 @@ impl AcpFrontend {
             notices: AtomicU64::new(0),
             viewers: Mutex::default(),
             ready: broadcast::channel(16).0,
-            running: Mutex::default(),
+            transcript: Mutex::default(),
             shown: Mutex::default(),
             streamed: Mutex::default(),
             published: Mutex::default(),
@@ -132,12 +203,56 @@ impl AcpFrontend {
         viewers.push(viewer);
     }
 
+    /// `attach`, after sending `viewer` the transcript.
+    pub(super) fn attach_replayed(&self, mut viewer: Viewer) {
+        let mut viewers = self.viewers.lock().unwrap();
+        let conn = viewer.conn;
+        for update in self.transcript.lock().unwrap().updates(viewer.terminal) {
+            self.deliver(&mut viewer, update, To::Only(conn));
+        }
+        viewers.retain(|v| v.conn != conn);
+        viewers.push(viewer);
+    }
+
+    /// Runs `record` (which sends `To::Record`) so that what it records goes
+    /// before the transcript so far: the stored history goes before the
+    /// notices of the session's start.
+    pub(super) fn record_first(&self, record: impl FnOnce()) {
+        let later = std::mem::take(&mut *self.transcript.lock().unwrap());
+        record();
+        let mut t = self.transcript.lock().unwrap();
+        for entry in later.entries {
+            t.push(entry);
+        }
+    }
+
+    /// Adds `update` to the transcript, for every viewer.
+    pub(super) fn record(&self, update: SessionUpdate) {
+        self.transcript.lock().unwrap().push(Entry::Update {
+            terminal: Box::new(update.clone()),
+            plain: Box::new(update),
+        });
+    }
+
+    /// A prompt from `conn`: the other viewers see it, later ones too.
+    pub(super) fn echo(&self, update: SessionUpdate, conn: ConnId) {
+        let mut viewers = self.viewers.lock().unwrap();
+        self.record(update.clone());
+        for v in viewers.iter_mut().filter(|v| v.conn != conn) {
+            self.deliver(v, update.clone(), To::Except(conn));
+        }
+    }
+
+    pub(super) fn new_epoch(&self) {
+        self.transcript.lock().unwrap().new_epoch();
+    }
+
     pub(super) fn viewing(&self, conn: ConnId) -> bool {
         self.viewers.lock().unwrap().iter().any(|v| v.conn == conn)
     }
 
-    /// `conn` knows the session now: it gets the held updates (or the
-    /// running tool calls) and the questions waiting for an answer.
+    /// `conn` knows the session now: it gets the held updates (or the busy
+    /// state) and the questions waiting for an answer.
     pub(super) fn ready(&self, conn: ConnId) {
         let mut viewers = self.viewers.lock().unwrap();
         let Some(v) = viewers.iter_mut().find(|v| v.conn == conn) else {
@@ -145,28 +260,13 @@ impl AcpFrontend {
         };
         v.ready = true;
         let held = v.held.take();
-        // With these it got the running tool calls and the busy state.
+        // With these it got the busy state.
         let caught_up = held.is_some();
         for update in held.into_iter().flatten() {
             self.deliver(v, update, To::Only(conn));
         }
-        if !caught_up {
-            for (id, terminal, plain) in self.running.lock().unwrap().iter() {
-                let update = if v.terminal { terminal } else { plain };
-                self.deliver(v, update.clone(), To::Only(conn));
-                let shown = self
-                    .streamed
-                    .lock()
-                    .unwrap()
-                    .get(id)
-                    .map(|s| s.text.clone());
-                if let Some(text) = shown.filter(|_| v.terminal) {
-                    self.deliver(v, terminal_output(id, &text), To::Only(conn));
-                }
-            }
-            if self.busy.load(Ordering::Relaxed) {
-                self.deliver(v, busy_update(true), To::Only(conn));
-            }
+        if !caught_up && self.busy.load(Ordering::Relaxed) {
+            self.deliver(v, busy_update(true), To::Only(conn));
         }
         // Nobody waiting is fine.
         let _ = self.ready.send(v.clone());
@@ -272,23 +372,29 @@ impl AcpFrontend {
             _ => terminal.clone(),
         };
         drop(published);
-        // A replay (`To::Only`) shows finished calls.
-        if matches!(to, To::All) {
-            let mut running = self.running.lock().unwrap();
-            match ev {
-                AgentEvent::ToolStart { id, .. } => {
-                    running.push((id.clone(), terminal.clone(), plain.clone()));
-                }
-                AgentEvent::ToolEnd { id, .. } => running.retain(|(r, _, _)| r != id),
-                _ => {}
-            }
+        // The history: what a later viewer must see too.
+        let entry = match ev {
+            AgentEvent::Text(t) => Some(Entry::Text(t.into())),
+            AgentEvent::Thinking(t) => Some(Entry::Thinking(t.into())),
+            AgentEvent::ToolStart { .. }
+            | AgentEvent::ToolEnd { .. }
+            | AgentEvent::Notice { .. } => Some(Entry::Update {
+                terminal: Box::new(terminal.clone()),
+                plain: Box::new(plain.clone()),
+            }),
+            _ => None,
+        };
+        let mut viewers = self.viewers.lock().unwrap();
+        if let Some(entry) = entry.filter(|_| to.records()) {
+            self.transcript.lock().unwrap().push(entry);
         }
-        for v in self.viewers.lock().unwrap().iter_mut() {
+        for v in viewers.iter_mut() {
             if to.includes(v.conn) {
                 let update = if v.terminal { &terminal } else { &plain };
                 self.deliver(v, update.clone(), to);
             }
         }
+        drop(viewers);
         if let (AgentEvent::ToolStart { id, .. }, Some(Shown::Terminal { command, .. })) =
             (&ev, &shown)
         {
@@ -321,7 +427,7 @@ impl AcpFrontend {
                 chunk.to_string()
             };
             if s.text.len() + data.len() >= STREAM_CAP {
-                data.push_str("\n[more output not shown]\n");
+                data.push_str(STREAM_CUT);
             }
             s.text.push_str(&data);
             data
@@ -331,7 +437,14 @@ impl AcpFrontend {
 
     fn send_terminal(&self, id: &ToolCallId, data: &str, to: To) {
         let update = terminal_output(id, data);
-        for v in self.viewers.lock().unwrap().iter_mut() {
+        let mut viewers = self.viewers.lock().unwrap();
+        if to.records() {
+            self.transcript.lock().unwrap().push(Entry::Output {
+                id: id.clone(),
+                data: data.into(),
+            });
+        }
+        for v in viewers.iter_mut() {
             if v.terminal && to.includes(v.conn) {
                 self.deliver(v, update.clone(), to);
             }
@@ -371,6 +484,10 @@ pub(super) struct Published {
 impl Frontend for AcpFrontend {
     fn event(&self, ev: AgentEvent<'_>) {
         self.send(ev, To::All);
+    }
+
+    fn compacted(&self) {
+        self.new_epoch();
     }
     fn confirm<'a>(
         &'a self,
@@ -440,5 +557,52 @@ impl Frontend for AcpFrontend {
                 _ => FormReply::Declined,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(t: &Transcript, terminal: bool) -> Vec<String> {
+        t.updates(terminal)
+            .map(|u| match u {
+                SessionUpdate::AgentMessageChunk(c) | SessionUpdate::AgentThoughtChunk(c) => {
+                    serde_json::to_value(&c.content).unwrap()["text"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                }
+                other => serde_json::to_value(&other).unwrap()["_meta"]["terminal_output"]["data"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn transcript_merges_chunks_and_keeps_two_epochs() {
+        let mut t = Transcript::default();
+        let out = |id: &str, data: &str| Entry::Output {
+            id: ToolCallId::new(id),
+            data: data.into(),
+        };
+        t.push(Entry::Text("a".into()));
+        t.push(Entry::Text("b".into()));
+        t.push(Entry::Thinking("c".into()));
+        t.push(out("t1", "x"));
+        t.push(out("t1", "y"));
+        t.push(out("t2", "z"));
+        assert_eq!(texts(&t, true), ["ab", "c", "xy", "z"]);
+        // Terminal output only for terminals.
+        assert_eq!(texts(&t, false), ["ab", "c"]);
+
+        t.new_epoch();
+        t.push(Entry::Text("second".into()));
+        t.new_epoch();
+        t.push(Entry::Text("third".into()));
+        // The first epoch is gone; text does not merge across epochs.
+        assert_eq!(texts(&t, false), ["second", "third"]);
     }
 }

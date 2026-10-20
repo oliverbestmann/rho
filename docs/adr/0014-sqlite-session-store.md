@@ -1,6 +1,6 @@
 # 14. Sessions in SQLite
 
-- Status: Accepted, amended by 0041
+- Status: Accepted, amended by 0041, 0060
 - Date: 2026-10-09
 
 ## Context

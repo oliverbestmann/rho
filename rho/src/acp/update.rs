@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::{
 
 use crate::agent::AgentEvent;
 use crate::edit::EDIT;
-use crate::extension::{Answers, Field, FieldKey, FieldKind, Form};
+use crate::extension::{Answers, Field, FieldKey, FieldKind, Form, red};
 use crate::provider::{self, ImageSource, NoteType, ToolName, Usage};
 use crate::tools;
 
@@ -220,11 +220,6 @@ pub(super) fn terminal_output(id: &provider::ToolCallId, data: &str) -> SessionU
             serde_json::json!({"terminal_output": {"terminal_id": id, "data": data}}),
         )),
     )
-}
-
-/// `text` in red for a terminal, as stderr is shown.
-pub(super) fn red(text: &str) -> String {
-    format!("\x1b[31m{text}\x1b[0m")
 }
 
 /// The command as a fenced `sh` block, so Zed highlights it. The fence is

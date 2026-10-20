@@ -79,6 +79,7 @@ impl Agent {
         if session.history.is_empty() {
             bail!("nothing to compact");
         }
+        crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
         // Earlier notices (e.g. the last turn report) belong to the old epoch.
         session.save().await;
         let mut instructions = INSTRUCTIONS.to_string();
@@ -171,6 +172,7 @@ impl Agent {
                 "{SUMMARY_START}{summary}{SUMMARY_END}"
             ))],
         }];
+        session.ctx.compacted();
         // The new prefix is not cached yet.
         session.last_request = None;
         // The context in use is unknown until the next request, not the old one.

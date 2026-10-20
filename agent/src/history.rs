@@ -41,7 +41,7 @@ const MAX_CALL: usize = 300;
 const CANDIDATES: u32 = 50;
 const RRF_K: f64 = 60.0;
 /// Messages shown by `read`.
-const READ: i64 = 10;
+const READ: usize = 10;
 const ANSWER_SYSTEM: &str = "You get search results from earlier conversations between a user and a coding agent, and a query. Answer the query from the results only, briefly. Keep exact file paths, names, commands and error messages. Cite each point as (session <id>, seq <first>-<last>). If the results don't answer it, say so.";
 
 const SCHEMA: &str = r#"
@@ -284,24 +284,26 @@ impl Tool for HistoryTool {
                     bail!("no session {id} in {}", self.root.display());
                 };
                 let messages = store.messages(&id).await?;
-                let shown: Vec<String> = messages
+                // `seq` counts blocks, so messages have gaps.
+                let from = messages.partition_point(|m| m.seq < seq);
+                let page = &messages[from..(from + READ).min(messages.len())];
+                let shown: Vec<String> = page
                     .iter()
-                    .filter(|m| (seq..seq + READ).contains(&m.seq))
                     // Messages of only notes render empty.
                     .filter_map(|m| {
                         let text = render(&m.message, true);
                         (!text.is_empty()).then(|| format!("[{}] {text}", m.seq))
                     })
                     .collect();
-                let more = messages.last().is_some_and(|m| m.seq >= seq + READ);
+                let more = messages.get(from + page.len());
                 let mut out = format!(
                     "{} · {} · session {id}\n\n{}",
                     info.title.as_deref().unwrap_or("(untitled)"),
                     info.cwd.display(),
                     shown.join("\n\n")
                 );
-                if more {
-                    out += &format!("\n\n(more from seq {})", seq + READ);
+                if let Some(next) = more {
+                    out += &format!("\n\n(more from seq {})", next.seq);
                 }
                 out
             }

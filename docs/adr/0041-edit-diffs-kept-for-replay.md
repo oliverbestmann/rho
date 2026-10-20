@@ -1,6 +1,6 @@
 # 41. Edit diffs are stored for 7 days and replayed
 
-- Status: Accepted
+- Status: Accepted, amended by 0060
 - Date: 2026-10-15
 
 ## Context

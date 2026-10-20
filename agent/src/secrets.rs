@@ -137,6 +137,9 @@ impl DynTool for AllowMasked {
     fn titled(&self) -> bool {
         self.0.titled()
     }
+    fn repeatable(&self) -> bool {
+        self.0.repeatable()
+    }
 }
 
 impl Extension for Secrets {

@@ -198,25 +198,38 @@ ACP sessions are saved to SQLite, `~/.config/rho/sessions.db`
 (`RHO_SESSIONS_DB` overrides), from `session/new` on: history, title,
 model, thinking level, profile, usage and cost. One-shot CLI runs are not saved.
 Clients can list them (`session/list`, filtered by cwd), continue them
-(`session/load` replays the conversation with all epochs, each compaction
+(`session/load` replays the current and the previous epoch, each compaction
 summary as a "Compacted" notice; `session/resume` replays nothing) and
 `session/close` them. Sandbox grants are not saved: a continued session
-starts from `sandbox.json` again. Edit diffs are stored for 7 days and
-replayed with the edit; older edits show only their output (ADR 0041).
+starts from `sandbox.json` again. Edit diffs and the streamed output of
+terminal calls are stored for 7 days and replayed with the call; older
+calls show only their output for the model (ADR 0041, 0060).
+
+The history is saved block by block as it grows (ADR 0060): a model
+response before its tool calls run, each result when its call ends. After
+a restart a session loads with its open tool calls closed: one that was
+cut off while it ran gets an "interrupted" result. If rho stopped in a call
+that can run again (a question, a permission prompt, a read), opening the
+session goes on from there: it asks again and the turn continues after the
+answer. A cancelled call gets a "cancelled" result.
 
 Every session opens its own connection; `Options::sessions_db` maps a cwd
-to a database file (default: the same file for all). Tables are `STRICT`
-with foreign keys and checks, in WAL mode so processes can share the file.
+to a database file (default: the same file for all). One process uses a
+database: it holds `<file>.lock`, and another rho fails to start sessions
+on it. Tables are `STRICT` with foreign keys and checks, in WAL mode.
 `/compact` keeps the old messages: it starts a new epoch, and a session's
-history is the messages of its latest epoch. Each message also stores its
-text and tool calls as plain text, ready for full-text search.
+history is the blocks of its latest epoch (table `items`, one row per
+block; consecutive blocks of one role are a message). Each block also
+stores its text and tool calls as plain text, ready for full-text search.
+The older `messages` table is no longer read; sessions saved before ADR
+0060 are not listed.
 
 `/redact <phrase>` replaces an exact phrase with the secrets marker
 (`store::MASK`) in every stored session (all epochs, titles), in the open
 session, and through each extension's `redact` hook in the `History`
 index (dropped, rebuilt on the next search) and `Memory` (matching memories
-are deleted). Thinking blocks with the phrase are dropped, since their
-signature covers the text. The databases zero deleted bytes and truncate
+are deleted). Thinking blocks with the phrase become the marker as text,
+since their signature covers the text. The databases zero deleted bytes and truncate
 their WAL. Other open sessions keep the phrase in memory until reopened
 (ADR 0035).
 
@@ -523,12 +536,9 @@ Tools can return images too: set `ToolOutput::images`.
 `rho daemon` is one rho for all editors. It serves ACP over WebSocket on
 `~/.config/rho/daemon/acp.sock` (directory 0700, no token). `rho acp --daemon`
 is what the editor runs: an ACP agent on stdio that only forwards lines to
-the daemon and back. If no daemon answers, it starts one in the background
-(log in `~/.config/rho/daemon/log`), with its own `-m`/`-t` and environment.
-Later clients' flags are ignored, and tools run with the daemon's
-environment, not the editor's. A lock file keeps it to one daemon. After a
-rebuild, stop the old one (`pkill -f 'rho daemon'`); the next editor starts
-the new one.
+the daemon and back. It does not start a daemon; run that on its own, e.g.
+as a systemd user service. Tools run with the daemon's environment, not the
+editor's. A lock file keeps it to one daemon. After a rebuild, restart it.
 
 Sessions are shared within the daemon: any connection can `session/load` a
 session that another one has open, gets its history and then every update
@@ -536,7 +546,10 @@ live, including the other clients' prompts. Permission requests and forms go
 to every connection on the session (forms only to clients that support
 them); the first answer counts and the others are withdrawn. A question
 nobody answered waits, also when everyone left: the next client that loads
-the session gets it. A turn keeps running when its connection drops. A session is dropped from memory once no connection has
+the session gets it. A client that attaches gets what the session showed so
+far (the current and the previous epoch) from the daemon's memory, including
+the text and output of a turn that is still running. A turn keeps running
+when its connection drops. A session is dropped from memory once no connection has
 it open and nothing runs; `session/close` by the last one cancels its turn.
 
 `rho daemon --listen ADDR` also serves ACP on `ws://ADDR/`, for

@@ -264,12 +264,12 @@ async fn a_turn_outlives_its_connection() {
     assert_eq!(running(&b_updates), [true, false]);
 }
 
-/// Asks before every tool call.
+/// Asks before every tool call but `t0`.
 struct Confirmer;
 
 impl Extension for Confirmer {
     async fn tool_call(&self, ctx: &Context, call: &mut ExtToolCall) -> Decision {
-        if ctx.confirm(Some(&call.id), "Run it?").await {
+        if call.id.as_str() == "t0" || ctx.confirm(Some(&call.id), "Run it?").await {
             Decision::Allow
         } else {
             Decision::Block("denied by user".into())
@@ -282,11 +282,19 @@ async fn a_question_waits_for_the_next_connection() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_path_buf();
     let provider = Scripted::new(vec![
-        vec![Event::Block(Content::ToolUse {
-            id: ToolCallId::new("t1"),
-            name: ToolName::new("Bash"),
-            input: serde_json::json!({"command": "echo hi", "description": "Say hi"}),
-        })],
+        vec![
+            text("Let me check."),
+            Event::Block(Content::ToolUse {
+                id: ToolCallId::new("t0"),
+                name: ToolName::new("Bash"),
+                input: serde_json::json!({"command": "echo zero", "description": "Say zero"}),
+            }),
+            Event::Block(Content::ToolUse {
+                id: ToolCallId::new("t1"),
+                name: ToolName::new("Bash"),
+                input: serde_json::json!({"command": "echo hi", "description": "Say hi"}),
+            }),
+        ],
         answer("ok"),
     ]);
     let mut agent = Agent::new(
@@ -338,7 +346,8 @@ async fn a_question_waits_for_the_next_connection() {
     .unwrap()
     .unwrap();
 
-    // B loads the session: it gets the tool call, then the question.
+    // B loads the session: it gets the finished call, the open one, then the
+    // question.
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let (record, answer_record) = (seen.clone(), seen.clone());
     let b_updates = Updates::default();
@@ -393,9 +402,19 @@ async fn a_question_waits_for_the_next_connection() {
     .unwrap();
 
     // Notices after the turn are tool calls too.
-    assert_eq!(seen.lock().unwrap()[..2], ["tool t1", "ask t1"]);
+    assert_eq!(seen.lock().unwrap()[..3], ["tool t0", "tool t1", "ask t1"]);
+    let t0_done = b_updates.lock().unwrap().iter().any(|u| {
+        let v = serde_json::to_value(u).unwrap();
+        v["toolCallId"] == "t0" && v["status"] == "completed"
+    });
+    assert!(t0_done, "t0 shows as finished");
+    // The text before the calls is shown once.
+    assert_eq!(
+        chunks(&b_updates),
+        ["user: hi", "agent: Let me check.", "agent: ok"]
+    );
     let requests = provider.requests.lock().unwrap();
-    let result = &requests[1].messages.last().unwrap().content[0];
+    let result = &requests[1].messages.last().unwrap().content[1];
     assert!(
         matches!(result, Content::ToolResult { is_error: false, content, .. } if content == "hi\n"),
         "{result:?}"
@@ -517,4 +536,195 @@ async fn web_connections_start_sessions_only_under_home_or_tmp() {
             .await;
         assert_eq!(started.is_ok(), !web_limits, "web_limits {web_limits}");
     }
+}
+
+/// Never answers a question, and tells `asked` when one comes.
+struct Silent(Arc<Notify>);
+
+impl rho::extension::Frontend for Silent {
+    fn event(&self, _ev: rho::agent::AgentEvent<'_>) {}
+    fn confirm<'a>(
+        &'a self,
+        _id: Option<&'a ToolCallId>,
+        _title: &'a str,
+    ) -> rho::extension::BoxFuture<'a, bool> {
+        self.0.notify_one();
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn a_question_open_at_a_restart_is_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let provider = Scripted::new(vec![
+        vec![
+            text("Let me check."),
+            Event::Block(Content::ToolUse {
+                id: ToolCallId::new("t1"),
+                name: ToolName::new("Bash"),
+                input: serde_json::json!({"command": "echo hi", "description": "Say hi"}),
+            }),
+        ],
+        answer("ok"),
+    ]);
+    let mut agent = Agent::new(
+        provider.clone(),
+        ModelSpec::new("test", "m"),
+        rho::tools::builtin(),
+    );
+    let db = dir.path().join("sessions.db");
+    agent.sessions_db = Some(Arc::new(move |_| db.clone()));
+    agent.extensions = vec![Arc::new(Confirmer)];
+    let agent = Arc::new(agent);
+
+    // The question is open when rho stops.
+    let asked = Arc::new(Notify::new());
+    let sid = rho::store::SessionId::new("s");
+    let mut session = agent
+        .start_session(sid.clone(), &cwd, vec![], Arc::new(Silent(asked.clone())))
+        .await
+        .unwrap();
+    tokio::select! {
+        _ = agent.run(&mut session, vec![Content::text("hi")]) => panic!("the run ended"),
+        _ = asked.notified() => {}
+    }
+    std::mem::forget(session);
+
+    // After the restart, loading the session asks again; the answer lets
+    // the call run and the turn go on.
+    let b_updates = Updates::default();
+    let updates = b_updates.clone();
+    let asks = Arc::new(Mutex::new(vec![]));
+    let record = asks.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    updates.lock().unwrap().push(n.update);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |req: RequestPermissionRequest,
+                            responder: Responder<RequestPermissionResponse>,
+                            _cx| {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push(req.tool_call.tool_call_id.0.to_string());
+                    responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(
+                rho::acp::agent_in(agent.clone(), Arc::new(Hub::default()), false),
+                async |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    cx.send_request(LoadSessionRequest::new(SessionId::new("s"), cwd.clone()))
+                        .block_task()
+                        .await?;
+                    while !chunks(&b_updates).contains(&"agent: ok".to_string()) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Ok(())
+                },
+            ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(*asks.lock().unwrap(), ["t1"]);
+    assert_eq!(
+        chunks(&b_updates),
+        ["user: hi", "agent: Let me check.", "agent: ok"]
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "one more request, after the answer");
+    let result = &requests[1].messages.last().unwrap().content[0];
+    assert!(
+        matches!(result, Content::ToolResult { is_error: false, content, .. } if content == "hi\n"),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn two_connections_opening_a_stored_session_at_once_share_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let provider = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let sid = rho::store::SessionId::new("s");
+    let mut session = agent
+        .start_session(sid, &cwd, vec![], Arc::new(rho::extension::NoFrontend))
+        .await
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    drop(session);
+
+    let hub = Arc::new(Hub::default());
+    let (a_loaded, b_loaded) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let b_updates = Updates::default();
+    let seen = b_updates.clone();
+    let a_cwd = cwd.clone();
+    let (a_hub, a_agent, a_wait, a_done) = (
+        hub.clone(),
+        agent.clone(),
+        b_loaded.clone(),
+        a_loaded.clone(),
+    );
+    let a = Client.builder().connect_with(
+        rho::acp::agent_in(a_agent, a_hub, false),
+        async move |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let sid = SessionId::new("s");
+            cx.send_request(LoadSessionRequest::new(sid.clone(), a_cwd))
+                .block_task()
+                .await?;
+            a_done.notify_one();
+            a_wait.notified().await;
+            cx.send_request(prompt(&sid, "again")).block_task().await?;
+            Ok(())
+        },
+    );
+    let b = client!(b_updates).connect_with(
+        rho::acp::agent_in(agent.clone(), hub.clone(), false),
+        async |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            cx.send_request(LoadSessionRequest::new(SessionId::new("s"), cwd.clone()))
+                .block_task()
+                .await?;
+            b_loaded.notify_one();
+            a_loaded.notified().await;
+            while !chunks(&seen).contains(&"agent: Two.".to_string()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(())
+        },
+    );
+    let (a, b) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(a, b) })
+        .await
+        .unwrap();
+    a.unwrap();
+    b.unwrap();
+    // B sees A's prompt and its answer live: one session.
+    assert_eq!(
+        chunks(&b_updates),
+        ["user: hi", "agent: One.", "user: again", "agent: Two."]
+    );
 }

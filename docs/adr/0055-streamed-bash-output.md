@@ -1,6 +1,6 @@
 # 55. Bash output streams into Zed's terminal card
 
-- Status: Accepted
+- Status: Accepted, amended by 0060
 - Date: 2026-10-16
 
 ## Context

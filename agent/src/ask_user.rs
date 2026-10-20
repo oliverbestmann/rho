@@ -72,6 +72,11 @@ struct QuestionOption {
 struct AskUserQuestion;
 
 impl Tool for AskUserQuestion {
+    /// It only asks; the answer takes effect after it.
+    fn repeatable(&self) -> bool {
+        true
+    }
+
     fn titled(&self) -> bool {
         true
     }

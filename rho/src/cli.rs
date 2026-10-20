@@ -14,7 +14,7 @@ const USAGE: &str = "\
 usage:
   rho [options] <prompt...>   one-shot: run the prompt, print the answer
   rho acp [options]           serve the Agent Client Protocol on stdio
-  rho acp --daemon [options]  ... through the daemon, starting it with the options if needed
+  rho acp --daemon            ... through a running daemon
   rho daemon [options]        serve ACP for `acp --daemon` on ~/.config/rho/daemon/acp.sock
   rho daemon --listen ADDR    ... and on ws://ADDR/, with a bearer token
   rho login [anthropic]       sign in with a Claude Pro/Max subscription
@@ -98,14 +98,6 @@ pub async fn run(options: Options) -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let model_flag = take_flag(&mut args, "-m", "--model")?;
     let thinking_flag = take_flag(&mut args, "-t", "--thinking")?;
-    // For a daemon that `acp --daemon` starts.
-    let mut daemon_args = vec![];
-    if let Some(m) = &model_flag {
-        daemon_args.extend(["--model".to_string(), m.clone()]);
-    }
-    if let Some(t) = &thinking_flag {
-        daemon_args.extend(["--thinking".to_string(), t.clone()]);
-    }
     let model: Option<ModelSpec> = model_flag
         .or_else(|| std::env::var("RHO_MODEL").ok())
         .map(|m| m.parse())
@@ -130,7 +122,7 @@ pub async fn run(options: Options) -> Result<()> {
         Some("acp") => {
             if args.iter().any(|a| a == "--daemon") {
                 let dir = crate::config_dir().join(crate::acp_ws::DAEMON_DIR);
-                let result = crate::acp_ws::connect_stdio(&dir, &daemon_args).await;
+                let result = crate::acp_ws::connect_stdio(&dir).await;
                 // Tokio's stdin reader blocks in a thread that cannot be
                 // cancelled, so the runtime would wait for the editor forever.
                 if let Err(e) = result {

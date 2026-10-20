@@ -1,6 +1,6 @@
 # 52. Hold a starting session's notices until the client knows it
 
-- Status: Accepted
+- Status: Accepted, amended by 0060
 - Date: 2026-10-15
 - Amends: ADR 0031, ADR 0036, ADR 0039
 

@@ -160,6 +160,9 @@ pub struct Session {
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
     persist: Option<Persist>,
+    /// Stored with open tool calls that run again on the next run, see
+    /// `resume_session`.
+    resume: bool,
 }
 
 fn notify_dirs_changed(session: &Session) {
@@ -173,6 +176,12 @@ fn notify_dirs_changed(session: &Session) {
 }
 
 impl Session {
+    /// Resumed with open tool calls that run again on the next run: start
+    /// one with `Agent::run_triggered`, they may wait for the user.
+    pub fn resuming(&self) -> bool {
+        self.resume
+    }
+
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
             model: Some(self.model.clone()),
@@ -432,7 +441,20 @@ impl Agent {
         (p.epoch, p.base, p.created) = (info.epoch, loaded.base, true);
         p.saved = loaded.history.len();
         p.last_len = loaded.history.last().map_or(0, |m| m.content.len());
+        p.blocks = loaded.history.iter().map(|m| m.content.len()).sum();
         session.history = loaded.history;
+        // The first open call is where rho stopped. If it can run again (it
+        // only asks or reads, or its hooks had not let it run yet), the run
+        // goes on from there with the next one; else it was cut off.
+        session.resume = match open_calls(&session.history).first() {
+            Some(Content::ToolUse { id, name, .. }) => {
+                !loaded.started.contains(id) || session.tool(name).is_some_and(|t| t.repeatable())
+            }
+            _ => false,
+        };
+        if !session.resume {
+            close_open_calls(&mut session.history, INTERRUPTED);
+        }
         // Setup notices are not saved: they would repeat on every resume.
         session.ctx.record_notes();
         Ok(session)
@@ -510,6 +532,7 @@ impl Agent {
             roots,
             extensions: self.extensions.clone(),
             persist: store.map(Persist::new),
+            resume: false,
         };
         session.publish_info();
         Ok(session)
@@ -570,10 +593,11 @@ impl Agent {
         Ok(())
     }
 
-    /// Runs a turn for messages sent with `trigger_turn` while idle.
+    /// Runs a turn for messages sent with `trigger_turn` while idle, or to
+    /// go on with the open tool calls of a resumed session (`resuming`).
     /// Returns `None` if there is nothing to run.
     pub async fn run_triggered(&self, session: &mut Session) -> Option<Result<StopReason>> {
-        if !session.ctx.has_triggered() {
+        if !session.ctx.has_triggered() && !session.resume {
             return None;
         }
         Some(self.run(session, vec![]).await)
@@ -626,6 +650,14 @@ impl Agent {
         let exts = &self.extensions;
         // A stop requested while idle must not end this new run.
         ctx.take_stop();
+        let mut tools_called = Vec::new();
+        // A restart stopped the run in a call that can run again: it goes
+        // on from there.
+        if std::mem::take(&mut session.resume) {
+            let calls = open_calls(&session.history);
+            self.run_calls(session, &calls, &mut tools_called).await;
+        }
+        close_open_calls(&mut session.history, CANCELLED);
 
         // Messages queued while idle go first, then the prompt.
         let mut content = ctx.drain_inbox();
@@ -644,7 +676,6 @@ impl Agent {
         push_user(&mut session.history, setup.content);
         session.save().await;
 
-        let mut tools_called = Vec::new();
         // No turn limit, like Claude Code and pi; the user cancels runaway runs.
         loop {
             // The history ends with a user message here (prompt or tool results).
@@ -669,38 +700,18 @@ impl Agent {
             }
 
             let (content, stop, usage) = session.stream(request).await?;
-
-            let mut results = Vec::new();
-            for block in &content {
-                let Content::ToolUse { id, name, input } = block else {
-                    continue;
-                };
-                let mut call = ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                };
-                // Every tool_use needs a result, even when skipped.
-                let out = if ctx.is_stopped() {
-                    ToolOutput {
-                        output: "skipped: run stopped".into(),
-                        is_error: true,
-                        ..Default::default()
-                    }
-                } else {
-                    self.call_tool(session, &mut call).await
-                };
-                tools_called.push(call.name);
-                if let (Some(diff), Some(p)) = (out.diff, &mut session.persist) {
-                    p.diffs.push((call.id.clone(), diff));
-                }
-                results.push(Content::ToolResult {
-                    tool_use_id: call.id,
-                    content: out.output,
-                    is_error: out.is_error,
-                    images: out.images,
+            // Saved before its tools run, so it survives a restart while
+            // they do; `close_open_calls` repairs the history after one.
+            // The API rejects empty assistant messages.
+            if !content.is_empty() {
+                session.history.push(Message {
+                    role: Role::Assistant,
+                    content: content.clone(),
                 });
+                session.save().await;
             }
+
+            let results = self.run_calls(session, &content, &mut tools_called).await;
 
             let turn = TurnEnd {
                 assistant: &content,
@@ -711,20 +722,9 @@ impl Agent {
                 ext.turn_end(&ctx, &turn).await;
             }
 
-            // The API rejects empty assistant messages.
-            if !content.is_empty() {
-                session.history.push(Message {
-                    role: Role::Assistant,
-                    content,
-                });
-            }
             if !results.is_empty() {
                 // Steering: messages sent meanwhile ride along with the results.
-                results.extend(ctx.drain_inbox());
-                session.history.push(Message {
-                    role: Role::User,
-                    content: results,
-                });
+                push_user(&mut session.history, ctx.drain_inbox());
                 session.save().await;
                 if let Some(stop) = stopped(&ctx) {
                     return Ok(stop);
@@ -757,7 +757,63 @@ impl Agent {
         }
     }
 
-    async fn call_tool(&self, session: &Session, call: &mut ToolCall) -> ToolOutput {
+    /// Runs the tool calls in `blocks` one by one, saving each result as it
+    /// comes, and returns the results.
+    async fn run_calls(
+        &self,
+        session: &mut Session,
+        blocks: &[Content],
+        tools_called: &mut Vec<ToolName>,
+    ) -> Vec<Content> {
+        let mut results = Vec::new();
+        for block in blocks {
+            let Content::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            let mut call = ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            };
+            // Every tool_use needs a result, even when skipped.
+            let (out, shown) = if session.ctx.is_stopped() {
+                let out = ToolOutput {
+                    output: "skipped: run stopped".into(),
+                    is_error: true,
+                    ..Default::default()
+                };
+                (out, None)
+            } else {
+                self.call_tool(session, &mut call).await
+            };
+            tools_called.push(call.name);
+            if let Some(p) = &mut session.persist {
+                if let Some(diff) = out.diff {
+                    p.diffs.push((call.id.clone(), diff));
+                }
+                if let Some(shown) = shown {
+                    p.outputs.push((call.id.clone(), shown));
+                }
+            }
+            let result = Content::ToolResult {
+                tool_use_id: call.id,
+                content: out.output,
+                is_error: out.is_error,
+                images: out.images,
+            };
+            push_user(&mut session.history, vec![result.clone()]);
+            session.save().await;
+            results.push(result);
+        }
+        results
+    }
+
+    /// Runs `call` and returns its output and what it streamed.
+    async fn call_tool(
+        &self,
+        session: &Session,
+        call: &mut ToolCall,
+    ) -> (ToolOutput, Option<String>) {
         let ctx = &session.ctx;
         // Announce first, so a confirm prompt can refer to the visible call.
         let tool = session.tool(&call.name);
@@ -777,7 +833,7 @@ impl Agent {
         ctx.set_tool_call(Some(call.id.clone()));
         let out = self.decide_and_run(session, call, tool).await;
         pending.id = None;
-        ctx.set_tool_call(None);
+        let shown = ctx.set_tool_call(None);
         ctx.emit(AgentEvent::ToolEnd {
             id: &call.id,
             output: &out.output,
@@ -785,7 +841,7 @@ impl Agent {
             diff: out.diff.as_ref(),
             images: &out.images,
         });
-        out
+        (out, shown)
     }
 
     async fn decide_and_run(
@@ -830,6 +886,11 @@ impl Agent {
                     let spec = session.specs.iter().find(|s| s.name == call.name);
                     if let Some(spec) = spec {
                         missing = missing_required(&spec.input_schema, &call.input);
+                    }
+                    if let Some(p) = &session.persist {
+                        // Failing, it may run again after a restart; saves
+                        // fail then too, and the user was told.
+                        let _ = p.store.mark_started(ctx.session_id(), &call.id).await;
                     }
                     tool.run(call.input.clone(), ctx).await
                 }
@@ -910,6 +971,71 @@ fn stopped(ctx: &Context) -> Option<StopReason> {
     Some(StopReason::Stopped)
 }
 
+/// The `tool_use`s of the last assistant message that have no result yet.
+fn open_calls(history: &[Message]) -> Vec<Content> {
+    let Some(i) = history.iter().rposition(|m| m.role == Role::Assistant) else {
+        return vec![];
+    };
+    let answered: Vec<&ToolCallId> = history
+        .get(i + 1)
+        .into_iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+            _ => None,
+        })
+        .collect();
+    history[i]
+        .content
+        .iter()
+        .filter(|c| matches!(c, Content::ToolUse { id, .. } if !answered.contains(&id)))
+        .cloned()
+        .collect()
+}
+
+/// The result of a tool call whose run was cancelled before it finished.
+pub(crate) const CANCELLED: &str = "cancelled: the run was stopped before this call finished";
+/// The result of a tool call that rho stopped (a restart) while it ran.
+pub(crate) const INTERRUPTED: &str = "interrupted: rho stopped while this call ran";
+
+/// Gives the tool calls of the last assistant message that have no result
+/// an error result with `output`, at the end of the next message, and returns
+/// their ids. A run cancelled during its tool calls, or a restart, leaves
+/// them open; the API rejects such a history.
+pub(crate) fn close_open_calls(history: &mut Vec<Message>, output: &str) -> Vec<ToolCallId> {
+    let open: Vec<ToolCallId> = open_calls(history)
+        .into_iter()
+        .filter_map(|c| match c {
+            Content::ToolUse { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    if open.is_empty() {
+        return open;
+    }
+    let i = history
+        .iter()
+        .rposition(|m| m.role == Role::Assistant)
+        .unwrap();
+    if history.len() == i + 1 {
+        history.push(Message {
+            role: Role::User,
+            content: vec![],
+        });
+    }
+    // Appended, so `Session::save` appends too. Only notes can follow the
+    // results until the next prompt, and the model does not get those.
+    history[i + 1]
+        .content
+        .extend(open.iter().map(|id| Content::ToolResult {
+            tool_use_id: id.clone(),
+            content: output.into(),
+            is_error: true,
+            images: vec![],
+        }));
+    open
+}
+
 /// Appends user content, merging into a dangling user message so roles keep
 /// alternating.
 pub(crate) fn push_user(history: &mut Vec<Message>, content: Vec<Content>) {
@@ -919,5 +1045,60 @@ pub(crate) fn push_user(history: &mut Vec<Message>, content: Vec<Content>) {
             role: Role::User,
             content,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(id: &str) -> Content {
+        Content::ToolUse {
+            id: ToolCallId::new(id),
+            name: ToolName::new("Bash"),
+            input: serde_json::json!({}),
+        }
+    }
+
+    fn result(id: &str, content: &str) -> Content {
+        Content::ToolResult {
+            tool_use_id: ToolCallId::new(id),
+            content: content.into(),
+            is_error: true,
+            images: vec![],
+        }
+    }
+
+    fn msg(role: Role, content: Vec<Content>) -> Message {
+        Message { role, content }
+    }
+
+    #[test]
+    fn open_calls_get_results_after_the_existing_ones() {
+        // Stopped before the first result: a user message is added.
+        let mut h = vec![
+            msg(Role::User, vec![Content::text("hi")]),
+            msg(Role::Assistant, vec![call("a"), call("b")]),
+        ];
+        let closed = close_open_calls(&mut h, "x");
+        assert_eq!(closed, [ToolCallId::new("a"), ToolCallId::new("b")]);
+        assert_eq!(
+            h[2],
+            msg(Role::User, vec![result("a", "x"), result("b", "x")])
+        );
+
+        // After one result: only the other one.
+        let mut h = vec![
+            msg(Role::Assistant, vec![call("a"), call("b")]),
+            msg(Role::User, vec![result("a", "done")]),
+        ];
+        assert_eq!(close_open_calls(&mut h, "x"), [ToolCallId::new("b")]);
+        assert_eq!(h[1].content, [result("a", "done"), result("b", "x")]);
+
+        // Nothing open: unchanged.
+        let before = h.clone();
+        assert!(close_open_calls(&mut h, "x").is_empty());
+        assert_eq!(h, before);
+        assert!(close_open_calls(&mut vec![], "x").is_empty());
     }
 }

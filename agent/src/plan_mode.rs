@@ -102,6 +102,11 @@ struct PresentInput {
 struct PresentPlan;
 
 impl Tool for PresentPlan {
+    /// It only asks; the answer takes effect after it.
+    fn repeatable(&self) -> bool {
+        true
+    }
+
     fn kind(&self) -> rho::tools::ToolKind {
         rho::tools::ToolKind::SwitchMode
     }

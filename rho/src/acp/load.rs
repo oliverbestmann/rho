@@ -19,7 +19,7 @@ use crate::tools;
 use super::config::config_options;
 use super::frontend::{AcpFrontend, To};
 use super::update::image_block;
-use super::{ConnId, State, commands, register, send_commands};
+use super::{State, commands, register, run_unprompted, send_commands};
 
 /// `session/load` (with `replay`) and `session/resume`: opens the session
 /// with `open_stored`, answers with `response`, then makes the connection
@@ -37,9 +37,14 @@ pub(super) async fn attach<T: JsonRpcResponse>(
     response: impl FnOnce(Vec<SessionConfigOption>) -> T,
 ) -> Result<(), Error> {
     match open_stored(agent, state, cx, &sid, cwd, additional_dirs, replay).await {
-        Ok((frontend, options, commands)) => {
+        Ok((frontend, options, commands, resume)) => {
             responder.respond(response(options))?;
             frontend.ready(state.conn);
+            if let Some(ctx) = resume {
+                let (agent, hub) = (agent.clone(), state.hub.clone());
+                let sid = sid.clone();
+                tokio::spawn(async move { run_unprompted(&agent, &hub, &sid, &ctx).await });
+            }
             send_commands(cx, &sid, commands)
         }
         Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
@@ -47,8 +52,9 @@ pub(super) async fn attach<T: JsonRpcResponse>(
 }
 
 /// The open session (also one opened by another connection), or the stored
-/// one continued.
-/// Returns its frontend, config options and commands. Call
+/// one continued. With `replay` the connection gets the transcript first.
+/// Returns its frontend, config options, commands and, for a session that
+/// goes on with open tool calls, its context to start that run with. Call
 /// `AcpFrontend::ready` after the response.
 async fn open_stored(
     agent: &Arc<Agent>,
@@ -62,22 +68,27 @@ async fn open_stored(
     Arc<AcpFrontend>,
     Vec<SessionConfigOption>,
     Vec<AvailableCommand>,
+    Option<Context>,
 )> {
-    let conn = state.conn;
+    let opening = state.hub.opening.lock().await;
     // An open session takes the new directories after the replay, so the
     // notice follows the history.
-    let (session, ctx, frontend, commands, dirs) = match state.hub.open(sid) {
+    let (session, ctx, frontend, commands, dirs, resuming) = match state.hub.open(sid) {
         Some((session, ctx, frontend, commands)) => {
             if ctx.cwd() != cwd {
                 anyhow::bail!("session {} belongs to {}", sid.0, ctx.cwd().display());
             }
-            frontend.attach(state.viewer(cx, false));
-            (session, ctx, frontend, commands, Some(additional_dirs))
+            (
+                session,
+                ctx,
+                frontend,
+                commands,
+                Some(additional_dirs),
+                false,
+            )
         }
         None => {
             let frontend = AcpFrontend::new(sid, &cwd);
-            // The notices of session_start hooks follow the replay.
-            frontend.attach(state.viewer(cx, true));
             let session = agent
                 .resume_session(
                     &store::SessionId::new(&*sid.0),
@@ -86,6 +97,8 @@ async fn open_stored(
                     frontend.clone(),
                 )
                 .await?;
+            record_stored(&frontend, &session).await?;
+            let resuming = session.resuming();
             let (ctx, commands) = (session.ctx.clone(), commands(agent, &session));
             let session = register(
                 agent,
@@ -95,35 +108,25 @@ async fn open_stored(
                 frontend.clone(),
                 commands.clone(),
             );
-            (session, ctx, frontend, commands, None)
+            (session, ctx, frontend, commands, None, resuming)
         }
     };
-    let (stored, diffs) = match ctx.store() {
-        Some(store) if replay => {
-            let id = store::SessionId::new(&*sid.0);
-            (store.messages(&id).await?, store.diffs(&id).await?)
-        }
-        _ => Default::default(),
-    };
-    let Ok(mut session) = session.try_lock() else {
-        // A turn holds the session: replay what is saved, the live updates
-        // follow. shortcut: the new directories are not applied; a lock-free
-        // copy of the roots would fix it.
-        if replay {
-            let messages: Vec<_> = stored.into_iter().map(|m| (m.epoch, m.message)).collect();
-            replay_history(&frontend, conn, &ctx, &messages, &diffs);
-        }
-        let options = frontend.options();
-        return Ok((frontend, options, commands));
-    };
+    drop(opening);
+    let viewer = state.viewer(cx, false);
     if replay {
-        // Compaction keeps older epochs in the store; show them too.
-        let epoch = session.epoch();
-        let earlier = stored.into_iter().filter(|m| m.epoch < epoch);
-        let mut messages: Vec<_> = earlier.map(|m| (m.epoch, m.message)).collect();
-        messages.extend(session.history.iter().map(|m| (epoch, m.clone())));
-        replay_history(&frontend, conn, &ctx, &messages, &diffs);
+        frontend.attach_replayed(viewer);
+        if let Some(title) = ctx.title() {
+            frontend.send(AgentEvent::Title(&title), To::Only(state.conn));
+        }
+    } else {
+        frontend.attach(viewer);
     }
+    // A turn holds the session: the new directories are not applied.
+    // shortcut: a lock-free copy of the roots would fix it.
+    let Ok(mut session) = session.try_lock() else {
+        let options = frontend.options();
+        return Ok((frontend, options, commands, None));
+    };
     if let Some(dirs) = dirs
         && agent.set_additional_dirs(&mut session, dirs)
     {
@@ -133,31 +136,60 @@ async fn open_stored(
     // republish on a model switch.
     session.emit_usage();
     let options = frontend.remember(config_options(&session));
-    Ok((frontend, options, commands))
+    // Asks again what a restart left open, after the response.
+    let resume = resuming.then_some(ctx);
+    Ok((frontend, options, commands, resume))
 }
 
-/// Sends `(epoch, message)`s as session updates to `conn`, as if they were
-/// happening now. A compaction summary (the first text of an epoch after the
-/// first) shows as a notice, like when it was made. Edits show their diff
-/// while it is in `diffs` (see `Store::save_diffs`).
-fn replay_history(
+/// Puts the history of a session that opens into its transcript: the
+/// previous epoch from the store, then the current one, before the notices
+/// of its start. Compaction keeps older epochs in the store; they are not
+/// shown, so they do not fill the clients' memory.
+async fn record_stored(
     frontend: &AcpFrontend,
-    conn: ConnId,
-    ctx: &Context,
+    session: &crate::agent::Session,
+) -> anyhow::Result<()> {
+    let tools = session.tools().map(|(n, t)| (n.clone(), t.clone()));
+    let _ = frontend.tools.set(tools.collect());
+    let epoch = session.epoch();
+    let (mut messages, diffs, outputs) = match session.ctx.store() {
+        Some(store) => {
+            let id = session.ctx.session_id();
+            let stored = store.messages(id).await?;
+            let earlier = stored.into_iter().filter(|m| m.epoch + 1 == epoch);
+            let messages: Vec<_> = earlier.map(|m| (m.epoch, m.message)).collect();
+            (messages, store.diffs(id).await?, store.outputs(id).await?)
+        }
+        None => Default::default(),
+    };
+    messages.extend(session.history.iter().map(|m| (epoch, m.clone())));
+    frontend.record_first(|| record_history(frontend, &messages, &diffs, &outputs));
+    Ok(())
+}
+
+/// Records `(epoch, message)`s in the transcript as the session updates
+/// they were. A compaction summary (the first text of an epoch after the
+/// first) shows as a notice, like when it was made. Edits show their diff
+/// while it is in `diffs` (see `Store::save_diffs`), terminal calls their
+/// streamed output while it is in `outputs`.
+fn record_history(
+    frontend: &AcpFrontend,
     messages: &[(i64, provider::Message)],
     diffs: &HashMap<ToolCallId, crate::extension::Diff>,
+    outputs: &HashMap<ToolCallId, String>,
 ) {
-    let emit = |ev: AgentEvent<'_>| frontend.send(ev, To::Only(conn));
+    let emit = |ev: AgentEvent<'_>| frontend.send(ev, To::Record);
     let flush = |user: &mut Vec<ContentBlock>| {
         for block in user.drain(..) {
-            frontend.send_update(
-                SessionUpdate::UserMessageChunk(ContentChunk::new(block)),
-                To::Only(conn),
-            );
+            frontend.record(SessionUpdate::UserMessageChunk(ContentChunk::new(block)));
         }
     };
-    let mut epoch = 0;
+    // Before the first: its first text may be a summary too.
+    let mut epoch = -1;
     for (msg_epoch, msg) in messages {
+        if epoch >= 0 && *msg_epoch != epoch {
+            frontend.new_epoch();
+        }
         let mut user: Vec<ContentBlock> = vec![];
         // Since notes are saved, compaction's own notice follows the summary.
         let noted = msg
@@ -220,6 +252,15 @@ fn replay_history(
                         kind: tool.map_or_else(tools::ToolKind::default, |t| t.kind()),
                         titled: tool.is_some_and(|t| t.titled()),
                     });
+                    // The result is in the next message; the output goes
+                    // between, as it streamed.
+                    if let Some(output) = outputs.get(id) {
+                        emit(AgentEvent::ToolStream {
+                            id,
+                            chunk: output,
+                            stderr: false,
+                        });
+                    }
                 }
                 Content::ToolResult {
                     tool_use_id,
@@ -237,8 +278,5 @@ fn replay_history(
             }
         }
         flush(&mut user);
-    }
-    if let Some(title) = ctx.title() {
-        emit(AgentEvent::Title(&title));
     }
 }

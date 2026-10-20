@@ -1,6 +1,6 @@
 # 11. History stays valid when a run is cancelled or fails
 
-- Status: Accepted
+- Status: Accepted, amended by 0060
 - Date: 2026-10-09
 
 ## Context
