@@ -1,5 +1,5 @@
 import { Pipe, PipeTransform } from '@angular/core';
-import { Marked } from 'marked';
+import { Marked, Renderer } from 'marked';
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const escape = (text: string) => text.replace(/[&<>"]/g, (c) => ESCAPES[c]);
@@ -21,6 +21,11 @@ const marked = new Marked({
         .split('\n')
         .map((l) => `<span class="${DIFF_LINES[l[0]] ?? 'ctx'}">${escape(l)}</span>`);
       return `<pre><code class="language-diff">${lines.join('')}</code></pre>\n`;
+    },
+    // Links open in a new tab, so the session stays open.
+    link(token) {
+      const html = Renderer.prototype.link.call(this, token) as string;
+      return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
     },
     // Angular strips `<input>`, so task list boxes are characters.
     checkbox: ({ checked }) => (checked ? '☑ ' : '☐ '),

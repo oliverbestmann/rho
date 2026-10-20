@@ -15,6 +15,13 @@ describe('MarkdownPipe', () => {
     expect(md.transform('**b** `<i>`')).toBe('<p><strong>b</strong> <code>&lt;i&gt;</code></p>\n');
   });
 
+  it('opens links in a new tab', () => {
+    expect(md.transform('[a](https://x.org) <https://y.org>')).toBe(
+      '<p><a target="_blank" rel="noopener noreferrer" href="https://x.org">a</a> ' +
+        '<a target="_blank" rel="noopener noreferrer" href="https://y.org">https://y.org</a></p>\n',
+    );
+  });
+
   it('marks diff lines', () => {
     expect(md.transform('```diff\n@@ -1 +1 @@\n-<a>\n+b\n c\n```')).toBe(
       '<pre><code class="language-diff"><span class="hunk">@@ -1 +1 @@</span>' +

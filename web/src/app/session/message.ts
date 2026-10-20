@@ -35,6 +35,7 @@ import { MarkdownPipe } from '../markdown';
       align-self: flex-start;
       max-width: 100%;
       font-style: italic;
+      background: var(--mat-sys-surface-container);
       color: var(--mat-sys-on-surface-variant);
     }
   `,
