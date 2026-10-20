@@ -51,6 +51,7 @@ export class TerminalView {
         fontFamily: 'monospace',
         fontSize: 13,
         scrollback: 10_000,
+        tabStopWidth: 2,
         theme: {
           background: style.backgroundColor,
           foreground: style.color,
