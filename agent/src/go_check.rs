@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use rho::extension::{
-    CommandName, Context, Extension, PromptSetup, SessionSetup, Settle, SlashCommand,
+    CommandName, Context, Extension, NoteType, PromptSetup, SessionSetup, Settle, SlashCommand,
 };
 
 /// Failed checks in a row (per session) before giving back to the user.
@@ -141,7 +141,12 @@ impl Extension for GoCheck {
         }
 
         let summary = results.join("\n\n");
-        ctx.notify("go test ./... && go vet ./...", &summary, failed);
+        ctx.notify(
+            NoteType::Info,
+            "go test ./... && go vet ./...",
+            &summary,
+            failed,
+        );
 
         let count = &ctx.state::<Failures>().0;
         if !failed {
@@ -151,6 +156,7 @@ impl Extension for GoCheck {
         let failures = count.fetch_add(1, Ordering::Relaxed) + 1;
         if failures > MAX_FAILURES {
             ctx.notify(
+                NoteType::Info,
                 "go check",
                 "Still failing after the model's fix; leaving it to you.",
                 true,

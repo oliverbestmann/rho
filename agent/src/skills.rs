@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use rho::extension::{CommandName, Context, Extension, SessionSetup, SlashCommand, ToolOutput};
+use rho::extension::{
+    CommandName, Context, Extension, NoteType, SessionSetup, SlashCommand, ToolOutput,
+};
 use rho::provider::{Content, Request, ToolName, ToolSpec};
 use rho::sandbox::Access;
 use rho::tools::{REQUEST_ACCESS, Tool, input_schema, parse, truncate};
@@ -209,7 +211,7 @@ fn escape(s: &str) -> String {
 impl Extension for Skills {
     async fn session_start(&self, session: &mut SessionSetup) {
         for p in &self.problems {
-            session.ctx.notify("Skills", p, true);
+            session.ctx.notify(NoteType::Info, "Skills", p, true);
         }
         if self.skills.is_empty() {
             return;

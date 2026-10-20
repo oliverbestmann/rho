@@ -288,6 +288,7 @@ impl Frontend for Cli {
                 title,
                 text,
                 is_error,
+                ..
             } => eprintln!(
                 "\n[{}{title}]{}{text}",
                 if is_error { "failed: " } else { "" },

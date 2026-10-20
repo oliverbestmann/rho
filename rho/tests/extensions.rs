@@ -13,8 +13,8 @@ use agent_client_protocol::{Client, Responder, SessionMessage};
 use anyhow::Result;
 use rho::agent::Agent;
 use rho::extension::{
-    Context, Decision, Extension, Profile, PromptSetup, RunEnd, SessionSetup, Settle, ToolCall,
-    ToolOutput, TurnEnd,
+    Context, Decision, Extension, NoteType, Profile, PromptSetup, RunEnd, SessionSetup, Settle,
+    ToolCall, ToolOutput, TurnEnd,
 };
 use rho::provider::{
     Content, Event, Message, ModelSpec, ProviderName, Registry, Request, Role, StopReason,
@@ -267,7 +267,7 @@ impl Tool for Later {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            ctx.notify("background", "finished", false);
+            ctx.notify(NoteType::Info, "background", "finished", false);
             ctx.send("bg done", true);
         });
         Ok("started".into())
@@ -604,7 +604,8 @@ async fn stop_in_before_prompt_drops_the_prompt() {
     let (stop, provider, session, log) = run_with_stopper("prompt", vec![]).await;
     assert_eq!(stop, StopReason::Stopped);
     assert!(provider.requests.lock().unwrap().is_empty());
-    assert!(session.history.is_empty());
+    // Only the "Run stopped" notice is saved.
+    assert!(rho::provider::for_model(&session.history).is_empty());
     assert!(
         log.lines()
             .iter()
@@ -635,7 +636,8 @@ async fn stop_in_tool_call_skips_the_rest_and_keeps_history_valid() {
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     assert!(!std::path::Path::new("should-not-exist").exists());
     // Every tool_use has a result, so the next request would be valid.
-    let last = session.history.last().unwrap();
+    let history = rho::provider::for_model(&session.history);
+    let last = history.last().unwrap();
     assert_eq!(last.role, Role::User);
     assert_eq!(
         last.content,

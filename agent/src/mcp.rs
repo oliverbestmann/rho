@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
+use rho::extension::{Context, Extension, NoteType, SessionSetup, ToolOutput};
 use rho::provider::{ImageSource, ToolName, ToolSpec};
 use rho::tools::{Tool, truncate};
 use serde::Deserialize;
@@ -109,7 +109,7 @@ impl Extension for Mcp {
             }
         }
         for p in problems {
-            session.ctx.notify("MCP", &p, true);
+            session.ctx.notify(NoteType::Info, "MCP", &p, true);
         }
     }
 }

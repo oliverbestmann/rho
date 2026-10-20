@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::extension::Diff;
-use crate::provider::ToolCallId;
+use crate::provider::{NoteType, ToolCallId};
 use crate::store::{State, Store};
 
 use super::Session;
@@ -52,16 +52,26 @@ impl Session {
     /// store, if the session has one. A failure is shown to the user once
     /// and does not stop the session.
     pub async fn save(&mut self) {
+        self.push_notes();
         if let Err(e) = self.try_save().await
             && let Some(p) = &mut self.persist
             && !p.failed
         {
             p.failed = true;
             self.ctx.notify(
+                NoteType::Info,
                 "Session not saved",
                 &format!("{}: {e:#}", p.store.path().display()),
                 true,
             );
+        }
+    }
+
+    /// Adds the notices shown since the last call to the history.
+    pub(super) fn push_notes(&mut self) {
+        let notes = self.ctx.take_notes();
+        if !notes.is_empty() {
+            super::push_user(&mut self.history, notes);
         }
     }
 
@@ -121,7 +131,7 @@ impl Session {
                 }
                 Err(e) => {
                     self.ctx
-                        .notify("Session not saved", &format!("{e:#}"), true);
+                        .notify(NoteType::Info, "Session not saved", &format!("{e:#}"), true);
                     return;
                 }
             }

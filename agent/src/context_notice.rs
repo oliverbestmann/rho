@@ -2,7 +2,7 @@
 //! quarter of the window. Once per crossing, so a resumed session that is
 //! already above it stays quiet.
 
-use rho::extension::{Context, Extension, RunEnd, SessionInfo};
+use rho::extension::{Context, Extension, NoteType, RunEnd, SessionInfo};
 
 const PERCENT: u64 = 25;
 
@@ -13,6 +13,7 @@ impl Extension for ContextNotice {
         let now = ctx.session_info();
         if below(&run.before) && !below(&now) {
             ctx.notify(
+                NoteType::Info,
                 &format!(
                     "Context over {PERCENT}%: {}k of {}k tokens.",
                     now.context_used() / 1000,

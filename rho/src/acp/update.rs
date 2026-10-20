@@ -14,7 +14,7 @@ use agent_client_protocol::schema::v1::{
 use crate::agent::AgentEvent;
 use crate::edit::EDIT;
 use crate::extension::{Answers, Field, FieldKey, FieldKind, Form};
-use crate::provider::{self, ImageSource, ToolName, Usage};
+use crate::provider::{self, ImageSource, NoteType, ToolName, Usage};
 use crate::tools;
 
 use super::PROFILE_OPTION;
@@ -290,8 +290,26 @@ pub(super) fn to_update(
             }
             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(published.options.clone()))
         }
+        // A whole note in one chunk; `_meta.rho.note` lets clients style it.
+        AgentEvent::Notice {
+            kind: NoteType::Text,
+            title,
+            text,
+            ..
+        } => {
+            let text = match (title.is_empty(), text.is_empty()) {
+                (true, _) => text.to_string(),
+                (false, true) => format!("**{title}**"),
+                (false, false) => format!("**{title}**\n\n{text}"),
+            };
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(text.into())
+                    .meta(meta(serde_json::json!({ "rho": { "note": true } }))),
+            )
+        }
         // Rendered as a finished tool call, like pi-acp does for extension messages.
         AgentEvent::Notice {
+            kind: NoteType::Info,
             title,
             text,
             is_error,

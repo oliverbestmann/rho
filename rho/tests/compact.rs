@@ -60,11 +60,13 @@ async fn compact_after(cache_age: Option<Duration>) -> Run {
     }
 }
 
+/// The last text block; notes may follow it.
 fn only_text(content: &[Content]) -> &str {
-    let Some(Content::Text { text }) = content.last() else {
-        panic!("{content:?}")
-    };
-    text
+    let text = content.iter().rev().find_map(|c| match c {
+        Content::Text { text } => Some(text),
+        _ => None,
+    });
+    text.unwrap_or_else(|| panic!("{content:?}"))
 }
 
 #[tokio::test]

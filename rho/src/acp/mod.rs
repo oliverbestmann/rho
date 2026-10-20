@@ -21,7 +21,7 @@ use futures::future::{AbortHandle, Abortable};
 
 use crate::agent::{Agent, Session};
 use crate::extension::{Context, ProfileId};
-use crate::provider::{self, Content, ImageSource};
+use crate::provider::{self, Content, ImageSource, NoteType};
 use crate::store::{self, Store};
 
 mod config;
@@ -191,7 +191,9 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         commands(&agent, &session),
                     );
                     if let Some(dirs) = session.dirs_notice() {
-                        session.ctx.notify("Additional directories", &dirs, false);
+                        session
+                            .ctx
+                            .notify(NoteType::Info, "Additional directories", &dirs, false);
                     }
                     register(
                         &agent,
@@ -306,7 +308,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         }
                         Ok(Err(e)) => responder.respond_with_internal_error(format!("{e:#}")),
                         Err(_aborted) => {
-                            session.ctx.notify(INTERRUPTED, "", false);
+                            session.ctx.notify(NoteType::Info, INTERRUPTED, "", false);
                             responder
                                 .respond(PromptResponse::new(StopReason::Cancelled).usage(usage))
                         }
@@ -539,8 +541,8 @@ async fn watch_inbox(agent: Arc<Agent>, hub: Arc<Hub>, sid: SessionId, ctx: Cont
         // A prompt may have consumed the message while we waited for the lock.
         let turn = agent.run_triggered(&mut session);
         match Abortable::new(turn, registration).await {
-            Ok(Some(Err(e))) => ctx.notify("rho", &format!("{e:#}"), true),
-            Err(_aborted) => ctx.notify(INTERRUPTED, "", false),
+            Ok(Some(Err(e))) => ctx.notify(NoteType::Info, "rho", &format!("{e:#}"), true),
+            Err(_aborted) => ctx.notify(NoteType::Info, INTERRUPTED, "", false),
             _ => {}
         }
     }

@@ -2,7 +2,8 @@ import { signal, WritableSignal } from '@angular/core';
 import type * as acp from '@agentclientprotocol/sdk';
 
 export type Entry =
-  | { kind: 'user' | 'agent' | 'thought'; text: WritableSignal<string> }
+  /** `note`: a notice from rho shown as text, from `_meta.rho.note`. */
+  | { kind: 'user' | 'agent' | 'thought' | 'note'; text: WritableSignal<string> }
   | {
       kind: 'tool';
       call: WritableSignal<acp.ToolCall>;
@@ -29,7 +30,9 @@ export class SessionState {
         this.chunk('user', u.content);
         break;
       case 'agent_message_chunk':
-        this.chunk('agent', u.content);
+        // A note comes whole, in one chunk: never merged with its neighbors.
+        if (rhoMeta(u._meta)?.['note'] === true) this.add('note', blockText(u.content));
+        else this.chunk('agent', u.content);
         break;
       case 'agent_thought_chunk':
         this.chunk('thought', u.content);
@@ -71,7 +74,11 @@ export class SessionState {
 
   /** A prompt sent by this client; rho echoes it only to the other clients. */
   addUser(text: string) {
-    this.entries.update((e) => [...e, { kind: 'user', text: signal(text) }]);
+    this.add('user', text);
+  }
+
+  private add(kind: 'user' | 'note', text: string) {
+    this.entries.update((e) => [...e, { kind, text: signal(text) }]);
   }
 
   private chunk(kind: 'user' | 'agent' | 'thought', content: acp.ContentBlock) {
@@ -114,11 +121,15 @@ export class SessionState {
 
 type Meta = { [key: string]: unknown } | null | undefined;
 
+/** `_meta.rho`, rho's own fields; undefined if not sent. */
+function rhoMeta(meta: Meta) {
+  const rho = meta?.['rho'];
+  return typeof rho === 'object' && rho ? (rho as { [key: string]: unknown }) : undefined;
+}
+
 /** `_meta.rho.running`, where rho says whether a turn runs; undefined if not sent. */
 export function rhoRunning(meta: Meta) {
-  const rho = meta?.['rho'];
-  const running =
-    typeof rho === 'object' && rho ? (rho as { running?: unknown }).running : undefined;
+  const running = rhoMeta(meta)?.['running'];
   return typeof running === 'boolean' ? running : undefined;
 }
 

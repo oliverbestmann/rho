@@ -5,7 +5,9 @@ use anyhow::{Result, bail};
 
 use crate::extension::{CommandName, SlashCommand};
 
-use super::{Agent, AgentEvent, Session};
+use crate::provider::NoteType;
+
+use super::{Agent, Session};
 
 impl Agent {
     /// The session's slash commands: rho's own, then the extensions'.
@@ -45,28 +47,31 @@ impl Agent {
         name: &str,
         args: &str,
     ) -> Option<Result<()>> {
-        Some(match name {
+        let result = match name {
             "compact" => self.compact(session, args).await,
             "redact" => self.redact(session, args).await,
             "usage" => {
-                session.ctx.emit(AgentEvent::Text(&session.usage_report()));
+                let report = session.usage_report();
+                reply(session, "/usage", &report);
                 Ok(())
             }
             _ if session.commands.iter().any(|c| c.name.as_str() == name) => {
                 self.command(session, &CommandName::new(name), args).await;
-                // It may have changed `Context::set_stored` values.
-                session.save().await;
                 Ok(())
             }
             _ => return None,
-        })
+        };
+        // Saves the reply, and `Context::set_stored` values a command changed.
+        session.save().await;
+        Some(result)
     }
 
     /// Runs an extension's slash command and shows its reply.
     async fn command(&self, session: &Session, name: &CommandName, args: &str) {
         for ext in &self.extensions {
-            if let Some(reply) = ext.command(&session.ctx, name, args).await {
-                session.ctx.emit(AgentEvent::Text(&reply));
+            if let Some(text) = ext.command(&session.ctx, name, args).await {
+                let title = format!("/{name} {args}");
+                reply(session, title.trim_end(), &text);
                 return;
             }
         }
@@ -102,11 +107,13 @@ impl Agent {
                 lines.push(format!("- {reply}"));
             }
         }
-        session.save().await;
-        session.ctx.emit(AgentEvent::Text(&format!(
-            "**Redacted**\n\n{}",
-            lines.join("\n")
-        )));
+        // Not the phrase: the note is saved.
+        reply(session, "/redact", &lines.join("\n"));
         Ok(())
     }
+}
+
+/// Shows a command's reply as a text note, saved with the session.
+fn reply(session: &Session, title: &str, text: &str) {
+    session.ctx.notify(NoteType::Text, title, text, false);
 }

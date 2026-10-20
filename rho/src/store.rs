@@ -780,7 +780,8 @@ pub(crate) fn redact_content(content: &mut Vec<Content>, phrase: &str) -> bool {
     }
     for c in content.iter_mut() {
         changed |= match c {
-            Content::Text { text } => replace(text, phrase),
+            Content::Text { text } | Content::SystemNote { text } => replace(text, phrase),
+            Content::UserNote { title, text, .. } => replace(title, phrase) | replace(text, phrase),
             Content::ToolUse { input, .. } => walk(input, phrase),
             Content::ToolResult { content, .. } => replace(content, phrase),
             _ => false,

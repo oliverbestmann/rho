@@ -12,7 +12,7 @@ use agent_client_protocol::{Client, ConnectionTo, Error, JsonRpcResponse, Respon
 
 use crate::agent::{Agent, AgentEvent};
 use crate::extension::Context;
-use crate::provider::{self, Content, Role, ToolCallId};
+use crate::provider::{self, Content, NoteType, Role, ToolCallId};
 use crate::store;
 use crate::tools;
 
@@ -148,23 +148,54 @@ fn replay_history(
     diffs: &HashMap<ToolCallId, crate::extension::Diff>,
 ) {
     let emit = |ev: AgentEvent<'_>| frontend.send(ev, To::Only(conn));
+    let flush = |user: &mut Vec<ContentBlock>| {
+        for block in user.drain(..) {
+            frontend.send_update(
+                SessionUpdate::UserMessageChunk(ContentChunk::new(block)),
+                To::Only(conn),
+            );
+        }
+    };
     let mut epoch = 0;
     for (msg_epoch, msg) in messages {
         let mut user: Vec<ContentBlock> = vec![];
+        // Since notes are saved, compaction's own notice follows the summary.
+        let noted = msg
+            .content
+            .iter()
+            .any(|c| matches!(c, Content::UserNote { .. }));
         for block in &msg.content {
             let first = std::mem::replace(&mut epoch, *msg_epoch) != *msg_epoch;
             if first
                 && let Content::Text { text } = block
                 && let Some(summary) = crate::compact::summary_of(text)
             {
-                emit(AgentEvent::Notice {
-                    title: "Compacted",
-                    text: summary,
-                    is_error: false,
-                });
+                if !noted {
+                    emit(AgentEvent::Notice {
+                        kind: NoteType::Info,
+                        title: "Compacted",
+                        text: summary,
+                        is_error: false,
+                    });
+                }
                 continue;
             }
             match block {
+                Content::SystemNote { .. } => {}
+                Content::UserNote {
+                    kind,
+                    title,
+                    text,
+                    is_error,
+                } => {
+                    flush(&mut user);
+                    emit(AgentEvent::Notice {
+                        kind: *kind,
+                        title,
+                        text,
+                        is_error: *is_error,
+                    });
+                }
                 Content::Text { text } if msg.role == Role::User => match user.last_mut() {
                     Some(ContentBlock::Text(last)) => {
                         last.text.push_str("\n\n");
@@ -205,12 +236,7 @@ fn replay_history(
                 Content::RedactedThinking { .. } => {}
             }
         }
-        for block in user {
-            frontend.send_update(
-                SessionUpdate::UserMessageChunk(ContentChunk::new(block)),
-                To::Only(conn),
-            );
-        }
+        flush(&mut user);
     }
     if let Some(title) = ctx.title() {
         emit(AgentEvent::Title(&title));

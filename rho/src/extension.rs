@@ -18,6 +18,7 @@ use crate::agent::AgentEvent;
 use crate::feature::{Feature, FeatureId};
 pub use crate::form::{Answers, Choice, ChoiceValue, Field, FieldKey, FieldKind, Form, FormReply};
 pub use crate::profile::{Profile, ProfileId};
+pub use crate::provider::NoteType;
 use crate::provider::{
     Content, Event, Message, ModelSpec, Provider, Registry, Request, StopReason, Thinking,
     ToolCallId, ToolName, Usage,
@@ -441,6 +442,10 @@ struct Inner {
     stored: Mutex<serde_json::Map<String, Value>>,
     /// The tool call that runs now, for `Context::stream_output`.
     tool_call: Mutex<Option<ToolCallId>>,
+    /// Notices not in the history yet, as `Content::UserNote`; `None`
+    /// until the session is set up, so setup notices are not saved again
+    /// on every resume.
+    notes: Mutex<Option<Vec<Content>>>,
 }
 
 impl Context {
@@ -469,6 +474,7 @@ impl Context {
             states: Mutex::default(),
             stored: Mutex::default(),
             tool_call: Mutex::default(),
+            notes: Mutex::default(),
         }))
     }
 
@@ -653,6 +659,22 @@ impl Context {
         *self.0.stored.lock().unwrap() = values;
     }
 
+    /// From now on, notices are kept for the history (see `take_notes`).
+    pub(crate) fn record_notes(&self) {
+        self.0.notes.lock().unwrap().get_or_insert_default();
+    }
+
+    /// The notices since the last call, for the history.
+    pub(crate) fn take_notes(&self) -> Vec<Content> {
+        self.0
+            .notes
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
     pub fn session_id(&self) -> &SessionId {
         &self.0.session_id
     }
@@ -724,9 +746,20 @@ impl Context {
         self.0.frontend.event(event);
     }
 
-    /// Show something to the user without sending it to the model.
-    pub fn notify(&self, title: &str, text: &str, is_error: bool) {
+    /// Show something to the user without sending it to the model. It is
+    /// saved with the session and shown again on resume, except while the
+    /// session is set up.
+    pub fn notify(&self, kind: NoteType, title: &str, text: &str, is_error: bool) {
+        if let Some(notes) = self.0.notes.lock().unwrap().as_mut() {
+            notes.push(Content::UserNote {
+                kind,
+                title: title.into(),
+                text: text.into(),
+                is_error,
+            });
+        }
         self.emit(AgentEvent::Notice {
+            kind,
             title,
             text,
             is_error,
@@ -836,7 +869,9 @@ impl Context {
 
     pub(crate) fn drain_inbox(&self) -> Vec<Content> {
         let msgs = std::mem::take(&mut *self.0.inbox.lock().unwrap());
-        msgs.into_iter().map(|(t, _)| Content::text(t)).collect()
+        msgs.into_iter()
+            .map(|(t, _)| Content::system_note(t))
+            .collect()
     }
 
     pub(crate) fn drain_if_triggered(&self) -> Vec<Content> {

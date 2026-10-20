@@ -132,7 +132,7 @@ impl Hub {
 
     /// `conn` stops looking at `sid` (`session/close`). The last one to go
     /// cancels the runs.
-    pub(super) fn close(&self, sid: &SessionId, conn: ConnId) {
+    pub(super) fn close(self: &Arc<Self>, sid: &SessionId, conn: ConnId) {
         let mut sessions = self.sessions.lock().unwrap();
         let Some(entry) = sessions.get_mut(sid) else {
             return;
@@ -149,20 +149,41 @@ impl Hub {
         }
         // A run lets go of it when it ends, see `Run::drop`.
         if entry.unused() {
-            sessions.remove(sid);
+            self.release(sid);
         }
     }
 
     /// The connection ended: it stops looking at all sessions. Their runs
     /// go on.
-    pub(super) fn detach(&self, conn: ConnId) {
-        self.sessions.lock().unwrap().retain(|_, e| {
-            e.frontend
-                .viewers
-                .lock()
-                .unwrap()
-                .retain(|v| v.conn != conn);
-            !e.unused()
+    pub(super) fn detach(self: &Arc<Self>, conn: ConnId) {
+        for (sid, e) in self.sessions.lock().unwrap().iter() {
+            let mut viewers = e.frontend.viewers.lock().unwrap();
+            let before = viewers.len();
+            viewers.retain(|v| v.conn != conn);
+            if viewers.len() != before && viewers.is_empty() && e.running.is_empty() {
+                self.release(sid);
+            }
+        }
+    }
+
+    /// Saves an unused session (notices since the last save, e.g. a
+    /// background task's), then lets go of it if it is still unused. Until
+    /// then it stays open: a client that opens it meanwhile attaches to it
+    /// instead of loading a store the save has not reached yet.
+    fn release(self: &Arc<Self>, sid: &SessionId) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (hub, sid) = (self.clone(), sid.clone());
+        rt.spawn(async move {
+            let Some(session) = hub.open(&sid).map(|o| o.0) else {
+                return;
+            };
+            session.lock().await.save().await;
+            let mut sessions = hub.sessions.lock().unwrap();
+            if sessions.get(&sid).is_some_and(Entry::unused) {
+                sessions.remove(&sid);
+            }
         });
     }
 }
@@ -183,7 +204,7 @@ impl Drop for Run {
                 entry.frontend.set_busy(false);
             }
             if entry.unused() {
-                sessions.remove(&self.sid);
+                self.hub.release(&self.sid);
             }
         }
     }

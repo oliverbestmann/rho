@@ -15,7 +15,7 @@ use agent_client_protocol::{Client, ConnectionTo};
 use rho::agent::Agent;
 use rho::extension::NoFrontend;
 use rho::provider::{
-    Content, Event, Message, ModelSpec, Role, StopReason, ToolCallId, ToolName, Usage,
+    Content, Event, Message, ModelSpec, NoteType, Role, StopReason, ToolCallId, ToolName, Usage,
 };
 use rho::store::SessionId;
 use serde_json::json;
@@ -93,7 +93,8 @@ async fn sessions_are_saved_and_resumed() {
     session.ctx.set_stored("test.flag", true);
     session.save().await;
     let history = session.history.clone();
-    assert_eq!(history.len(), 4);
+    // Prompt, tool call, results, answer, then the turn report note.
+    assert_eq!(history.len(), 5);
     drop(session);
 
     let mut resumed = agent
@@ -119,11 +120,14 @@ async fn sessions_are_saved_and_resumed() {
         .unwrap()
         .messages
         .clone();
-    assert_eq!(sent[..4], history[..]);
+    // The turn report note is not sent.
+    assert_eq!(sent[..4], history[..4]);
 
     let stored = store.history(&SessionId::new("s1")).await.unwrap();
     assert_eq!(stored, resumed.history);
-    assert_eq!(stored.len(), 6);
+    // The new prompt merged into the note's message, then the answer and
+    // the next turn report.
+    assert_eq!(stored.len(), 7);
     let page = store.list(Some(&cwd), None, 10).await.unwrap();
     // "empty" has no messages, so it is not listed.
     assert_eq!(page.sessions.len(), 1);
@@ -300,7 +304,9 @@ async fn compaction_starts_a_new_epoch() {
         .await
         .unwrap();
     assert_eq!(resumed.history, summary);
+    // The summary with the compaction notice.
     assert_eq!(resumed.history.len(), 1);
+    assert!(matches!(summary[0].content[1], Content::UserNote { .. }));
 
     // The messages before the compaction are kept.
     let conn = rusqlite::Connection::open(&db).unwrap();
@@ -311,7 +317,8 @@ async fn compaction_starts_a_new_epoch() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(rows, [(0, 0), (1, 0), (2, 0), (3, 0), (4, 1)]);
+    // The turn report before the compaction is the old epoch's last message.
+    assert_eq!(rows, [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 1)]);
 }
 
 #[tokio::test]
@@ -358,7 +365,13 @@ async fn acp_load_replays_all_epochs() {
                     },
                     _ => String::new(),
                 };
-                Some(format!("tool: {} {text}", t.title))
+                // The timing in turn reports varies.
+                let title = t
+                    .title
+                    .split(':')
+                    .next()
+                    .filter(|_| t.title.starts_with("Turn:"));
+                Some(format!("tool: {} {text}", title.unwrap_or(&t.title)))
             }
             _ => None,
         })
@@ -370,9 +383,11 @@ async fn acp_load_replays_all_epochs() {
             "agent: Let me look.",
             "tool: Bash echo from-tool ```sh\necho from-tool\n```",
             "agent: Done.",
-            "tool: Compacted the summary",
+            "tool: Turn ",
+            "tool: Compacted (test/m, cache warm) input 0 + cache read 0 + cache write 0 | output 0\n\nthe summary",
             "user: next",
             "agent: After.",
+            "tool: Turn ",
         ]
     );
 }
@@ -416,6 +431,134 @@ async fn acp_load_replays_edit_diffs() {
     assert_eq!(diff.path, cwd.join("f.txt"));
     assert_eq!(diff.old_text.as_deref(), Some("a\n"));
     assert_eq!(diff.new_text, "b\n");
+}
+
+#[tokio::test]
+async fn acp_load_hides_system_notes_and_shows_user_notes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let agent = Arc::new(agent(Scripted::new(vec![]), &db));
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    session.history = vec![Message {
+        role: Role::User,
+        content: vec![
+            Content::system_note("<system-reminder>for the model</system-reminder>"),
+            Content::text("hi"),
+            Content::UserNote {
+                kind: NoteType::Text,
+                title: "/go:check".into(),
+                text: "off".into(),
+                is_error: false,
+            },
+        ],
+    }];
+    session.save().await;
+    drop(session);
+
+    let shown: Vec<String> = load(agent, &cwd)
+        .await
+        .iter()
+        .filter_map(|u| match u {
+            SessionUpdate::UserMessageChunk(ContentChunk {
+                content: ContentBlock::Text(t),
+                ..
+            }) => Some(format!("user: {}", t.text)),
+            SessionUpdate::AgentMessageChunk(ContentChunk {
+                content: ContentBlock::Text(t),
+                meta,
+                ..
+            }) => Some(format!(
+                "agent: {} {:?}",
+                t.text,
+                meta.as_ref()?["rho"]["note"]
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        ["user: hi", "agent: **/go:check**\n\noff Bool(true)"]
+    );
+}
+
+#[tokio::test]
+async fn acp_saves_notices_when_the_session_is_dropped() {
+    use rho::extension::{Context, Extension, SessionSetup};
+    /// Hands out the session's context, to notify while it is idle.
+    struct Grab(Arc<Mutex<Option<Context>>>);
+    impl Extension for Grab {
+        async fn session_start(&self, s: &mut SessionSetup) {
+            *self.0.lock().unwrap() = Some(s.ctx.clone());
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd): (PathBuf, PathBuf) = (dir.path().join("sessions.db"), dir.path().into());
+    let grabbed = Arc::default();
+    let answer = vec![text("ok"), Event::Done(StopReason::EndTurn)];
+    let mut agent = agent(Scripted::new(vec![answer]), &db);
+    agent.extensions.push(Arc::new(Grab(Arc::clone(&grabbed))));
+    let agent = Arc::new(agent);
+
+    let new_cwd = cwd.clone();
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent(agent.clone()),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(new_cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let ctx = grabbed.lock().unwrap().clone().unwrap();
+                ctx.notify(NoteType::Info, "late", "", false);
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // The connection is gone, so the hub saves the session and then drops
+    // it. A client that comes back right away gets the open session or the
+    // saved one; either way its prompt does not overwrite the notice.
+    let load_cwd = cwd.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent(agent.clone()),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_request(LoadSessionRequest::new(sid.clone(), load_cwd))
+                    .block_task()
+                    .await?;
+                cx.send_request(prompt(&sid, "next")).block_task().await?;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let store = rho::store::Store::open(&db).unwrap();
+    let history = store.history(&SessionId::new(&*sid.0)).await.unwrap();
+    let late = Content::UserNote {
+        kind: NoteType::Info,
+        title: "late".into(),
+        text: String::new(),
+        is_error: false,
+    };
+    assert_eq!(history[0].content[..2], [late, Content::text("next")]);
 }
 
 /// Loads session "s" over ACP and returns the replayed updates.
@@ -580,10 +723,12 @@ async fn acp_lists_and_loads_saved_sessions() {
             "agent: Let me look.",
             "tool: t1",
             "agent: Done.",
+            // The saved turn report.
+            "tool: notice-4",
             "usage: 15 of 10",
             "agent: Again.",
             // The new prompt's usage notice.
-            "tool: notice-6"
+            "tool: notice-7"
         ]
     );
 

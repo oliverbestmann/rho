@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use rho::agent::Agent;
-use rho::provider::ModelSpec;
+use rho::provider::{ModelSpec, NoteType};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -164,7 +164,8 @@ struct Greeter;
 
 impl rho::extension::Extension for Greeter {
     async fn session_start(&self, s: &mut rho::extension::SessionSetup) {
-        s.ctx.notify("hello", "from session_start", false);
+        s.ctx
+            .notify(NoteType::Info, "hello", "from session_start", false);
     }
 }
 

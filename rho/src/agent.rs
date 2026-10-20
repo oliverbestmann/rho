@@ -16,8 +16,8 @@ use crate::extension::{
 };
 use crate::feature::{Feature, FeatureId};
 use crate::provider::{
-    Content, Event, Message, ModelSpec, Provider, Registry, Request, Role, StopReason, Thinking,
-    ToolCallId, ToolName, ToolSpec, Usage,
+    Content, Event, Message, ModelSpec, NoteType, Provider, Registry, Request, Role, StopReason,
+    Thinking, ToolCallId, ToolName, ToolSpec, Usage,
 };
 use crate::store::{SessionId, Store};
 
@@ -78,6 +78,7 @@ pub enum AgentEvent<'a> {
     },
     /// Shown to the user, not sent to the model (from `Context::notify`).
     Notice {
+        kind: crate::provider::NoteType,
         title: &'a str,
         text: &'a str,
         is_error: bool,
@@ -164,6 +165,7 @@ pub struct Session {
 fn notify_dirs_changed(session: &Session) {
     let text = session.dirs_notice();
     session.ctx.notify(
+        NoteType::Info,
         "Additional directories changed",
         text.as_deref().unwrap_or("(none)"),
         false,
@@ -351,6 +353,7 @@ impl Agent {
         let store = self.open_store(&roots[0]).await?;
         let mut session = self.setup(id, roots, frontend, store, false).await?;
         session.try_save().await.context("saving the new session")?;
+        session.ctx.record_notes();
         Ok(session)
     }
 
@@ -388,6 +391,7 @@ impl Agent {
             && let Err(e) = self.set_model(&mut session, &info.model)
         {
             session.ctx.notify(
+                NoteType::Info,
                 "Model unavailable",
                 &format!("{e:#}; using {}", session.model),
                 true,
@@ -396,9 +400,12 @@ impl Agent {
         // The model knows the stored profile; if it is gone (its extension
         // was removed), the first request tells it about the fallback.
         if let Err(e) = session.ctx.restore_profile(&info.profile) {
-            session
-                .ctx
-                .notify("Profile unavailable", &format!("{e:#}"), true);
+            session.ctx.notify(
+                NoteType::Info,
+                "Profile unavailable",
+                &format!("{e:#}"),
+                true,
+            );
         }
         // Stored features win over the defaults; the model knows them.
         for f in session.ctx.active_features() {
@@ -406,9 +413,12 @@ impl Agent {
         }
         for f in &info.features {
             if let Err(e) = session.ctx.set_feature(f, true) {
-                session
-                    .ctx
-                    .notify("Feature unavailable", &format!("{e:#}"), true);
+                session.ctx.notify(
+                    NoteType::Info,
+                    "Feature unavailable",
+                    &format!("{e:#}"),
+                    true,
+                );
             }
         }
         session.ctx.restore_stored(info.extension_state);
@@ -423,6 +433,8 @@ impl Agent {
         p.saved = loaded.history.len();
         p.last_len = loaded.history.last().map_or(0, |m| m.content.len());
         session.history = loaded.history;
+        // Setup notices are not saved: they would repeat on every resume.
+        session.ctx.record_notes();
         Ok(session)
     }
 
@@ -593,7 +605,9 @@ impl Agent {
                 session.cost - cost,
             );
             // In the title: notices show as collapsed tool calls.
-            session.ctx.notify(&format!("Turn: {report}"), "", false);
+            session
+                .ctx
+                .notify(NoteType::Info, &format!("Turn: {report}"), "", false);
         }
         let run = RunEnd {
             stop: result.as_ref().ok().copied(),
@@ -602,6 +616,8 @@ impl Agent {
         for ext in &self.extensions {
             ext.run_end(&session.ctx, &run).await;
         }
+        // Saves the turn report and the notices of `run_end` hooks.
+        session.save().await;
         result
     }
 
@@ -624,6 +640,7 @@ impl Agent {
         if let Some(stop) = stopped(&ctx) {
             return Ok(stop);
         }
+        session.push_notes();
         push_user(&mut session.history, setup.content);
         session.save().await;
 
@@ -634,12 +651,12 @@ impl Agent {
             if let Some(note) =
                 crate::profile::note(&session.ctx, &mut session.seen, &session.specs)
             {
-                push_user(&mut session.history, vec![Content::text(note)]);
+                push_user(&mut session.history, vec![Content::system_note(note)]);
             }
             let mut request = Request {
                 model: session.model.id().clone(),
                 system: setup.system.clone(),
-                messages: session.history.clone(),
+                messages: crate::provider::for_model(&session.history),
                 tools: session.tool_specs(),
                 max_tokens: self.max_tokens,
                 thinking: session.thinking,
@@ -725,7 +742,7 @@ impl Agent {
             let mut more = Vec::new();
             for ext in exts {
                 if let Some(text) = ext.before_settle(&ctx, &settle).await {
-                    more.push(Content::text(text));
+                    more.push(Content::system_note(text));
                 }
             }
             if let Some(stop) = stopped(&ctx) {
@@ -889,7 +906,7 @@ impl Drop for Pending<'_> {
 /// Consumes a pending `Context::stop` and tells the user why.
 fn stopped(ctx: &Context) -> Option<StopReason> {
     let reason = ctx.take_stop()?;
-    ctx.notify("Run stopped", &reason, false);
+    ctx.notify(NoteType::Info, "Run stopped", &reason, false);
     Some(StopReason::Stopped)
 }
 

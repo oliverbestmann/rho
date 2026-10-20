@@ -36,6 +36,9 @@
                 @case ('agent') {
                   <app-message from="agent" [text]="entry.text()" />
                 }
+                @case ('note') {
+                  <app-message from="note" [text]="entry.text()" />
+                }
                 @case ('thought') {
                   <app-thought-card [text]="entry.text()" />
                 }

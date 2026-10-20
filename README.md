@@ -347,11 +347,15 @@ async fn main() -> anyhow::Result<()> {
 
 `Context` is passed to hooks and tools and can be cloned into background tasks:
 
-- `send(text, trigger_turn)` - message for the model (pi `sendMessage`). During a
+- `send(text, trigger_turn)` - message for the model (pi `sendMessage`), saved as a
+  `SystemNote`: the replay does not show it. During a
   run it is added at the next tool-result boundary. When idle it waits for the
   next prompt, or with `trigger_turn` starts a run right away; in ACP that run
   streams `session/update`s without an open prompt, as pi-acp does.
-- `notify(title, text, is_error)` - shown to the user only (ACP: a finished tool call).
+- `notify(kind, title, text, is_error)` - shown to the user only, and saved with
+  the session for the replay (not while it is set up). `NoteType::Info`: a finished
+  tool call in ACP, like turn reports. `NoteType::Text`: longer messages like slash
+  command replies, an `agent_message_chunk` with `_meta.rho.note`, in italics on the web.
 - `confirm(tool_call_id, title)` - ACP `session/request_permission`; `false` without a UI (CLI).
 - `ask(form)` - a form for the user (ACP elicitation), if the client supports it.
 - `complete(&ModelSpec, system, prompt)` - one-off LLM call, e.g. session titles.

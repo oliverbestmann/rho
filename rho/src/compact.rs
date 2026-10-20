@@ -12,7 +12,9 @@ use anyhow::{Result, bail};
 use futures::StreamExt;
 
 use crate::agent::{Agent, Session, count, push_user};
-use crate::provider::{Content, Event, Message, Request, Role, StopReason, Thinking, Usage};
+use crate::provider::{
+    Content, Event, Message, NoteType, Request, Role, StopReason, Thinking, Usage,
+};
 
 /// Anthropic's default cache lifetime, refreshed on every hit.
 pub const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -77,6 +79,8 @@ impl Agent {
         if session.history.is_empty() {
             bail!("nothing to compact");
         }
+        // Earlier notices (e.g. the last turn report) belong to the old epoch.
+        session.save().await;
         let mut instructions = INSTRUCTIONS.to_string();
         if !focus.trim().is_empty() {
             instructions += &format!("\n\nAdditional focus: {}", focus.trim());
@@ -107,7 +111,7 @@ impl Agent {
             }
             _ => {
                 // Must match the last run's request prefix to read the cache.
-                let mut messages = session.history.clone();
+                let mut messages = crate::provider::for_model(&session.history);
                 push_user(&mut messages, vec![Content::text(instructions)]);
                 let request = Request {
                     model: session.model.id().clone(),
@@ -175,8 +179,9 @@ impl Agent {
         session.emit_usage();
         // The profile and feature notes went with the history: tell the model again.
         session.seen = None;
-        session.save_compacted().await;
+        // Saved with the summary, in the new epoch.
         session.ctx.notify(
+            NoteType::Info,
             &format!("Compacted ({label})"),
             &format!(
                 "input {} + cache read {} + cache write {} | output {}\n\n{summary}",
@@ -187,6 +192,7 @@ impl Agent {
             ),
             false,
         );
+        session.save_compacted().await;
         Ok(())
     }
 }
@@ -199,6 +205,7 @@ fn serialize(history: &[Message]) -> String {
         for block in &msg.content {
             match (msg.role, block) {
                 (Role::User, Content::Text { text }) => parts.push(format!("[User]: {text}")),
+                (_, Content::SystemNote { text }) => parts.push(format!("[System]: {text}")),
                 (Role::User, Content::Image { .. }) => parts.push("[User]: [image]".into()),
                 (Role::Assistant, Content::Text { text }) => {
                     parts.push(format!("[Assistant]: {text}"))

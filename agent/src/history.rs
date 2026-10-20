@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
 use rho::extension::{
-    CommandName, Context, Extension, RunEnd, SessionSetup, SlashCommand, ToolOutput,
+    CommandName, Context, Extension, NoteType, RunEnd, SessionSetup, SlashCommand, ToolOutput,
 };
 use rho::provider::{Content, Message, Role, ToolName, ToolSpec};
 use rho::store::{SessionId, SessionInfo, Store, StoredMessage};
@@ -164,7 +164,12 @@ impl Extension for History {
         let (inner, ctx) = (self.0.clone(), ctx.clone());
         tokio::spawn(async move {
             if let Err(e) = inner.sync(&store, &root).await {
-                ctx.notify("History not indexed", &format!("{e:#}"), true);
+                ctx.notify(
+                    NoteType::Info,
+                    "History not indexed",
+                    &format!("{e:#}"),
+                    true,
+                );
             }
         });
     }
@@ -282,7 +287,11 @@ impl Tool for HistoryTool {
                 let shown: Vec<String> = messages
                     .iter()
                     .filter(|m| (seq..seq + READ).contains(&m.seq))
-                    .map(|m| format!("[{}] {}", m.seq, render(&m.message, true)))
+                    // Messages of only notes render empty.
+                    .filter_map(|m| {
+                        let text = render(&m.message, true);
+                        (!text.is_empty()).then(|| format!("[{}] {text}", m.seq))
+                    })
                     .collect();
                 let more = messages.last().is_some_and(|m| m.seq >= seq + READ);
                 let mut out = format!(

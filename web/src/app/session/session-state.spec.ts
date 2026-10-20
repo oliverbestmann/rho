@@ -28,6 +28,19 @@ describe('SessionState', () => {
     expect(call).toMatchObject({ title: 'Read a', status: 'completed', kind: 'read' });
   });
 
+  it('keeps each note apart from agent text', () => {
+    const s = new SessionState();
+    const note = { sessionUpdate: 'agent_message_chunk', _meta: { rho: { note: true } } } as const;
+    s.apply({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'a' } });
+    s.apply({ ...note, content: { type: 'text', text: 'n1' } });
+    s.apply({ ...note, content: { type: 'text', text: 'n2' } });
+    s.apply({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'b' } });
+
+    const e = s.entries();
+    expect(e.map((x) => x.kind)).toEqual(['agent', 'note', 'note', 'agent']);
+    expect(e.map((x) => (x.kind === 'tool' ? '' : x.text()))).toEqual(['a', 'n1', 'n2', 'b']);
+  });
+
   it('keeps a resent tool call in place', () => {
     const s = new SessionState();
     s.apply({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Bash', status: 'in_progress' });

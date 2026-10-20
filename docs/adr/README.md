@@ -66,3 +66,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0056](0056-semantic-search-via-zg.md) | Semantic code search via the zg CLI | Accepted |
 | [0057](0057-new-sessions-from-the-web.md) | New sessions from the web client, under ~ or /tmp | Accepted |
 | [0058](0058-extension-state-saved-with-the-session.md) | Extension state saved with the session | Accepted |
+| [0059](0059-notes-in-the-history.md) | System and user notes in the history | Accepted |

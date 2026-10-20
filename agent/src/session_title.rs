@@ -28,7 +28,7 @@ impl Extension for SessionTitle {
     /// After the first turn, every input reminds the model until it sets a title.
     async fn before_prompt(&self, ctx: &Context, prompt: &mut PromptSetup) {
         if ctx.session_info().requests > 0 && ctx.title().is_none() {
-            prompt.content.push(Content::text(REMINDER));
+            prompt.content.push(Content::system_note(REMINDER));
         }
     }
 }
@@ -111,8 +111,15 @@ mod tests {
             .await
             .unwrap();
         let reminded = |s: &rho::agent::Session| {
-            let last_prompt = &s.history[s.history.len() - 2];
-            last_prompt.content.contains(&Content::text(REMINDER))
+            // The last user message with text: a turn report note follows it.
+            let last_prompt = s.history.iter().rev().find(|m| {
+                m.role == rho::provider::Role::User
+                    && m.content.iter().any(|c| matches!(c, Content::Text { .. }))
+            });
+            last_prompt
+                .unwrap()
+                .content
+                .contains(&Content::system_note(REMINDER))
         };
         agent.run(&mut s, vec![Content::text("hi")]).await.unwrap();
         assert!(!reminded(&s));

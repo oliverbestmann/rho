@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use rho::extension::{Context, Extension, SessionSetup, ToolOutput};
+use rho::extension::{Context, Extension, NoteType, SessionSetup, ToolOutput};
 use rho::provider::{ToolName, ToolSpec};
 use rho::tools::{Tool, input_schema, parse};
 use schemars::JsonSchema;
@@ -158,7 +158,12 @@ impl Tool for Start {
                 lines
             };
             let failed = status != "exited with code 0";
-            ctx.notify(&format!("background task {id} {status}"), &lines, failed);
+            ctx.notify(
+                NoteType::Info,
+                &format!("background task {id} {status}"),
+                &lines,
+                failed,
+            );
             ctx.send(
                 format!(
                     "Background task {id} {status}.\nCommand: {}\nLast {TAIL_LINES} lines:\n{lines}",
@@ -287,6 +292,7 @@ mod tests {
                 title,
                 text,
                 is_error,
+                ..
             } = event
             {
                 self.0

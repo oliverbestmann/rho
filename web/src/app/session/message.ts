@@ -2,7 +2,7 @@ import { Component, input } from '@angular/core';
 import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
 
-/** A chat bubble, right for the user and left for the agent. */
+/** A chat bubble, right for the user and left for the agent; a note is plain text. */
 @Component({
   selector: 'app-message',
   imports: [HighlightCode, MarkdownPipe],
@@ -30,9 +30,16 @@ import { MarkdownPipe } from '../markdown';
       background: var(--mat-sys-tertiary-container);
       color: var(--mat-sys-on-tertiary-container);
     }
+    /* A notice from rho, e.g. a slash command's reply: not a chat bubble. */
+    :host(.note) {
+      align-self: flex-start;
+      max-width: 100%;
+      font-style: italic;
+      color: var(--mat-sys-on-surface-variant);
+    }
   `,
 })
 export class ChatMessage {
-  readonly from = input.required<'user' | 'agent'>();
+  readonly from = input.required<'user' | 'agent' | 'note'>();
   readonly text = input.required<string>();
 }

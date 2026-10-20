@@ -53,11 +53,41 @@ pub enum Content {
     RedactedThinking {
         data: String,
     },
+    /// Text for the model that the user did not write (reminders, check
+    /// output). Sent as text, hidden in the UI (see `for_model`).
+    SystemNote {
+        text: String,
+    },
+    /// A notice for the user (`Context::notify`), kept for the replay.
+    /// Never sent to the model.
+    UserNote {
+        kind: NoteType,
+        title: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_error: bool,
+    },
+}
+
+/// How a `Content::UserNote` is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteType {
+    /// A short notice, like a turn report: a collapsed tool call in ACP.
+    #[default]
+    Info,
+    /// A longer message, like a slash command's reply: shown as text.
+    Text,
 }
 
 impl Content {
     pub fn text(text: impl Into<String>) -> Self {
         Content::Text { text: text.into() }
+    }
+
+    pub fn system_note(text: impl Into<String>) -> Self {
+        Content::SystemNote { text: text.into() }
     }
 
     /// A base64 image; see `ImageSource::check` for what models accept.
@@ -118,6 +148,30 @@ impl ImageSource {
 pub struct Message {
     pub role: Role,
     pub content: Vec<Content>,
+}
+
+/// The history as the model gets it: system notes become text, user notes
+/// are dropped, and so are messages left empty. Requests that should share
+/// a cached prefix must all be built from it.
+pub fn for_model(history: &[Message]) -> Vec<Message> {
+    history
+        .iter()
+        .filter_map(|m| {
+            let content: Vec<Content> = m
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::SystemNote { text } => Some(Content::text(text.clone())),
+                    Content::UserNote { .. } => None,
+                    c => Some(c.clone()),
+                })
+                .collect();
+            (!content.is_empty()).then_some(Message {
+                role: m.role,
+                content,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -469,6 +523,36 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::provider::ModelId;
+
+    #[test]
+    fn for_model_sends_system_notes_as_text_and_drops_user_notes() {
+        let note = Content::UserNote {
+            kind: NoteType::Info,
+            title: "Turn".into(),
+            text: String::new(),
+            is_error: false,
+        };
+        let msg = |role, content| Message { role, content };
+        let history = [
+            msg(
+                Role::User,
+                vec![Content::text("hi"), Content::system_note("r")],
+            ),
+            msg(Role::Assistant, vec![Content::text("ok")]),
+            msg(Role::User, vec![note.clone()]),
+        ];
+        assert_eq!(
+            for_model(&history),
+            [
+                msg(Role::User, vec![Content::text("hi"), Content::text("r")]),
+                msg(Role::Assistant, vec![Content::text("ok")]),
+            ]
+        );
+        // Saved as JSON with the session.
+        let json = serde_json::to_string(&note).unwrap();
+        assert_eq!(json, r#"{"type":"user_note","kind":"info","title":"Turn"}"#);
+        assert_eq!(serde_json::from_str::<Content>(&json).unwrap(), note);
+    }
 
     fn price(input: f64) -> Price {
         Price {

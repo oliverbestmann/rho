@@ -15,7 +15,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use anyhow::Result;
 use gitleaks_rs::{Config, Scanner};
 use rho::extension::{
-    BoxFuture, Context, Decision, Extension, PromptSetup, SessionSetup, ToolCall, ToolOutput,
+    BoxFuture, Context, Decision, Extension, NoteType, PromptSetup, SessionSetup, ToolCall,
+    ToolOutput,
 };
 use rho::provider::{Content, ToolSpec};
 use rho::tools::DynTool;
@@ -151,7 +152,7 @@ impl Extension for Secrets {
     async fn before_prompt(&self, _ctx: &Context, prompt: &mut PromptSetup) {
         self.redact(&mut prompt.system);
         for content in &mut prompt.content {
-            if let Content::Text { text } = content {
+            if let Content::Text { text } | Content::SystemNote { text } = content {
                 self.redact(text);
             }
         }
@@ -167,6 +168,7 @@ impl Extension for Secrets {
         if !rules.is_empty() {
             let rules: Vec<_> = rules.into_iter().collect();
             ctx.notify(
+                NoteType::Info,
                 "Secret redacted in request",
                 &format!("Rules: {}", rules.join(", ")),
                 false,

@@ -117,8 +117,10 @@ async fn agent_runs_tools_and_feeds_results_back() {
         }]
     );
 
-    // Final history: user, assistant(tool), user(result), assistant(text).
-    assert_eq!(history.len(), 4);
+    // Final history: user, assistant(tool), user(result), assistant(text),
+    // the turn report note.
+    assert_eq!(history.len(), 5);
+    assert!(matches!(history[4].content[..], [Content::UserNote { .. }]));
     assert_eq!(
         history[3].content,
         vec![Content::text("The tool said from-tool.")]
@@ -200,7 +202,8 @@ async fn failed_turn_keeps_history_valid() {
         let result = agent.run(&mut session, vec![Content::text(prompt)]).await;
         assert!(result.is_err());
     }
-    let history = &session.history;
+    // Turn reports are saved as notes in between; the model does not see them.
+    let history = &rho::provider::for_model(&session.history);
     // Consecutive prompts merge into one user message instead of two.
     assert_eq!(history.len(), 1);
     assert_eq!(
