@@ -15,8 +15,68 @@ const KIND_ICONS: Record<string, string> = {
   switch_mode: 'swap_horiz',
 };
 
-/** The Material icon for a tool call's kind. */
+const FILE_ICONS: Record<string, string> = {
+  md: 'markdown',
+  html: 'html',
+  css: 'css',
+  scss: 'css',
+  js: 'javascript',
+  mjs: 'javascript',
+  php: 'php',
+  json: 'data_object',
+  yaml: 'data_object',
+  yml: 'data_object',
+  toml: 'data_object',
+  xml: 'data_object',
+  sql: 'database',
+  csv: 'csv',
+  pdf: 'picture_as_pdf',
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  gif: 'image',
+  webp: 'image',
+  svg: 'image',
+  sh: 'terminal',
+  bash: 'terminal',
+  zsh: 'terminal',
+  // Files known by name; `ext` gives the lowercase name of a file without an extension.
+  makefile: 'build',
+  gnumakefile: 'build',
+  justfile: 'build',
+  dockerfile: 'deployed_code',
+  containerfile: 'deployed_code',
+  '.dockerignore': 'deployed_code',
+  '.gitignore': 'commit',
+  '.gitattributes': 'commit',
+  '.gitmodules': 'commit',
+  '.env': 'settings',
+  '.editorconfig': 'settings',
+  ...Object.fromEntries(
+    ['rs', 'go', 'ts', 'tsx', 'jsx', 'py', 'java', 'kt', 'c', 'h', 'cpp', 'swift', 'rb', 'nix'].map(
+      (e) => [e, 'code'],
+    ),
+  ),
+};
+
+/**
+ * The Material icon for a tool call: the file type for a Read, Write or Edit,
+ * a commit icon for a git commit or push, else the icon of its kind.
+ */
 export function toolIcon(call: acp.ToolCall) {
+  const path = call.locations?.[0]?.path;
+  if ((call.kind === 'read' || call.kind === 'edit') && path) {
+    const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
+    const icon = FILE_ICONS[name] ?? FILE_ICONS[ext(path)];
+    if (icon) return icon;
+  }
+  const command = (call.rawInput as { command?: unknown } | undefined)?.command;
+  if (
+    call.kind === 'execute' &&
+    typeof command === 'string' &&
+    /\bgit\s+(commit|push)\b/.test(command)
+  )
+    return 'commit';
   return KIND_ICONS[call.kind ?? ''] ?? 'build';
 }
 
@@ -61,6 +121,11 @@ export function toolBody(call: acp.ToolCall) {
 function readLang(call: acp.ToolCall) {
   const path = call.locations?.[0]?.path;
   if (call.kind !== 'read' || call.status === 'failed' || !path) return undefined;
+  return ext(path);
+}
+
+/** The lowercase extension of a path, the name of a file without one, or '' for a dotfile. */
+function ext(path: string) {
   const name = path.slice(path.lastIndexOf('/') + 1);
   const dot = name.lastIndexOf('.');
   if (dot === 0) return ''; // like .env

@@ -1,9 +1,38 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { hasBody, toolBody } from './tool-body';
+import { hasBody, toolBody, toolIcon } from './tool-body';
 
 const text = (t: string) => ({
   type: 'content' as const,
   content: { type: 'text' as const, text: t },
+});
+
+describe('toolIcon', () => {
+  const call = (kind: acp.ToolKind, extra: Partial<acp.ToolCall> = {}): acp.ToolCall => ({
+    toolCallId: 't',
+    title: 'x',
+    kind,
+    ...extra,
+  });
+
+  it('shows the file type for reads and edits', () => {
+    expect(toolIcon(call('read', { locations: [{ path: '/w/README.md' }] }))).toBe('markdown');
+    expect(toolIcon(call('edit', { locations: [{ path: '/w/main.RS' }] }))).toBe('code');
+    expect(toolIcon(call('edit', { locations: [{ path: '/w/Makefile' }] }))).toBe('build');
+    expect(toolIcon(call('read', { locations: [{ path: '/w/Dockerfile' }] }))).toBe(
+      'deployed_code',
+    );
+    expect(toolIcon(call('read', { locations: [{ path: '/w/.gitignore' }] }))).toBe('commit');
+    expect(toolIcon(call('edit', { locations: [{ path: '/w/LICENSE' }] }))).toBe('edit');
+    expect(toolIcon(call('read'))).toBe('description');
+  });
+
+  it('shows a commit icon for git commit and push', () => {
+    expect(
+      toolIcon(call('execute', { rawInput: { command: 'git add . && git commit -m x' } })),
+    ).toBe('commit');
+    expect(toolIcon(call('execute', { rawInput: { command: 'git push' } }))).toBe('commit');
+    expect(toolIcon(call('execute', { rawInput: { command: 'git status' } }))).toBe('terminal');
+  });
 });
 
 describe('toolBody', () => {
