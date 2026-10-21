@@ -30,6 +30,13 @@
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+// Same look as the context usage details.
+.full-title {
+  padding: 8px 16px;
+  font: var(--mat-sys-body-medium);
 }
 
 main {
