@@ -70,7 +70,8 @@ app-root {
     overflow-x: auto;
     padding: 12px;
     border-radius: var(--mat-sys-corner-small);
-    background: var(--mat-sys-surface-container-highest);
+    // Translucent, so the block takes on the tint of the card it is in.
+    background: color-mix(in srgb, var(--mat-sys-on-surface) 6%, transparent);
     font-size: 13px;
   }
 
