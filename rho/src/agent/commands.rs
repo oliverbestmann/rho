@@ -1,11 +1,11 @@
-//! The session's slash commands: rho's own (`/compact`, `/usage`,
+//! The session's slash commands: rho's own (`/compact`, `/fork`, `/usage`,
 //! `/redact`) and the extensions'.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::extension::{CommandName, SlashCommand};
 
-use crate::provider::NoteType;
+use crate::provider::{Content, NoteType};
 
 use super::{Agent, Session};
 
@@ -17,6 +17,11 @@ impl Agent {
                 "compact",
                 "Summarize the conversation to free up context",
                 Some("optional focus for the summary"),
+            ),
+            (
+                "fork",
+                "Copy this session into a new one that goes on from here",
+                None,
             ),
             (
                 "usage",
@@ -49,6 +54,7 @@ impl Agent {
     ) -> Option<Result<()>> {
         let result = match name {
             "compact" => self.compact(session, args).await,
+            "fork" => fork(session).await,
             "redact" => self.redact(session, args).await,
             "usage" => {
                 let report = session.usage_report();
@@ -111,6 +117,35 @@ impl Agent {
         reply(session, "/redact", &lines.join("\n"));
         Ok(())
     }
+}
+
+/// `/fork`: copies the saved session under a new id, titled "fork of ...".
+/// The reply, with a link for the web client, is only in this session; the
+/// fork tells the model to retitle it with the next prompt.
+async fn fork(session: &mut Session) -> Result<()> {
+    session.try_save().await?;
+    let store = &session
+        .persist
+        .as_ref()
+        .context("sessions are not saved")?
+        .store;
+    let from = session.ctx.session_id();
+    let original = session.ctx.title().unwrap_or_else(|| from.to_string());
+    let title = format!("fork of {original}");
+    let id = crate::store::SessionId::generate();
+    // Sent with the user's next message: it merges into this one.
+    let note = Content::system_note(format!(
+        "This session is a fork of \"{original}\". Once the user's message shows where this fork is going, give the session a new title that fits it."
+    ));
+    store.fork(from, &id, &title, note).await?;
+    // The web client's route; links in notes open in a new tab.
+    let text = title.replace('[', "\\[").replace(']', "\\]");
+    reply(
+        session,
+        "/fork",
+        &format!("Forked into [{text}](/session/{id})."),
+    );
+    Ok(())
 }
 
 /// Shows a command's reply as a text note, saved with the session.

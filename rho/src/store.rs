@@ -876,6 +876,67 @@ impl Store {
         .await
     }
 
+    /// Copies stored session `id` with all its epochs, diffs and outputs to
+    /// a new session `to` with `title`, and appends `note` to its history as
+    /// a user block.
+    pub(crate) async fn fork(
+        &self,
+        id: &SessionId,
+        to: &SessionId,
+        title: &str,
+        note: Content,
+    ) -> Result<()> {
+        let (id, to, title) = (id.clone(), to.clone(), title.to_string());
+        self.call(move |c| {
+            let now = now_ms();
+            let tx = c.transaction()?;
+            // Every column but id, title and the timestamps.
+            let copied = COLUMNS
+                .split(", ")
+                .filter(|c| !["id", "title", "created_at", "updated_at"].contains(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let n = tx.execute(
+                &format!(
+                    "INSERT INTO sessions (id, title, created_at, updated_at, {copied})
+                     SELECT ?2, ?3, ?4, ?4, {copied} FROM sessions WHERE id = ?1"
+                ),
+                params![id, to, title, now],
+            )?;
+            if n == 0 {
+                bail!("unknown session {id}");
+            }
+            tx.execute(
+                "INSERT INTO items (session_id, seq, epoch, role, block, text, tool_call_id,
+                     started_at, display, created_at)
+                 SELECT ?2, seq, epoch, role, block, text, tool_call_id, started_at, display,
+                     created_at
+                 FROM items WHERE session_id = ?1",
+                params![id, to],
+            )?;
+            tx.execute(
+                "INSERT INTO diffs (session_id, tool_use_id, path, old, new, created_at)
+                 SELECT ?2, tool_use_id, path, old, new, created_at
+                 FROM diffs WHERE session_id = ?1",
+                params![id, to],
+            )?;
+            tx.execute(
+                "INSERT INTO items (session_id, seq, epoch, role, block, text, created_at)
+                 SELECT ?1, COALESCE(MAX(i.seq) + 1, 0), s.epoch, 'user', ?2, ?3, ?4
+                 FROM sessions s LEFT JOIN items i ON i.session_id = s.id WHERE s.id = ?1",
+                params![
+                    to,
+                    serde_json::to_string(&note)?,
+                    plain_text(std::slice::from_ref(&note)),
+                    now
+                ],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Sets the title of a stored session; no-op if it is not stored yet.
     pub(crate) async fn set_title(&self, id: &SessionId, title: &str) -> Result<()> {
         let (id, title) = (id.clone(), title.to_string());

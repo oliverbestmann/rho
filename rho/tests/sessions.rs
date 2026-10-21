@@ -1051,3 +1051,77 @@ async fn a_read_cut_off_by_a_restart_runs_again() {
     let n = resumed.history.len();
     assert_eq!(resumed.history[n - 2].content, [Content::text("Seen.")]);
 }
+
+#[tokio::test]
+async fn fork_copies_the_session_with_a_new_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());
+    let mut responses = tool_then_answer();
+    responses.push(vec![text("On the fork.")]);
+    let provider = Scripted::new(responses);
+    let agent = agent(provider.clone(), &db);
+    let mut session = agent
+        .start_session(SessionId::new("s1"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    session.ctx.set_title("Fix the bug");
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    let before = session.history.clone();
+    agent
+        .slash_command(&mut session, "fork", "")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let store = session.ctx.store().unwrap().clone();
+    let page = store.list(None, None, 10).await.unwrap();
+    let fork = page
+        .sessions
+        .iter()
+        .find(|s| s.id != SessionId::new("s1"))
+        .expect("the fork is listed");
+    assert_eq!(fork.title.as_deref(), Some("fork of Fix the bug"));
+    let original = store.session(&SessionId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(original.title.as_deref(), Some("Fix the bug"));
+    assert_eq!(
+        (fork.usage, fork.model.clone()),
+        (original.usage, original.model)
+    );
+
+    let mut resumed = agent
+        .resume_session(&fork.id, &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    // The fork has everything up to /fork and a note to retitle it; the
+    // reply with the link stays in the original.
+    let mut history = resumed.history.clone();
+    let note = history.last_mut().unwrap().content.pop().unwrap();
+    assert!(
+        matches!(&note, Content::SystemNote { text } if text.contains("a fork of \"Fix the bug\"")),
+        "{note:?}"
+    );
+    assert_eq!(history, before);
+    let reply = format!("{:?}", session.history);
+    assert!(
+        reply.contains(&format!(
+            "Forked into [fork of Fix the bug](/session/{})",
+            fork.id
+        )),
+        "{reply}"
+    );
+
+    // The note goes to the model with the next prompt.
+    agent
+        .run(&mut resumed, vec![Content::text("go on")])
+        .await
+        .unwrap();
+    let reqs = provider.requests.lock().unwrap();
+    let last = format!("{:?}", reqs.last().unwrap().messages.last().unwrap());
+    assert!(
+        last.contains("a fork of") && last.contains("go on"),
+        "{last}"
+    );
+}

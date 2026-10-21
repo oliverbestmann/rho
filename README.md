@@ -229,6 +229,13 @@ stores its text and tool calls as plain text, ready for full-text search.
 The older `messages` table is no longer read; sessions saved before ADR
 0060 are not listed.
 
+`/fork` saves the session and copies it under a new id: all epochs, diffs,
+streamed outputs, model, usage, profile, features and extension state. Only
+the title changes, to "fork of <title>". The fork shows up in the session
+lists; the current session stays open, and the reply links to the fork in
+the web client. The fork's history ends with a system note that goes to the
+model with the next prompt and asks it to give the fork a new title.
+
 `/redact <phrase>` replaces an exact phrase with the secrets marker
 (`store::MASK`) in every stored session (all epochs, titles), in the open
 session, and through each extension's `redact` hook in the `History`
