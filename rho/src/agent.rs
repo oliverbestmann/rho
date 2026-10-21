@@ -648,8 +648,10 @@ impl Agent {
     async fn run_prompt(&self, session: &mut Session, prompt: Vec<Content>) -> Result<StopReason> {
         let ctx = session.ctx.clone();
         let exts = &self.extensions;
-        // A stop requested while idle must not end this new run.
+        // A stop requested while idle must not end this new run, nor a
+        // compaction left over from a stopped one.
         ctx.take_stop();
+        ctx.take_compact();
         let mut tools_called = Vec::new();
         // A restart stopped the run in a call that can run again: it goes
         // on from there.
@@ -723,6 +725,19 @@ impl Agent {
             }
 
             if !results.is_empty() {
+                // Before the steering messages, so they are not summarized away.
+                if let Some(focus) = ctx.take_compact()
+                    && !ctx.is_stopped()
+                {
+                    let note = match self.compact(session, &focus).await {
+                        Ok(()) => "You compacted the conversation with the Compact tool. Continue the task from the summary.".into(),
+                        Err(e) => {
+                            ctx.notify(NoteType::Info, "Compaction failed", &format!("{e:#}"), true);
+                            format!("Compaction failed, the conversation is unchanged: {e:#}")
+                        }
+                    };
+                    push_user(&mut session.history, vec![Content::system_note(note)]);
+                }
                 // Steering: messages sent meanwhile ride along with the results.
                 push_user(&mut session.history, ctx.drain_inbox());
                 session.save().await;

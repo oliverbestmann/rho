@@ -123,6 +123,7 @@ pub fn builtin() -> Vec<Arc<dyn DynTool>> {
         Arc::new(crate::edit::Edit),
         Arc::new(Bash),
         Arc::new(RequestAccess),
+        Arc::new(crate::compact::Compact),
     ]
 }
 

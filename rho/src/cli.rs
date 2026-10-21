@@ -54,7 +54,7 @@ pub struct Options {
     /// and `github-copilot` (auth from `RHO_AUTH_FILE` / `~/.config/rho/auth.json`).
     pub providers: Registry,
     /// Default: `tools::builtin()` (`Read`, `ReadImage`, `Write`, `Edit`,
-    /// `Bash`, `RequestAccess`).
+    /// `Bash`, `RequestAccess`, `Compact`).
     pub tools: Vec<Arc<dyn DynTool>>,
     /// Default: none.
     pub extensions: Vec<Arc<dyn DynExtension>>,

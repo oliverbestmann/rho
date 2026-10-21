@@ -131,6 +131,73 @@ async fn cold_cache_uses_the_cheap_model_without_tool_outputs() {
     }
 }
 
+/// Runs a prompt in which the model calls `Compact` after a request that
+/// used `used` of the 200k context.
+async fn model_compacts(used: u64) -> (Arc<Scripted>, Session) {
+    let usage = rho::provider::Usage {
+        input: used,
+        ..Default::default()
+    };
+    let call = Event::Block(Content::ToolUse {
+        id: ToolCallId::new("c1"),
+        name: ToolName::new("Compact"),
+        input: json!({"focus": "keep X"}),
+    });
+    let main = Scripted::new(vec![
+        vec![Event::Usage(usage), call],
+        vec![text("## Goal\nwarm summary")],
+        vec![text("continued")],
+    ]);
+    let agent = Agent::new(
+        main.clone(),
+        ModelSpec::new("test", "big"),
+        rho::tools::builtin(),
+    );
+    let cwd = std::env::current_dir().unwrap();
+    let (mut session, _log) = common::session(&agent, &cwd).await;
+    agent
+        .run(&mut session, vec![Content::text("do it")])
+        .await
+        .unwrap();
+    (main, session)
+}
+
+#[tokio::test]
+async fn the_compact_tool_compacts_and_the_run_goes_on() {
+    let (main, session) = model_compacts(30_000).await;
+    let reqs = main.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3);
+    assert!(
+        only_text(reqs[1].messages.last().unwrap().content.as_slice())
+            .contains("Additional focus: keep X")
+    );
+    // The run went on from the summary alone.
+    let first = format!("{:?}", reqs[2].messages[0]);
+    assert!(
+        first.contains("warm summary") && first.contains("You compacted"),
+        "{first}"
+    );
+    assert!(!format!("{:?}", reqs[2].messages).contains("do it"));
+    // Summary, answer, then the run's notes.
+    assert!(only_text(&session.history[0].content).contains("warm summary"));
+    assert_eq!(only_text(&session.history[1].content), "continued");
+}
+
+#[tokio::test]
+async fn the_compact_tool_does_nothing_below_a_tenth_of_the_context() {
+    let (main, session) = model_compacts(19_000).await;
+    let reqs = main.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2, "no summary request");
+    let history = format!("{:?}", session.history);
+    assert!(history.contains("do it"), "{history}");
+    assert!(
+        history.contains("Not compacted: only 9% of the context is used."),
+        "{history}"
+    );
+    // The summary script answered the second request.
+    assert!(history.contains("warm summary"), "{history}");
+}
+
 #[tokio::test]
 async fn compaction_counts_its_usage() {
     let usage = rho::provider::Usage {

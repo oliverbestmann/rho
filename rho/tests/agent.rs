@@ -91,7 +91,7 @@ async fn agent_runs_tools_and_feeds_results_back() {
     // Second request carries the assistant tool call and its result.
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].tools.len(), 6);
+    assert_eq!(requests[0].tools.len(), 7);
     let msgs = &requests[1].messages;
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[1].role, Role::Assistant);

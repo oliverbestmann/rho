@@ -435,6 +435,8 @@ struct Inner {
     inbox: Mutex<Vec<(String, bool)>>,
     /// Set by `Context::stop`, read by the agent loop.
     stop: Mutex<Option<String>>,
+    /// Set by the `Compact` tool (its focus), read by the agent loop.
+    compact: Mutex<Option<String>>,
     wake: tokio::sync::Notify,
     /// What `Bash` may touch; `None` runs commands unsandboxed.
     sandbox: Mutex<Option<Policy>>,
@@ -479,6 +481,7 @@ impl Context {
             registry,
             inbox: Mutex::default(),
             stop: Mutex::default(),
+            compact: Mutex::default(),
             wake: tokio::sync::Notify::new(),
             store: OnceLock::new(),
             title: Mutex::default(),
@@ -840,6 +843,15 @@ impl Context {
 
     pub(crate) fn take_stop(&self) -> Option<String> {
         self.0.stop.lock().unwrap().take()
+    }
+
+    /// Compacts the history once the current tool calls are done.
+    pub(crate) fn request_compact(&self, focus: String) {
+        *self.0.compact.lock().unwrap() = Some(focus);
+    }
+
+    pub(crate) fn take_compact(&self) -> Option<String> {
+        self.0.compact.lock().unwrap().take()
     }
 
     pub async fn confirm(&self, tool_call_id: Option<&ToolCallId>, title: &str) -> bool {

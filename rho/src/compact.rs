@@ -10,11 +10,51 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use futures::StreamExt;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::agent::{Agent, Session, count, push_user};
+use crate::extension::{Context, ToolOutput};
 use crate::provider::{
-    Content, Event, Message, NoteType, Request, Role, StopReason, Thinking, Usage,
+    Content, Event, Message, NoteType, Request, Role, StopReason, Thinking, ToolName, ToolSpec,
+    Usage,
 };
+use crate::tools::{Tool, input_schema, parse};
+
+pub const COMPACT: ToolName = ToolName::from_static("Compact");
+
+#[derive(Deserialize, JsonSchema)]
+struct CompactInput {
+    /// what the summary should keep in detail, optional
+    #[serde(default)]
+    focus: String,
+}
+
+/// Lets the model compact the history like `/compact`. The agent loop does
+/// it once the response's tool calls are done.
+pub struct Compact;
+
+impl Tool for Compact {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: COMPACT,
+            description: "Replace the conversation so far with a summary, to free up context. Use it only if you are certain you do not need the earlier content anymore, or if the user asked you to compact. Does nothing while less than 10% of the context is used.".into(),
+            input_schema: input_schema::<CompactInput>(),
+        }
+    }
+
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
+        let i: CompactInput = parse(input)?;
+        let info = ctx.session_info();
+        if info.context_used() * 10 < info.context_window {
+            let percent = 100 * info.context_used() / info.context_window;
+            return Ok(format!("Not compacted: only {percent}% of the context is used.").into());
+        }
+        ctx.request_compact(i.focus);
+        Ok("The conversation will be compacted after this response's tool calls.".into())
+    }
+}
 
 /// Anthropic's default cache lifetime, refreshed on every hit.
 pub const CACHE_TTL: Duration = Duration::from_secs(5 * 60);

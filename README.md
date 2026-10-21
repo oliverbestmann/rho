@@ -11,7 +11,7 @@ A small ACP-native coding agent in Rust. Prototype.
 - A web client in `web/` for following, answering and starting sessions
   from a phone, through the daemon.
 - Built-in tools: `Read`, `ReadImage`, `Write`, `Edit` (exact replacements),
-  `Bash`, `RequestAccess`.
+  `Bash`, `RequestAccess`, `Compact`.
 - Deny-by-default Landlock sandbox per session. The user approves more
   access.
 - Sessions in SQLite: list, load, resume, close. Compaction keeps the old
@@ -36,7 +36,7 @@ A small ACP-native coding agent in Rust. Prototype.
   denied. One-shot runs are not saved and don't wait for background tasks.
 - Changing the set of extensions needs a rebuild. Hooks see whole turns, not
   streamed text.
-- Compaction is manual (`/compact`). A run has no request limit; the user
+- Compaction is not automatic: `/compact`, or the model calls `Compact`. A run has no request limit; the user
   cancels a runaway run.
 - Prompt files apply to new sessions only. A session is bound to its cwd;
   sandbox grants are not saved, edit diffs only for 7 days. The session
@@ -76,7 +76,7 @@ Cargo workspace:
 - `rho/src/tools.rs` - `Tool` trait and built-ins: `Read`, `ReadImage`, `Write`, `Bash`, `RequestAccess`
 - `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat); saving in `agent/persist.rs`, slash commands in `agent/commands.rs`, usage reports in `agent/usage.rs`
-- `rho/src/compact.rs` - `/compact`
+- `rho/src/compact.rs` - `/compact` and the `Compact` tool
 - `rho/src/prompt.rs` - the system prompt
 - `rho/src/sandbox.rs`, `rho/src/feature.rs` - Landlock sandbox, `/grant-*`; features and `/enable`
 - `rho/src/cli.rs` - command line, `rho::Options`, one-shot mode
@@ -157,6 +157,11 @@ history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` or the path's
 outputs and with tool arguments cut to 2000 chars; without one, the session
 model does. The notice shows which path
 ran and its token usage.
+
+The model can compact too, with the `Compact` tool: only if it is sure it
+does not need the earlier content, or if the user asked. It does nothing
+below 10% context use. The loop compacts after the response's tool calls and
+the run goes on from the summary (ADR 0061).
 
 ## Models by path
 
