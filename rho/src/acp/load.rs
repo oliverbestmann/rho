@@ -124,6 +124,8 @@ async fn open_stored(
     // A turn holds the session: the new directories are not applied.
     // shortcut: a lock-free copy of the roots would fix it.
     let Ok(mut session) = session.try_lock() else {
+        // The usage the others saw; the run's next request sends a new one.
+        frontend.resend_usage(state.conn, ctx.session_info().context_window);
         let options = frontend.options();
         return Ok((frontend, options, commands, None));
     };

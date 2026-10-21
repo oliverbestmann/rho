@@ -264,6 +264,94 @@ async fn a_turn_outlives_its_connection() {
     assert_eq!(running(&b_updates), [true, false]);
 }
 
+#[tokio::test]
+async fn a_connection_joining_a_running_turn_gets_the_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let usage = rho::provider::Usage {
+        input: 1234,
+        output: 10,
+        ..Default::default()
+    };
+    let mut first = answer("One.");
+    first.insert(0, Event::Usage(usage));
+    let (started, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let provider = Arc::new(Gated {
+        inner: Scripted::new(vec![first, answer("Two.")]),
+        started: started.clone(),
+        go: go.clone(),
+    });
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+
+    // A runs one turn, then leaves during the second.
+    let a_cwd = cwd.clone();
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(a_cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                go.notify_one();
+                cx.send_request(prompt(&sid, "one")).block_task().await?;
+                // The first request's permit.
+                started.notified().await;
+                let _pending = cx.send_request(prompt(&sid, "two"));
+                started.notified().await;
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // B attaches while the turn holds the session.
+    let b_updates = Updates::default();
+    let seen = b_updates.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(b_updates).connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                    .block_task()
+                    .await?;
+                // Before the running request reports anything.
+                let used = loop {
+                    let used = seen.lock().unwrap().iter().find_map(|u| match u {
+                        SessionUpdate::UsageUpdate(u) => Some(u.used),
+                        _ => None,
+                    });
+                    if let Some(used) = used {
+                        break used;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                };
+                assert_eq!(used, 1244);
+                go.notify_one();
+                while running(&seen) != [true, false] {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
 /// Asks before every tool call but `t0`.
 struct Confirmer;
 

@@ -119,6 +119,13 @@ pub(super) struct LastUsage {
     cost: f64,
 }
 
+impl LastUsage {
+    /// Nothing was used yet, like `Session::emit_usage` sends nothing then.
+    pub(super) fn is_empty(&self) -> bool {
+        self.total.prompt() + self.total.output == 0
+    }
+}
+
 pub(super) fn meta(value: serde_json::Value) -> Meta {
     match value {
         serde_json::Value::Object(m) => m,

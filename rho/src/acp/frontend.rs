@@ -24,6 +24,7 @@ use crate::tools::DynTool;
 
 use super::update::{
     LastUsage, Shown, busy_update, form_answers, form_schema, terminal_output, to_update,
+    usage_update,
 };
 use super::{ConnId, shell};
 
@@ -449,6 +450,17 @@ impl AcpFrontend {
                 self.deliver(v, update.clone(), to);
             }
         }
+    }
+
+    /// Sends the usage last sent to all viewers to `conn` alone, if any.
+    pub(super) fn resend_usage(&self, conn: ConnId, context_window: u64) {
+        let published = self.published.lock().unwrap();
+        if published.usage.is_empty() {
+            return;
+        }
+        let update = usage_update(&published.usage, context_window);
+        drop(published);
+        self.send_update(update, To::Only(conn));
     }
 
     pub(super) fn send_update(&self, update: SessionUpdate, to: To) {
