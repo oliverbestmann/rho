@@ -98,20 +98,23 @@ export function hasBody(call: acp.ToolCall) {
 /** A tool call's content as markdown; empty when there is nothing to show. */
 export function toolBody(call: acp.ToolCall) {
   const lang = readLang(call);
-  return (call.content ?? [])
-    .map((c, i) => {
-      if (c.type === 'diff') return fence(diff(c.path, c.oldText ?? '', c.newText), 'diff');
-      if (c.type !== 'content') return '';
-      const text = blockText(c.content);
-      // A read file is code, fenced with its extension for `HighlightCode`.
-      if (lang !== undefined && c.content.type === 'text' && text) return fence(text, lang);
-      // A shell call's first block is the command, already fenced; then the output.
-      return call.kind === 'execute' && i > 0 && c.content.type === 'text' && text
-        ? fence(text)
-        : text;
-    })
-    .filter((t) => t)
-    .join('\n\n');
+  const parts = (call.content ?? []).map((c, i) => {
+    if (c.type === 'diff') return fence(diff(c.path, c.oldText ?? '', c.newText), 'diff');
+    if (c.type !== 'content') return '';
+    const text = blockText(c.content);
+    // A read file is code, fenced with its extension for `HighlightCode`.
+    if (lang !== undefined && c.content.type === 'text' && text) return fence(text, lang);
+    // A shell call's first block is the command, already fenced; then the output.
+    return call.kind === 'execute' && i > 0 && c.content.type === 'text' && text
+      ? fence(text)
+      : text;
+  });
+  // A Write's content comes only in its input; shown above the result.
+  const written = (call.rawInput as { content?: unknown } | undefined)?.content;
+  const path = call.locations?.[0]?.path;
+  if (call.kind === 'edit' && typeof written === 'string' && written && path)
+    parts.unshift(fence(written, ext(path)));
+  return parts.filter((t) => t).join('\n\n');
 }
 
 /**

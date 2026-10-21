@@ -68,6 +68,18 @@ describe('toolBody', () => {
     expect(body).toBe('# x');
   });
 
+  it('shows written content fenced with its extension above the result', () => {
+    const body = toolBody({
+      toolCallId: 't',
+      title: 'Write',
+      kind: 'edit',
+      locations: [{ path: '/w/main.c' }],
+      rawInput: { path: 'main.c', content: 'int x;' },
+      content: [text('wrote 6 bytes to main.c')],
+    });
+    expect(body).toBe('```c\nint x;\n```\n\nwrote 6 bytes to main.c');
+  });
+
   it('fences a read file with its extension', () => {
     const read = (path: string, status: acp.ToolCallStatus = 'completed') =>
       toolBody({
