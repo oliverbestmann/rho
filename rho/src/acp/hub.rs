@@ -1,6 +1,6 @@
 //! The open sessions, shared by connections.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +10,7 @@ use futures::future::{AbortHandle, AbortRegistration};
 use crate::extension::Context;
 
 use super::frontend::AcpFrontend;
+use super::queue::Queued;
 use super::{ConnId, SharedSession};
 
 pub(super) struct Entry {
@@ -23,12 +24,25 @@ pub(super) struct Entry {
     /// For connections that attach while a turn holds the session.
     pub(super) commands: Vec<AvailableCommand>,
     pub(super) watch: AbortHandle,
+    /// Prompts that start one by one when turns end.
+    /// shortcut: in memory, lost on a restart; save them with the session
+    /// if that loses messages that matter.
+    pub(super) queue: VecDeque<Queued>,
+    /// A turn was stopped or failed: the queue waits until one ends normally.
+    pub(super) held: bool,
 }
 
 impl Entry {
-    /// Nobody looks at it and nothing runs: it can go.
+    /// Nobody looks at it, nothing runs and nothing waits: it can go.
     fn unused(&self) -> bool {
-        self.running.is_empty() && self.frontend.viewers.lock().unwrap().is_empty()
+        self.running.is_empty()
+            && self.queue.is_empty()
+            && self.frontend.viewers.lock().unwrap().is_empty()
+    }
+
+    fn publish_queue(&self) {
+        self.frontend
+            .set_queue(self.queue.iter().cloned().collect());
     }
 }
 
@@ -45,6 +59,7 @@ impl Drop for Entry {
 pub struct Hub {
     pub(super) sessions: Mutex<HashMap<SessionId, Entry>>,
     next_run: AtomicU64,
+    next_queued: AtomicU64,
     /// Held while a stored session opens, so two connections that open it at
     /// once share one session. shortcut: all opens wait for each other; a
     /// lock per session if session starts get slow.
@@ -63,6 +78,14 @@ impl Hub {
         e.frontend
             .viewing(conn)
             .then(|| (e.session.clone(), e.ctx.clone(), e.frontend.clone()))
+    }
+
+    /// `name` is one of the open session's slash commands.
+    pub(super) fn is_command(&self, sid: &SessionId, name: &str) -> bool {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .get(sid)
+            .is_some_and(|e| e.commands.iter().any(|c| c.name == name))
     }
 
     /// An open session, for a connection that attaches to it.
@@ -117,6 +140,47 @@ impl Hub {
         ))
     }
 
+    /// Adds a prompt to the queue of `sid`, if `conn` opened it.
+    pub(super) fn enqueue(&self, sid: &SessionId, conn: ConnId, text: String) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(entry) = sessions.get_mut(sid).filter(|e| e.frontend.viewing(conn)) else {
+            return false;
+        };
+        let id = self.next_queued.fetch_add(1, Ordering::Relaxed);
+        entry.queue.push_back(Queued { id, text });
+        entry.publish_queue();
+        true
+    }
+
+    /// Removes queued prompt `id` of `sid`, if `conn` opened it.
+    pub(super) fn unqueue(&self, sid: &SessionId, conn: ConnId, id: u64) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(entry) = sessions.get_mut(sid).filter(|e| e.frontend.viewing(conn)) else {
+            return false;
+        };
+        entry.queue.retain(|q| q.id != id);
+        entry.publish_queue();
+        true
+    }
+
+    /// The next queued prompt, unless the queue is held. `ended`: a turn
+    /// just ended, normally or not; `None`: only if nothing runs.
+    pub(super) fn take_queued(&self, sid: &SessionId, ended: Option<bool>) -> Option<String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let entry = sessions.get_mut(sid)?;
+        match ended {
+            Some(normally) => entry.held &= !normally,
+            None if !entry.running.is_empty() => return None,
+            None => {}
+        }
+        if entry.held {
+            return None;
+        }
+        let next = entry.queue.pop_front()?;
+        entry.publish_queue();
+        Some(next.text)
+    }
+
     /// A run is registered for the session.
     pub(super) fn busy(&self, sid: &SessionId) -> bool {
         let sessions = self.sessions.lock().unwrap();
@@ -128,6 +192,7 @@ impl Hub {
         if let Some(entry) = self.sessions.lock().unwrap().get_mut(sid)
             && entry.frontend.viewing(conn)
         {
+            entry.held = true;
             for (_, abort) in entry.running.drain(..) {
                 abort.abort();
             }
@@ -148,6 +213,8 @@ impl Hub {
             return;
         }
         drop(viewers);
+        // Nobody is left to see the queue run.
+        entry.queue.clear();
         for (_, abort) in entry.running.drain(..) {
             abort.abort();
         }

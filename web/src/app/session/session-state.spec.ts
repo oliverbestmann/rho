@@ -73,6 +73,17 @@ describe('SessionState', () => {
     expect(s.running()).toBe(false);
   });
 
+  it('follows the queue in session info meta', () => {
+    const s = new SessionState();
+    const queue = [{ id: 1, text: 'two' }];
+    s.apply({ sessionUpdate: 'session_info_update', _meta: { rho: { queue } } });
+    expect(s.queue()).toEqual(queue);
+    s.apply({ sessionUpdate: 'session_info_update', _meta: { rho: { running: true } } });
+    expect(s.queue()).toEqual(queue);
+    s.apply({ sessionUpdate: 'session_info_update', _meta: { rho: { queue: [] } } });
+    expect(s.queue()).toEqual([]);
+  });
+
   it('renders an image block as a markdown data URL', () => {
     const md = blockText({ type: 'image', mimeType: 'image/png', data: 'AAAA' });
     expect(md.trim()).toBe('![image](data:image/png;base64,AAAA)');

@@ -134,7 +134,12 @@ export class Session {
   });
 
   /** Typed while a turn ran; sent after it, see `Acp.prompt`. */
-  protected readonly queued = computed(() => this.acp.queue(this.id())());
+  protected readonly queued = computed(
+    () =>
+      this.opened()
+        ?.state.queue()
+        .map((q) => q.text) ?? [],
+  );
 
   protected readonly asks = computed(() =>
     this.acp.asks().filter((a) => a.sessionId === this.id()),
@@ -156,7 +161,7 @@ export class Session {
     return u && u.size > 0 ? u : undefined;
   });
 
-  /** A turn runs, so a send waits in the queue; like `Acp.next`. */
+  /** A turn runs, so a send goes to rho's queue. */
   protected readonly running = computed(
     () => this.acp.prompting().has(this.id()) || !!this.opened()?.state.running(),
   );
@@ -210,7 +215,7 @@ export class Session {
     if (!this.ready() || !text) return;
     this.draft.set('');
     if (this.running()) {
-      this.acp.queue(this.id()).update((q) => [...q, text]);
+      void this.acp.enqueue(this.id(), text);
     } else {
       void this.acp.prompt(this.id(), text);
       this.scrollToEnd();
@@ -218,7 +223,8 @@ export class Session {
   }
 
   protected unqueue(index: number) {
-    this.acp.queue(this.id()).update((q) => q.filter((_, i) => i !== index));
+    const queued = this.opened()?.state.queue()[index];
+    if (queued) void this.acp.unqueue(this.id(), queued.id);
   }
 
   protected async setOption(option: acp.SessionConfigOption, change: MatSelectChange<string>) {

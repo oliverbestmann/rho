@@ -69,3 +69,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0059](0059-notes-in-the-history.md) | System and user notes in the history | Accepted |
 | [0060](0060-history-saved-per-block.md) | History saved per block; viewers replay the transcript; runs go on after a restart | Accepted |
 | [0061](0061-compact-tool.md) | The model can compact with a Compact tool | Accepted |
+| [0062](0062-server-side-prompt-queue.md) | Prompts queue in the daemon | Accepted |

@@ -22,9 +22,10 @@ use crate::extension::{BoxFuture, Form, FormReply, Frontend, STREAM_CAP, STREAM_
 use crate::provider::{ToolCallId, ToolName};
 use crate::tools::DynTool;
 
+use super::queue::Queued;
 use super::update::{
-    LastUsage, Shown, busy_update, form_answers, form_schema, terminal_output, to_update,
-    usage_update,
+    LastUsage, Shown, busy_update, form_answers, form_schema, queue_update, terminal_output,
+    to_update, usage_update,
 };
 use super::{ConnId, shell};
 
@@ -168,6 +169,8 @@ pub(super) struct AcpFrontend {
     published: Mutex<Published>,
     /// A run is registered (see `Hub::start_run`).
     busy: AtomicBool,
+    /// The queue as last sent, see `Hub::enqueue`.
+    queue: Mutex<Vec<Queued>>,
     /// The session's tools by name, for replays (also while a turn holds
     /// the session). Set by `register`.
     pub(super) tools: OnceLock<HashMap<ToolName, Arc<dyn DynTool>>>,
@@ -186,6 +189,7 @@ impl AcpFrontend {
             streamed: Mutex::default(),
             published: Mutex::default(),
             busy: AtomicBool::new(false),
+            queue: Mutex::default(),
             tools: OnceLock::new(),
         })
     }
@@ -195,6 +199,13 @@ impl AcpFrontend {
     pub(super) fn set_busy(&self, on: bool) {
         self.busy.store(on, Ordering::Relaxed);
         self.send_update(busy_update(on), To::All);
+    }
+
+    /// Tells all viewers the queued prompts, as `_meta.rho.queue`.
+    pub(super) fn set_queue(&self, queue: Vec<Queued>) {
+        let update = queue_update(&queue);
+        *self.queue.lock().unwrap() = queue;
+        self.send_update(update, To::All);
     }
 
     /// `viewer` gets the updates from now on.
@@ -235,12 +246,14 @@ impl AcpFrontend {
         });
     }
 
-    /// A prompt from `conn`: the other viewers see it, later ones too.
-    pub(super) fn echo(&self, update: SessionUpdate, conn: ConnId) {
+    /// A prompt from `conn`, or from the queue: the other viewers see it,
+    /// later ones too.
+    pub(super) fn echo(&self, update: SessionUpdate, conn: Option<ConnId>) {
         let mut viewers = self.viewers.lock().unwrap();
         self.record(update.clone());
-        for v in viewers.iter_mut().filter(|v| v.conn != conn) {
-            self.deliver(v, update.clone(), To::Except(conn));
+        let to = conn.map_or(To::All, To::Except);
+        for v in viewers.iter_mut().filter(|v| to.includes(v.conn)) {
+            self.deliver(v, update.clone(), to);
         }
     }
 
@@ -269,6 +282,11 @@ impl AcpFrontend {
         if !caught_up && self.busy.load(Ordering::Relaxed) {
             self.deliver(v, busy_update(true), To::Only(conn));
         }
+        let queue = self.queue.lock().unwrap();
+        if !caught_up && !queue.is_empty() {
+            self.deliver(v, queue_update(&queue), To::Only(conn));
+        }
+        drop(queue);
         // Nobody waiting is fine.
         let _ = self.ready.send(v.clone());
     }

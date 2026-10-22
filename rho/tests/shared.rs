@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
+    CancelNotification, ContentBlock, ContentChunk, InitializeRequest, ListSessionsRequest,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Client, ConnectionTo, Responder};
 use futures::StreamExt;
@@ -161,6 +162,66 @@ async fn a_second_connection_follows_and_continues_a_session() {
     );
     // A: no replay and no echo of its own prompts, nothing after it left.
     assert_eq!(chunks(&a_updates), ["agent: One.", "agent: Two."]);
+}
+
+#[tokio::test]
+async fn other_connections_see_prompts_but_not_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let provider = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+
+    let (sid_tx, sid_rx) = oneshot::channel();
+    let (go_tx, go_rx) = oneshot::channel::<()>();
+    let a_cwd = cwd.clone();
+    let a = tokio::spawn(Client.builder().connect_with(
+        rho::acp::agent_in(agent.clone(), hub.clone(), false),
+        async move |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let sid = cx
+                .send_request(NewSessionRequest::new(a_cwd))
+                .block_task()
+                .await?
+                .session_id;
+            sid_tx.send(sid.clone()).unwrap();
+            go_rx.await.unwrap();
+            for text in ["/usage", "/nope x", "hi"] {
+                cx.send_request(prompt(&sid, text)).block_task().await?;
+            }
+            Ok(())
+        },
+    ));
+
+    let b_updates = Updates::default();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(b_updates).connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = sid_rx.await.unwrap();
+                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                    .block_task()
+                    .await?;
+                go_tx.send(()).unwrap();
+                a.await.unwrap().unwrap();
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // The unknown command is a prompt for the model.
+    let chunks = chunks(&b_updates);
+    let users: Vec<_> = chunks.iter().filter(|c| c.starts_with("user: ")).collect();
+    assert_eq!(users, ["user: /nope x", "user: hi"], "{chunks:?}");
 }
 
 /// Waits for `go` before it answers, and tells `started` when asked.
@@ -815,4 +876,284 @@ async fn two_connections_opening_a_stored_session_at_once_share_it() {
         chunks(&b_updates),
         ["user: hi", "agent: One.", "user: again", "agent: Two."]
     );
+}
+
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[serde(rename_all = "camelCase")]
+#[request(method = "_rho/queue", response = Empty)]
+struct Queue {
+    session_id: SessionId,
+    text: String,
+}
+
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[serde(rename_all = "camelCase")]
+#[request(method = "_rho/unqueue", response = Empty)]
+struct Unqueue {
+    session_id: SessionId,
+    id: u64,
+}
+
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcResponse,
+)]
+struct Empty {}
+
+fn queue(sid: &SessionId, text: &str) -> Queue {
+    Queue {
+        session_id: sid.clone(),
+        text: text.into(),
+    }
+}
+
+/// The last `_meta.rho.queue` sent, as (id, text).
+fn queued(updates: &Updates) -> Option<Vec<(u64, String)>> {
+    updates.lock().unwrap().iter().rev().find_map(|u| match u {
+        SessionUpdate::SessionInfoUpdate(i) => {
+            let items = i.meta.as_ref()?["rho"]["queue"].as_array()?.clone();
+            Some(
+                items
+                    .iter()
+                    .map(|q| {
+                        (
+                            q["id"].as_u64().unwrap(),
+                            q["text"].as_str().unwrap().into(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        _ => None,
+    })
+}
+
+/// The last user text of each request.
+fn prompts(provider: &Scripted) -> Vec<String> {
+    provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r.messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|c| match c {
+                    Content::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+async fn wait_for(what: impl Fn() -> bool) {
+    while !what() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn queued_prompts_run_after_the_turn_without_the_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let (started, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let inner = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let provider = Arc::new(Gated {
+        inner: inner.clone(),
+        started: started.clone(),
+        go: go.clone(),
+    });
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+
+    // A queues two prompts during a turn, takes one back and leaves.
+    let a_updates = Updates::default();
+    let seen = a_updates.clone();
+    let a_cwd = cwd.clone();
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(a_updates).connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(a_cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let _pending = cx.send_request(prompt(&sid, "one"));
+                started.notified().await;
+                cx.send_request(queue(&sid, "two")).block_task().await?;
+                cx.send_request(queue(&sid, "three")).block_task().await?;
+                wait_for(|| queued(&seen).is_some_and(|q| q.len() == 2)).await;
+                let id = queued(&seen).unwrap()[1].0;
+                cx.send_request(Unqueue {
+                    session_id: sid.clone(),
+                    id,
+                })
+                .block_task()
+                .await?;
+                wait_for(|| queued(&seen).is_some_and(|q| q.len() == 1)).await;
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Nobody is connected: the queued prompt runs after the turn.
+    go.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        started.notified().await;
+        go.notify_one();
+        wait_for(|| inner.requests.lock().unwrap().len() == 2).await;
+    })
+    .await
+    .unwrap();
+    assert_eq!(prompts(&inner), ["one", "two"]);
+
+    // B sees it as a user message, and the queue is empty.
+    let b_updates = Updates::default();
+    let seen = b_updates.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(b_updates).connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                    .block_task()
+                    .await?;
+                wait_for(|| chunks(&seen).contains(&"agent: Two.".to_string())).await;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        chunks(&b_updates),
+        ["user: one", "agent: One.", "user: two", "agent: Two."]
+    );
+    assert!(queued(&b_updates).is_none_or(|q| q.is_empty()));
+}
+
+#[tokio::test]
+async fn a_stop_holds_the_queue_until_a_turn_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let (started, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let inner = Scripted::new(vec![answer("One."), answer("Three."), answer("Two.")]);
+    let provider = Arc::new(Gated {
+        inner: inner.clone(),
+        started: started.clone(),
+        go: go.clone(),
+    });
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+    // A stops the turn with a prompt queued, then leaves.
+    let a_cwd = cwd.clone();
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(a_cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let one = cx.send_request(prompt(&sid, "one"));
+                started.notified().await;
+                cx.send_request(queue(&sid, "two")).block_task().await?;
+                cx.send_notification(CancelNotification::new(sid.clone()))?;
+                assert_eq!(
+                    one.block_task().await?.stop_reason,
+                    agent_client_protocol::schema::v1::StopReason::Cancelled
+                );
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(prompts(&inner), ["one"], "held after the stop");
+
+    // B finds the held queue; a turn that ends normally lets it go on.
+    let b_updates = Updates::default();
+    let seen = b_updates.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(b_updates).connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                    .block_task()
+                    .await?;
+                wait_for(|| queued(&seen).is_some_and(|q| q.len() == 1)).await;
+                go.notify_one();
+                cx.send_request(prompt(&sid, "three")).block_task().await?;
+                started.notified().await;
+                go.notify_one();
+                wait_for(|| inner.requests.lock().unwrap().len() == 3).await;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(prompts(&inner), ["one", "three", "two"]);
+}
+
+#[tokio::test]
+async fn a_prompt_queued_while_idle_runs_right_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let provider = Scripted::new(vec![answer("Hi.")]);
+    let agent = agent(provider.clone(), &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent, hub, false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                cx.send_request(queue(&sid, "hi")).block_task().await?;
+                wait_for(|| provider.requests.lock().unwrap().len() == 1).await;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(prompts(&provider), ["hi"]);
 }

@@ -14,10 +14,10 @@ use agent_client_protocol::schema::v1::{
     SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionCloseCapabilities,
     SessionId, SessionInfo as AcpSessionInfo, SessionListCapabilities, SessionNotification,
     SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, UnstructuredCommandInput,
+    SetSessionConfigOptionResponse, StopReason, TextContent, UnstructuredCommandInput,
 };
 use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, Responder};
-use futures::future::{AbortHandle, Abortable};
+use futures::future::{AbortHandle, AbortRegistration, Abortable};
 
 use crate::agent::{Agent, Session};
 use crate::extension::{Context, ProfileId};
@@ -29,6 +29,7 @@ mod dirs;
 mod frontend;
 mod hub;
 mod load;
+mod queue;
 mod shell;
 mod update;
 
@@ -112,6 +113,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
         state.clone(),
     );
     let (load_state, resume_state, list_state) = (state.clone(), state.clone(), state.clone());
+    let (queue_state, unqueue_state) = (state.clone(), state.clone());
     let close_state = state;
 
     agent_client_protocol::Agent
@@ -275,47 +277,26 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));
                 };
-                // The other connections on the session see the prompt too.
-                for block in &req.prompt {
-                    let update = SessionUpdate::UserMessageChunk(ContentChunk::new(block.clone()));
-                    frontend.echo(update, conn);
-                }
+                let (hub, sid) = (prompt_state.hub.clone(), req.session_id.clone());
+                echo_prompt(&hub, &sid, &frontend, &req.prompt, Some(conn));
                 let agent = prompt_state.agent.clone();
                 // Not on the connection: the turn goes on if it drops, and
                 // cancel notifications get through.
                 tokio::spawn(async move {
                     let mut session = session.lock().await;
                     let usage_before = session.usage;
-                    let turn = async {
-                        if let Some((name, args)) = slash_command(&req.prompt)
-                            && let Some(done) = agent.slash_command(&mut session, name, &args).await
-                        {
-                            return done.map(|()| provider::StopReason::EndTurn);
-                        }
-                        agent
-                            .run(&mut session, to_content(req.prompt.clone())?)
-                            .await
-                    };
-                    let result = Abortable::new(turn, registration).await;
-                    drop(run);
+                    let result = turn(&agent, &mut session, req.prompt, registration).await;
                     let usage = turn_usage(session.usage - usage_before);
+                    drop(session);
+                    next_queued(&agent, &hub, &sid, Some(ended_normally(&result)), Some(run));
                     // The connection may be gone; the session is saved anyway.
                     let _ = match result {
-                        Ok(Ok(stop)) => {
+                        Some(Ok(stop)) => {
                             responder.respond(PromptResponse::new(to_stop(stop)).usage(usage))
                         }
-                        Ok(Err(e)) => responder.respond_with_internal_error(format!("{e:#}")),
-                        Err(_aborted) => {
-                            // Saved now, so a restart does not call them interrupted.
-                            crate::agent::close_open_calls(
-                                &mut session.history,
-                                crate::agent::CANCELLED,
-                            );
-                            session.ctx.notify(NoteType::Info, INTERRUPTED, "", false);
-                            session.save().await;
-                            responder
-                                .respond(PromptResponse::new(StopReason::Cancelled).usage(usage))
-                        }
+                        Some(Err(e)) => responder.respond_with_internal_error(format!("{e:#}")),
+                        None => responder
+                            .respond(PromptResponse::new(StopReason::Cancelled).usage(usage)),
                     };
                 });
                 Ok(())
@@ -395,6 +376,36 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_request(
+            async move |req: queue::QueueRequest,
+                        responder: Responder<queue::QueueResponse>,
+                        _cx| {
+                let (hub, sid) = (&queue_state.hub, &req.session_id);
+                if !hub.enqueue(sid, queue_state.conn, req.text) {
+                    return responder
+                        .respond_with_error(Error::invalid_params().data("unknown session"));
+                }
+                // Starts it if the session is idle.
+                next_queued(&queue_state.agent, hub, sid, None, None);
+                responder.respond(queue::QueueResponse {})
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: queue::UnqueueRequest,
+                        responder: Responder<queue::QueueResponse>,
+                        _cx| {
+                if !unqueue_state
+                    .hub
+                    .unqueue(&req.session_id, unqueue_state.conn, req.id)
+                {
+                    return responder
+                        .respond_with_error(Error::invalid_params().data("unknown session"));
+                }
+                responder.respond(queue::QueueResponse {})
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_notification(
             async move |n: CancelNotification, _cx| {
                 cancel_state.hub.cancel(&n.session_id, cancel_state.conn);
@@ -457,6 +468,8 @@ fn register(
             frontend,
             commands,
             watch,
+            queue: Default::default(),
+            held: false,
         },
     );
     session
@@ -550,22 +563,121 @@ pub(super) async fn run_unprompted(
     sid: &SessionId,
     ctx: &Context,
 ) -> bool {
-    let Some((session, _, _run, registration)) = hub.start_run(sid, None) else {
+    let Some((session, _, run, registration)) = hub.start_run(sid, None) else {
         return false;
     };
     let mut session = session.lock().await;
     // A prompt may have consumed the message while we waited for the lock.
     let turn = agent.run_triggered(&mut session);
-    match Abortable::new(turn, registration).await {
-        Ok(Some(Err(e))) => ctx.notify(NoteType::Info, "rho", &format!("{e:#}"), true),
-        Err(_aborted) => {
-            crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
-            ctx.notify(NoteType::Info, INTERRUPTED, "", false);
-            session.save().await;
+    let ended = match Abortable::new(turn, registration).await {
+        Ok(None) => None,
+        Ok(Some(Err(e))) => {
+            ctx.notify(NoteType::Info, "rho", &format!("{e:#}"), true);
+            Some(false)
         }
-        _ => {}
+        Ok(Some(Ok(stop))) => Some(stop == provider::StopReason::EndTurn),
+        Err(_aborted) => {
+            interrupted(&mut session).await;
+            Some(false)
+        }
+    };
+    drop(session);
+    // Nothing ran: the queue did not wait for this.
+    if ended.is_some() {
+        next_queued(agent, hub, sid, ended, Some(run));
     }
     true
+}
+
+/// Saves a cancelled turn now, so a restart does not call its open tool
+/// calls interrupted.
+async fn interrupted(session: &mut Session) {
+    crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
+    session.ctx.notify(NoteType::Info, INTERRUPTED, "", false);
+    session.save().await;
+}
+
+/// Runs a prompt or a slash command as a turn; `None` if it was cancelled.
+async fn turn(
+    agent: &Agent,
+    session: &mut Session,
+    prompt: Vec<ContentBlock>,
+    registration: AbortRegistration,
+) -> Option<anyhow::Result<provider::StopReason>> {
+    let turn = async {
+        if let Some((name, args)) = slash_command(&prompt)
+            && let Some(done) = agent.slash_command(session, name, &args).await
+        {
+            return done.map(|()| provider::StopReason::EndTurn);
+        }
+        agent.run(session, to_content(prompt.clone())?).await
+    };
+    match Abortable::new(turn, registration).await {
+        Ok(result) => Some(result),
+        Err(_aborted) => {
+            interrupted(session).await;
+            None
+        }
+    }
+}
+
+/// The turn ended normally; a stopped or failed one holds the queue.
+fn ended_normally(result: &Option<anyhow::Result<provider::StopReason>>) -> bool {
+    matches!(result, Some(Ok(provider::StopReason::EndTurn)))
+}
+
+/// The other connections on the session see a prompt from `conn` (all of
+/// them one from the queue), later ones too; a command only by the note it
+/// replies with.
+fn echo_prompt(
+    hub: &Hub,
+    sid: &SessionId,
+    frontend: &AcpFrontend,
+    prompt: &[ContentBlock],
+    conn: Option<ConnId>,
+) {
+    if slash_command(prompt).is_some_and(|(name, _)| hub.is_command(sid, name)) {
+        return;
+    }
+    for block in prompt {
+        let update = SessionUpdate::UserMessageChunk(ContentChunk::new(block.clone()));
+        frontend.echo(update, conn);
+    }
+}
+
+/// Starts the next queued prompt, unless the queue is held: after a turn
+/// that `ended` (normally or not), or with `None` when something was
+/// queued, if nothing runs. The ended turn's `run` is dropped once the
+/// next one is registered, so the session stays busy in between.
+fn next_queued(
+    agent: &Arc<Agent>,
+    hub: &Arc<Hub>,
+    sid: &SessionId,
+    ended: Option<bool>,
+    run: Option<hub::Run>,
+) {
+    let next = hub
+        .take_queued(sid, ended)
+        .and_then(|text| Some((text, hub.start_run(sid, None)?)));
+    drop(run);
+    let Some((text, (session, frontend, run, registration))) = next else {
+        return;
+    };
+    let (agent, hub, sid) = (agent.clone(), hub.clone(), sid.clone());
+    tokio::spawn(async move {
+        let prompt = vec![ContentBlock::Text(TextContent::new(text))];
+        echo_prompt(&hub, &sid, &frontend, &prompt, None);
+        let mut session = session.lock().await;
+        let result = turn(&agent, &mut session, prompt, registration).await;
+        // Nobody waits for a response.
+        if let Some(Err(e)) = &result {
+            session
+                .ctx
+                .notify(NoteType::Info, "rho", &format!("{e:#}"), true);
+        }
+        drop(session);
+        next_queued(&agent, &hub, &sid, Some(ended_normally(&result)), Some(run));
+    });
 }
 
 /// `/name [args]` -> `Some((name, args))`.

@@ -59,10 +59,6 @@ export class Acp {
 
   /** Sessions loaded over this connection; rho keeps sending their updates. */
   private readonly opened = new Map<string, Opened>();
-  /** Messages typed while a turn ran, sent one by one after it; kept over reconnects. */
-  private readonly queues = new Map<string, WritableSignal<string[]>>();
-  /** Sessions whose queue waits for the next turn to end: stopped or failed. */
-  private readonly held = new Set<string>();
   private connection?: acp.ClientConnection;
   private retries = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -101,25 +97,32 @@ export class Acp {
         if (this.opened.get(sessionId) === opened) this.opened.delete(sessionId);
         opened.error.set(errorText(e));
       })
-      .finally(() => {
-        opened.loading.set(false);
-        // A turn may have ended while we were away.
-        this.next(sessionId);
-      });
+      .finally(() => opened.loading.set(false));
     return opened;
   }
 
-  /** The messages queued for the session, see `next`. */
-  queue(sessionId: string): WritableSignal<string[]> {
-    let queue = this.queues.get(sessionId);
-    if (!queue) {
-      queue = signal<string[]>([]);
-      this.queues.set(sessionId, queue);
-    }
-    return queue;
+  /**
+   * Queues a prompt in rho, which sends it after the current turn even when
+   * this client is gone; it starts right away if the session is idle.
+   */
+  async enqueue(sessionId: string, text: string) {
+    await this.extRequest('_rho/queue', { sessionId, text });
   }
 
-  /** Sends a prompt to an opened session; when its turn ends, the next queued one. */
+  /** Removes a queued prompt; one that started already is not an error. */
+  async unqueue(sessionId: string, id: number) {
+    await this.extRequest('_rho/unqueue', { sessionId, id });
+  }
+
+  private async extRequest(method: string, params: Record<string, unknown>) {
+    try {
+      await this.agent()?.request(method, params);
+    } catch (e) {
+      this.snackBar.open(errorText(e), 'OK');
+    }
+  }
+
+  /** Sends a prompt to an opened session. */
   async prompt(sessionId: string, text: string) {
     const agent = this.agent();
     const opened = this.opened.get(sessionId);
@@ -131,17 +134,16 @@ export class Acp {
         else next.delete(sessionId);
         return next;
       });
-    this.held.delete(sessionId);
-    opened.state.addUser(text);
+    // A command shows only as the note it replies with, like rho shows it to other clients.
+    const name = text.trim().match(/^\/(\S+)/)?.[1];
+    if (!opened.state.commands().some((c) => c.name === name)) opened.state.addUser(text);
     prompting(true);
-    let ended = false;
     try {
       const res = await agent.request(acp.methods.agent.session.prompt, {
         sessionId,
         prompt: [{ type: 'text', text }],
       });
-      ended = res.stopReason === 'end_turn';
-      if (!ended && res.stopReason !== 'cancelled') {
+      if (res.stopReason !== 'end_turn' && res.stopReason !== 'cancelled') {
         this.snackBar.open(`Stopped: ${res.stopReason}`, 'OK', { duration: 5000 });
       }
     } catch (e) {
@@ -150,40 +152,15 @@ export class Acp {
     } finally {
       prompting(false);
     }
-    // A failing turn should not use up the queue.
-    if (ended) this.next(sessionId);
-    else this.held.add(sessionId);
   }
 
-  /** Stops the session's turns; the queue waits for the next turn to end. */
+  /** Stops the session's turns; rho holds its queue until a turn ends normally. */
   cancel(sessionId: string) {
-    this.held.add(sessionId);
     this.agent()?.notify(acp.methods.agent.session.cancel, { sessionId });
   }
 
-  /** Sends the first queued message, if the session is idle and not held. */
-  private next(sessionId: string) {
-    const opened = this.opened.get(sessionId);
-    const queue = this.queues.get(sessionId);
-    if (!opened || opened.loading() || opened.error() || !queue?.().length) return;
-    if (this.held.has(sessionId) || this.prompting().has(sessionId) || opened.state.running()) {
-      return;
-    }
-    const [text, ...rest] = queue();
-    queue.set(rest);
-    void this.prompt(sessionId, text);
-  }
-
-  /** Applies an update; a turn starting ends the hold, one ending sends the queue. */
   private update(params: acp.SessionNotification) {
-    const { sessionId } = params;
-    const opened = this.opened.get(sessionId);
-    if (!opened) return;
-    const was = opened.state.running();
-    opened.state.apply(params.update);
-    const now = opened.state.running();
-    if (now && !was) this.held.delete(sessionId);
-    if (was && !now) this.next(sessionId);
+    this.opened.get(params.sessionId)?.state.apply(params.update);
   }
 
   /** No connection: rho forgot what we viewed, the next visit loads again. */

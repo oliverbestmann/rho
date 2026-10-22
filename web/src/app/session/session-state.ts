@@ -22,6 +22,8 @@ export class SessionState {
   readonly commands = signal<acp.AvailableCommand[]>([]);
   /** A turn runs, from any client; rho sends it in `_meta.rho.running`. */
   readonly running = signal(false);
+  /** Prompts rho runs after the current turn, from any client; in `_meta.rho.queue`. */
+  readonly queue = signal<Queued[]>([]);
   private readonly tools = new Map<string, Extract<Entry, { kind: 'tool' }>>();
 
   apply(u: acp.SessionUpdate) {
@@ -58,6 +60,8 @@ export class SessionState {
         if (u.title) this.title.set(u.title);
         const running = rhoRunning(u._meta);
         if (running !== undefined) this.running.set(running);
+        const queue = rhoMeta(u._meta)?.['queue'];
+        if (Array.isArray(queue)) this.queue.set(queue as Queued[]);
         break;
       }
       case 'config_option_update':
@@ -120,6 +124,12 @@ export class SessionState {
 }
 
 type Meta = { [key: string]: unknown } | null | undefined;
+
+/** A prompt queued in rho; `id` removes it with `_rho/unqueue`. */
+export interface Queued {
+  id: number;
+  text: string;
+}
 
 /** `_meta.rho`, rho's own fields; undefined if not sent. */
 function rhoMeta(meta: Meta) {

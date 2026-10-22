@@ -133,6 +133,12 @@ pub(super) fn meta(value: serde_json::Value) -> Meta {
     }
 }
 
+pub(super) fn queue_update(queue: &[super::queue::Queued]) -> SessionUpdate {
+    SessionUpdate::SessionInfoUpdate(
+        SessionInfoUpdate::new().meta(meta(serde_json::json!({ "rho": { "queue": queue } }))),
+    )
+}
+
 pub(super) fn busy_update(on: bool) -> SessionUpdate {
     SessionUpdate::SessionInfoUpdate(
         SessionInfoUpdate::new().meta(meta(serde_json::json!({ "rho": { "running": on } }))),
