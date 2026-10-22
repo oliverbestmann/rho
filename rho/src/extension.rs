@@ -786,6 +786,18 @@ impl Context {
     /// saved with the session and shown again on resume, except while the
     /// session is set up.
     pub fn notify(&self, kind: NoteType, title: &str, text: &str, is_error: bool) {
+        self.notify_card(None, kind, title, text, is_error);
+    }
+
+    /// `notify`, replacing the `AgentEvent::Progress` card `card` if set.
+    pub(crate) fn notify_card(
+        &self,
+        card: Option<&str>,
+        kind: NoteType,
+        title: &str,
+        text: &str,
+        is_error: bool,
+    ) {
         if let Some(notes) = self.0.notes.lock().unwrap().as_mut() {
             notes.push(Content::UserNote {
                 kind,
@@ -799,6 +811,7 @@ impl Context {
             title,
             text,
             is_error,
+            card,
         });
     }
 

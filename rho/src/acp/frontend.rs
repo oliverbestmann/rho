@@ -379,7 +379,8 @@ impl AcpFrontend {
             AgentEvent::Thinking(t) => Some(Entry::Thinking(t.into())),
             AgentEvent::ToolStart { .. }
             | AgentEvent::ToolEnd { .. }
-            | AgentEvent::Notice { .. } => Some(Entry::Update {
+            | AgentEvent::Notice { .. }
+            | AgentEvent::Progress { .. } => Some(Entry::Update {
                 terminal: Box::new(terminal.clone()),
                 plain: Box::new(plain.clone()),
             }),

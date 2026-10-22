@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::agent::{Agent, Session, count, push_user};
+use crate::agent::{Agent, AgentEvent, Session, count, push_user};
 use crate::extension::{Context, ToolOutput};
 use crate::provider::{
     Content, Event, Message, NoteType, Request, Role, StopReason, Thinking, ToolName, ToolSpec,
@@ -115,10 +115,38 @@ const MAX_SUMMARY_TOKENS: u32 = 16_000;
 impl Agent {
     /// Summarizes the history and replaces it with the summary. `focus` is
     /// optional extra instruction from the user (`/compact <focus>`).
+    /// A running card shows it until it is done.
     pub async fn compact(&self, session: &mut Session, focus: &str) -> Result<()> {
         if session.history.is_empty() {
             bail!("nothing to compact");
         }
+        let mut card = Card {
+            ctx: session.ctx.clone(),
+            id: format!("compact-{}", crate::store::SessionId::generate()),
+            done: false,
+        };
+        session.ctx.emit(AgentEvent::Progress {
+            id: &card.id,
+            title: "Compacting…",
+        });
+        let result = self.replace_with_summary(session, focus, &card.id).await;
+        if let Err(e) = &result {
+            let text = format!("{e:#}");
+            let card = Some(card.id.as_str());
+            session
+                .ctx
+                .notify_card(card, NoteType::Info, "Compaction failed", &text, true);
+        }
+        card.done = true;
+        result
+    }
+
+    async fn replace_with_summary(
+        &self,
+        session: &mut Session,
+        focus: &str,
+        card: &str,
+    ) -> Result<()> {
         crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
         // Earlier notices (e.g. the last turn report) belong to the old epoch.
         session.save().await;
@@ -222,7 +250,8 @@ impl Agent {
         // The profile and feature notes went with the history: tell the model again.
         session.seen = None;
         // Saved with the summary, in the new epoch.
-        session.ctx.notify(
+        session.ctx.notify_card(
+            Some(card),
             NoteType::Info,
             &format!("Compacted ({label})"),
             &format!(
@@ -236,6 +265,28 @@ impl Agent {
         );
         session.save_compacted().await;
         Ok(())
+    }
+}
+
+/// The running compaction card; marked as stopped if the compaction is
+/// cancelled (its future dropped) before it is `done`.
+struct Card {
+    ctx: Context,
+    id: String,
+    done: bool,
+}
+
+impl Drop for Card {
+    fn drop(&mut self) {
+        if !self.done {
+            self.ctx.emit(AgentEvent::Notice {
+                kind: NoteType::Info,
+                title: "Compaction stopped",
+                text: "",
+                is_error: true,
+                card: Some(&self.id),
+            });
+        }
     }
 }
 

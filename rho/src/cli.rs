@@ -286,6 +286,7 @@ impl Frontend for Cli {
                 if is_error { "failed: " } else { "" },
                 if text.is_empty() { "" } else { "\n" }
             ),
+            AgentEvent::Progress { title, .. } => eprintln!("\n[{title}]"),
             AgentEvent::ToolEnd { .. } | AgentEvent::Title(_) | AgentEvent::Model { .. } => {}
         }
     }

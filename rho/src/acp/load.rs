@@ -210,6 +210,7 @@ fn record_history(
                         title: "Compacted",
                         text: summary,
                         is_error: false,
+                        card: None,
                     });
                 }
                 continue;
@@ -228,6 +229,7 @@ fn record_history(
                         title,
                         text,
                         is_error: *is_error,
+                        card: None,
                     });
                 }
                 Content::Text { text } if msg.role == Role::User => match user.last_mut() {

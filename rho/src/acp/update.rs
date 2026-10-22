@@ -315,15 +315,25 @@ pub(super) fn to_update(
             title,
             text,
             is_error,
+            card,
         } => SessionUpdate::ToolCall(
-            ToolCall::new(format!("notice-{n}"), title)
+            // Clients update a known tool call id in place.
+            ToolCall::new(
+                card.map_or_else(|| format!("notice-{n}"), str::to_string),
+                title,
+            )
+            .kind(ToolKind::Other)
+            .status(status(is_error))
+            .content(if text.is_empty() {
+                vec![]
+            } else {
+                vec![text.into()]
+            }),
+        ),
+        AgentEvent::Progress { id, title } => SessionUpdate::ToolCall(
+            ToolCall::new(id.to_string(), title)
                 .kind(ToolKind::Other)
-                .status(status(is_error))
-                .content(if text.is_empty() {
-                    vec![]
-                } else {
-                    vec![text.into()]
-                }),
+                .status(ToolCallStatus::InProgress),
         ),
         AgentEvent::Title(t) => {
             SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(t.to_string()))

@@ -268,3 +268,41 @@ async fn the_model_hears_about_the_profile_again_after_compaction() {
     assert!(note(0), "told on the first request");
     assert!(note(2), "told again after the compaction");
 }
+
+#[tokio::test]
+async fn a_running_card_shows_the_compaction_until_it_is_done() {
+    let main = Scripted::new(vec![
+        vec![text("done")],
+        vec![text("## Goal\nsummary")],
+        vec![],
+    ]);
+    let agent = Agent::new(main, ModelSpec::new("test", "big"), vec![]);
+    let cwd = std::env::current_dir().unwrap();
+    let (mut session, log) = common::session(&agent, &cwd).await;
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    // The second compaction gets no summary and fails.
+    for _ in 0..2 {
+        session.last_request = Some(Instant::now());
+        let _ = agent.compact(&mut session, "").await;
+    }
+    let log = log.0.lock().unwrap();
+    let cards: Vec<_> = log
+        .iter()
+        .filter(|l| l.starts_with("Progress") || l.contains("card: Some"))
+        .collect();
+    assert_eq!(cards.len(), 4, "{cards:#?}");
+    let id = |l: &str| l.split("\"compact-").nth(1).unwrap()[..36].to_string();
+    assert!(cards[0].contains("Compacting…"), "{}", cards[0]);
+    assert!(
+        cards[1].contains("Compacted (test/big, cache warm)"),
+        "{}",
+        cards[1]
+    );
+    assert_eq!(id(cards[0]), id(cards[1]));
+    assert!(cards[3].contains("Compaction failed") && cards[3].contains("is_error: true"));
+    assert_eq!(id(cards[2]), id(cards[3]));
+    assert_ne!(id(cards[0]), id(cards[2]));
+}

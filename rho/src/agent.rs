@@ -82,6 +82,14 @@ pub enum AgentEvent<'a> {
         title: &'a str,
         text: &'a str,
         is_error: bool,
+        /// Replaces the `Progress` card with this id.
+        card: Option<&'a str>,
+    },
+    /// Work that takes a while, shown as running until a `Notice` with its
+    /// id as `card` replaces it.
+    Progress {
+        id: &'a str,
+        title: &'a str,
     },
     Title(&'a str),
     /// The session switched model; the context window may differ.
@@ -731,10 +739,8 @@ impl Agent {
                 {
                     let note = match self.compact(session, &focus).await {
                         Ok(()) => "You compacted the conversation with the Compact tool. Continue the task from the summary.".into(),
-                        Err(e) => {
-                            ctx.notify(NoteType::Info, "Compaction failed", &format!("{e:#}"), true);
-                            format!("Compaction failed, the conversation is unchanged: {e:#}")
-                        }
+                                // Its card shows the error to the user.
+                        Err(e) => format!("Compaction failed, the conversation is unchanged: {e:#}"),
                     };
                     push_user(&mut session.history, vec![Content::system_note(note)]);
                 }
