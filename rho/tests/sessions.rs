@@ -671,7 +671,7 @@ async fn acp_lists_and_loads_saved_sessions() {
                     .session_id;
                 let mut hi = prompt(&sid, "hi");
                 hi.prompt.push(ContentBlock::Image(ImageContent::new(
-                    "R0lGODlh",
+                    "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
                     "image/gif",
                 )));
                 cx.send_request(hi).block_task().await?;
@@ -757,7 +757,7 @@ async fn acp_lists_and_loads_saved_sessions() {
         chunks,
         [
             "user: hi",
-            "user image: image/gif R0lGODlh",
+            "user image: image/gif R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
             "agent: Let me look.",
             "tool: t1",
             "agent: Done.",

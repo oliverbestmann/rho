@@ -451,6 +451,7 @@ impl Agent {
         p.last_len = loaded.history.last().map_or(0, |m| m.content.len());
         p.blocks = loaded.history.iter().map(|m| m.content.len()).sum();
         session.history = loaded.history;
+        fit_images(&mut session.history);
         // The first open call is where rho stopped. If it can run again (it
         // only asks or reads, or its hooks had not let it run yet), the run
         // goes on from there with the next one; else it was cut off.
@@ -938,7 +939,7 @@ impl Agent {
             );
         }
         // An image the API rejects would fail every later request.
-        if let Some(e) = out.images.iter().find_map(|i| i.check().err()) {
+        if let Some(e) = out.images.iter_mut().find_map(|i| i.fit().err()) {
             out = ToolOutput {
                 output: format!("{e:#}"),
                 is_error: true,
@@ -946,6 +947,22 @@ impl Agent {
             };
         }
         out
+    }
+}
+
+/// Scales down images saved before `ImageSource::fit` existed, so they do
+/// not fail every request. The store keeps them as they were.
+fn fit_images(history: &mut [Message]) {
+    for content in history.iter_mut().flat_map(|m| &mut m.content) {
+        let images = match content {
+            Content::Image { source } => std::slice::from_mut(source),
+            Content::ToolResult { images, .. } => images.as_mut_slice(),
+            _ => continue,
+        };
+        for image in images {
+            // The API accepted it so far; only the size can be wrong.
+            let _ = image.fit();
+        }
     }
 }
 

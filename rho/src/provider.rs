@@ -117,12 +117,15 @@ impl ImageSource {
     pub const MEDIA_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
     /// Largest image the Anthropic API accepts, in decoded bytes.
     pub const MAX_BYTES: usize = 5 * 1024 * 1024;
+    /// Longest side the Anthropic API accepts in requests with many images.
+    pub const MAX_SIDE: u32 = 2000;
 
-    /// Fails if a provider would reject the image. A rejected image in the
-    /// history fails every later request of the session, so prompts are
-    /// checked before they are added.
-    pub fn check(&self) -> Result<()> {
+    /// Scales the image down to `MAX_SIDE`, then fails if a provider would
+    /// still reject it. A rejected image in the history fails every later
+    /// request of the session, so images are fitted before they are added.
+    pub fn fit(&mut self) -> Result<()> {
         use base64::Engine;
+        let base64 = &base64::engine::general_purpose::STANDARD;
         let ImageSource::Base64 { media_type, data } = self;
         if !Self::MEDIA_TYPES.contains(&media_type.as_str()) {
             anyhow::bail!(
@@ -130,9 +133,12 @@ impl ImageSource {
                 Self::MEDIA_TYPES.join(", ")
             );
         }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .context("image is not valid base64")?;
+        let mut bytes = base64.decode(&*data).context("image is not valid base64")?;
+        if let Some((smaller_type, smaller)) = shrink(&bytes)? {
+            *media_type = smaller_type.into();
+            *data = base64.encode(&smaller);
+            bytes = smaller;
+        }
         if bytes.len() > Self::MAX_BYTES {
             anyhow::bail!(
                 "image is {:.1} MB, the limit is {} MB",
@@ -141,6 +147,37 @@ impl ImageSource {
             );
         }
         Ok(())
+    }
+}
+
+/// `bytes` scaled down to fit `ImageSource::MAX_SIDE`, as (media type,
+/// bytes); `None` if it fits already.
+fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
+    use image::ImageReader;
+    let reader = || ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format();
+    let (width, height) = reader()?
+        .into_dimensions()
+        .context("cannot read the image")?;
+    let max = ImageSource::MAX_SIDE;
+    if width.max(height) <= max {
+        return Ok(None);
+    }
+    let jpeg = reader()?.format() == Some(image::ImageFormat::Jpeg);
+    let img = reader()?.decode().context("cannot read the image")?.resize(
+        max,
+        max,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut out = vec![];
+    // `image` writes only lossless WebP, so all but JPEG become PNG.
+    if jpeg {
+        img.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut out, 85,
+        ))?;
+        Ok(Some(("image/jpeg", out)))
+    } else {
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+        Ok(Some(("image/png", out)))
     }
 }
 
@@ -627,14 +664,63 @@ mod tests {
             media_type: media_type.into(),
             data: data.into(),
         };
-        assert!(source("image/png", "iVBORw0K").check().is_ok());
-        let err = |s: ImageSource| s.check().unwrap_err().to_string();
+        use base64::Engine;
+        let b64 = &base64::engine::general_purpose::STANDARD;
+        let png = |w, h| {
+            let mut out = vec![];
+            image::RgbImage::new(w, h)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap();
+            b64.encode(out)
+        };
+        let small = png(10, 10);
+        let mut fits = source("image/png", &small);
+        fits.fit().unwrap();
+        assert_eq!(fits, source("image/png", &small), "left as it is");
+
+        let err = |mut s: ImageSource| s.fit().unwrap_err().to_string();
         assert!(err(source("image/tiff", "AAAA")).contains("unsupported image type"));
         assert!(err(source("image/png", "not base64!")).contains("base64"));
+        assert!(err(source("image/png", "AAAA")).contains("cannot read"));
+        // Noise does not compress: 2000x1000 RGB is about 6 MB.
+        let mut seed = 1u32;
+        let noise = image::RgbImage::from_fn(2000, 1000, |_, _| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            image::Rgb(seed.to_le_bytes()[..3].try_into().unwrap())
+        });
+        let mut big = vec![];
+        noise
+            .write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png)
+            .unwrap();
+        assert!(err(source("image/png", &b64.encode(big))).contains("limit is 5 MB"));
+    }
+
+    #[test]
+    fn large_images_are_scaled_down() {
         use base64::Engine;
-        let big =
-            base64::engine::general_purpose::STANDARD.encode(vec![0u8; ImageSource::MAX_BYTES + 1]);
-        assert!(err(source("image/png", &big)).contains("limit is 5 MB"));
+        let b64 = &base64::engine::general_purpose::STANDARD;
+        let encode = |format| {
+            let mut out = vec![];
+            image::RgbImage::new(1024, 6144)
+                .write_to(&mut std::io::Cursor::new(&mut out), format)
+                .unwrap();
+            b64.encode(out)
+        };
+        for (format, from, to) in [
+            (image::ImageFormat::Jpeg, "image/jpeg", "image/jpeg"),
+            (image::ImageFormat::Png, "image/png", "image/png"),
+            (image::ImageFormat::WebP, "image/webp", "image/png"),
+        ] {
+            let mut s = ImageSource::Base64 {
+                media_type: from.into(),
+                data: encode(format),
+            };
+            s.fit().unwrap();
+            let ImageSource::Base64 { media_type, data } = &s;
+            assert_eq!(media_type, to);
+            let img = image::load_from_memory(&b64.decode(data).unwrap()).unwrap();
+            assert_eq!((img.width(), img.height()), (333, 2000), "{from}");
+        }
     }
 
     #[test]

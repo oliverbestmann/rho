@@ -438,11 +438,11 @@ fn to_output(result: &Value) -> ToolOutput {
                 }
             }
             Some("image") => {
-                let source = ImageSource::Base64 {
+                let mut source = ImageSource::Base64 {
                     media_type: item["mimeType"].as_str().unwrap_or_default().into(),
                     data: item["data"].as_str().unwrap_or_default().into(),
                 };
-                match source.check() {
+                match source.fit() {
                     Ok(()) => images.push(source),
                     Err(e) => text.push(format!("[image left out: {e:#}]")),
                 }
