@@ -17,6 +17,7 @@ import { MatMenuModule } from '@angular/material/menu';
         <circle class="track" cx="10" cy="10" r="8" />
         <circle
           class="fill"
+          [class]="level()"
           cx="10"
           cy="10"
           r="8"
@@ -50,6 +51,15 @@ import { MatMenuModule } from '@angular/material/menu';
     .fill {
       stroke: var(--mat-sys-primary);
     }
+    .fill.yellow {
+      stroke: light-dark(#9a6700, #d29922);
+    }
+    .fill.orange {
+      stroke: light-dark(#bc4c00, #f0883e);
+    }
+    .fill.red {
+      stroke: light-dark(#cf222e, #f85149);
+    }
     .details {
       padding: 8px 16px;
       font: var(--mat-sys-body-medium);
@@ -63,6 +73,11 @@ export class ContextUsage {
   protected readonly percent = computed(() => {
     const { used, size } = this.usage();
     return size > 0 ? Math.min(100, Math.round((100 * used) / size)) : 0;
+  });
+
+  protected readonly level = computed(() => {
+    const p = this.percent();
+    return p >= 75 ? 'red' : p >= 50 ? 'orange' : p >= 25 ? 'yellow' : '';
   });
 
   protected readonly cost = computed(() => {
