@@ -561,16 +561,18 @@ nobody answered waits, also when everyone left: the next client that loads
 the session gets it. A client that attaches gets what the session showed so
 far (the current and the previous epoch) from the daemon's memory, including
 the text and output of a turn that is still running. A turn keeps running
-when its connection drops. A session is dropped from memory once no connection has
-it open, nothing runs and nothing is queued; `session/close` by the last one cancels
-its turn and clears its queue.
+when its connection drops. A session is unloaded 30 minutes after no connection has
+it open, nothing runs, nothing is queued and no background task runs (ADR 0063);
+it gets a "Session idle" note. `session/close` by the last one cancels its turn
+and clears its queue.
 
 The daemon also keeps a prompt queue per session (ADR 0062), so a message
 queued from a phone is still sent after its screen turns off.
 `_rho/queue {sessionId, text}` adds a prompt (it starts at once if the
 session is idle), `_rho/unqueue {sessionId, id}` removes one. Queued prompts
 run one by one as turns end, also with no client connected; a stopped or
-failed turn holds the queue until a turn ends normally. Every viewer gets
+failed turn holds the queue until a turn ends normally or the last client
+leaves. Every viewer gets
 the queue as `_meta.rho.queue` in `session_info_update`. The web client
 queues here; Zed keeps its own queue. The queue is in memory only: a daemon
 restart loses it.

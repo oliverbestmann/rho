@@ -1063,9 +1063,9 @@ async fn a_stop_holds_the_queue_until_a_turn_ends() {
     });
     let agent = agent(provider, &dir.path().join("sessions.db"));
     let hub = Arc::new(Hub::default());
-    // A stops the turn with a prompt queued, then leaves.
-    let a_cwd = cwd.clone();
-    let sid = tokio::time::timeout(
+    // A stops the turn with a prompt queued; a turn that ends normally lets
+    // the queue go on.
+    tokio::time::timeout(
         Duration::from_secs(10),
         Client.builder().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
@@ -1074,7 +1074,7 @@ async fn a_stop_holds_the_queue_until_a_turn_ends() {
                     .block_task()
                     .await?;
                 let sid = cx
-                    .send_request(NewSessionRequest::new(a_cwd))
+                    .send_request(NewSessionRequest::new(cwd))
                     .block_task()
                     .await?
                     .session_id;
@@ -1086,31 +1086,8 @@ async fn a_stop_holds_the_queue_until_a_turn_ends() {
                     one.block_task().await?.stop_reason,
                     agent_client_protocol::schema::v1::StopReason::Cancelled
                 );
-                Ok(sid)
-            },
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(prompts(&inner), ["one"], "held after the stop");
-
-    // B finds the held queue; a turn that ends normally lets it go on.
-    let b_updates = Updates::default();
-    let seen = b_updates.clone();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        client!(b_updates).connect_with(
-            rho::acp::agent_in(agent.clone(), hub.clone(), false),
-            async |cx: ConnectionTo<_>| {
-                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
-                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                    .block_task()
-                    .await?;
-                wait_for(|| queued(&seen).is_some_and(|q| q.len() == 1)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert_eq!(prompts(&inner), ["one"], "held after the stop");
                 go.notify_one();
                 cx.send_request(prompt(&sid, "three")).block_task().await?;
                 started.notified().await;
@@ -1124,6 +1101,130 @@ async fn a_stop_holds_the_queue_until_a_turn_ends() {
     .unwrap()
     .unwrap();
     assert_eq!(prompts(&inner), ["one", "three", "two"]);
+}
+
+#[tokio::test]
+async fn a_held_queue_runs_once_everyone_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let (started, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let inner = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let provider = Arc::new(Gated {
+        inner: inner.clone(),
+        started: started.clone(),
+        go: go.clone(),
+    });
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let cwd = dir.path().to_path_buf();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent, Arc::new(Hub::default()), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let one = cx.send_request(prompt(&sid, "one"));
+                started.notified().await;
+                cx.send_request(queue(&sid, "two")).block_task().await?;
+                cx.send_notification(CancelNotification::new(sid.clone()))?;
+                one.block_task().await?;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    go.notify_one();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        wait_for(|| inner.requests.lock().unwrap().len() == 2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(prompts(&inner), ["one", "two"]);
+}
+
+/// Hands out the session's context and tells when the session ends.
+#[derive(Default)]
+struct Lifecycle {
+    ctx: Mutex<Option<Context>>,
+    ended: std::sync::atomic::AtomicBool,
+}
+
+impl Extension for Lifecycle {
+    async fn session_start(&self, s: &mut rho::extension::SessionSetup) {
+        *self.ctx.lock().unwrap() = Some(s.ctx.clone());
+    }
+
+    fn session_end(&self, _ctx: &Context) {
+        self.ended.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn an_unused_session_is_unloaded_after_the_idle_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sessions.db");
+    let life = Arc::new(Lifecycle::default());
+    let mut agent = Agent::new(Scripted::new(vec![]), ModelSpec::new("test", "m"), vec![]);
+    let path = db.clone();
+    agent.sessions_db = Some(Arc::new(move |_| path.clone()));
+    agent.extensions.push(life.clone());
+    let hub = Arc::new(Hub::default().with_idle_timeout(Duration::from_millis(300)));
+    let cwd = dir.path().to_path_buf();
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(Arc::new(agent), hub, false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Kept alive, e.g. by a background task, it stays past the timeout.
+    let ctx = life.ctx.lock().unwrap().clone().unwrap();
+    let alive = ctx.keep_alive();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!life.ended.load(std::sync::atomic::Ordering::Relaxed));
+
+    drop(alive);
+    let ended = || life.ended.load(std::sync::atomic::Ordering::Relaxed);
+    tokio::time::timeout(Duration::from_secs(5), wait_for(ended))
+        .await
+        .unwrap();
+    let store = rho::store::Store::open(&db).unwrap();
+    let history = store
+        .history(&rho::store::SessionId::new(&*sid.0))
+        .await
+        .unwrap();
+    let notes: Vec<_> = history
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::UserNote { title, .. } => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes, ["Session idle"]);
 }
 
 #[tokio::test]

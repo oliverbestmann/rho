@@ -85,7 +85,9 @@ impl State {
 /// The handlers own the state, so it goes when the connection ends.
 impl Drop for State {
     fn drop(&mut self) {
-        self.hub.detach(self.conn);
+        for sid in self.hub.detach(self.conn) {
+            next_queued(&self.agent, &self.hub, &sid, None, None);
+        }
     }
 }
 
@@ -457,7 +459,16 @@ fn register(
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let (watch, registration) = AbortHandle::new_pair();
     let inbox = watch_inbox(agent.clone(), hub.clone(), sid.clone(), ctx.clone());
-    tokio::spawn(Abortable::new(inbox, registration));
+    let idle = Hub::unload_when_idle(Arc::downgrade(hub), sid.clone());
+    tokio::spawn(Abortable::new(
+        async move {
+            tokio::select! {
+                () = inbox => {}
+                () = idle => {}
+            }
+        },
+        registration,
+    ));
     // Stored sessions open under `Hub::opening`, so this is the only one.
     hub.sessions.lock().unwrap().insert(
         sid.clone(),

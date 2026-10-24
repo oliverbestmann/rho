@@ -27,7 +27,8 @@ A slash command cannot add to a queue: while a turn runs, every
   dropped, so the session stays busy in between. Queuing while idle starts
   the prompt at once.
 - A stopped (`session/cancel`) or failed turn holds the queue until a turn
-  ends normally, like the web client did.
+  ends normally, like the web client did, or the last connection drops
+  (ADR 0063).
 - Every change goes to all viewers as `_meta.rho.queue: [{id, text}]` in a
   `session_info_update`; a viewer that attaches gets it with the busy state.
 - A session with a queue stays in memory without viewers. `session/close` by

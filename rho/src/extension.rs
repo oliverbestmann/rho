@@ -7,6 +7,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
@@ -463,6 +464,17 @@ struct Inner {
     /// until the session is set up, so setup notices are not saved again
     /// on every resume.
     notes: Mutex<Option<Vec<Content>>>,
+    /// Live `KeepAlive` guards.
+    alive: AtomicUsize,
+}
+
+/// Keeps the session loaded while it lives, see `Context::keep_alive`.
+pub struct KeepAlive(Context);
+
+impl Drop for KeepAlive {
+    fn drop(&mut self) {
+        self.0.0.alive.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Context {
@@ -493,7 +505,20 @@ impl Context {
             stored: Mutex::default(),
             tool_call: Mutex::default(),
             notes: Mutex::default(),
+            alive: AtomicUsize::new(0),
         }))
+    }
+
+    /// Keeps the session loaded without a client until the guard is
+    /// dropped, e.g. for background work that reports back later.
+    pub fn keep_alive(&self) -> KeepAlive {
+        self.0.alive.fetch_add(1, Ordering::Relaxed);
+        KeepAlive(self.clone())
+    }
+
+    /// A `KeepAlive` guard lives.
+    pub fn kept_alive(&self) -> bool {
+        self.0.alive.load(Ordering::Relaxed) > 0
     }
 
     /// Shows output of the running tool call as it arrives. The tool's

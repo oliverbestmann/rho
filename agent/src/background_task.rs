@@ -132,7 +132,10 @@ impl Tool for Start {
 
         let ctx = ctx.clone();
         let started = format!("Started background task {id}");
+        // Unloading the session would kill the task, see `session_end`.
+        let alive = ctx.keep_alive();
         tokio::spawn(async move {
+            let _alive = alive;
             let (out, err) = (child.stdout.take(), child.stderr.take());
             let done = async {
                 tokio::join!(collect(out, &tail), collect(err, &tail));
@@ -325,6 +328,16 @@ mod tests {
         panic!("no notice");
     }
 
+    async fn wait_for(what: impl Fn() -> bool) {
+        for _ in 0..100 {
+            if what() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out");
+    }
+
     #[tokio::test]
     async fn reports_exit_status_and_tail() {
         let (_dir, notices, ctx) = setup();
@@ -334,6 +347,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.output, "Started background task 1");
+        assert!(ctx.kept_alive());
         let (title, text, failed) = wait_notice(&notices).await;
         assert_eq!(title, "background task 1 exited with code 3");
         assert!(failed);
@@ -343,6 +357,7 @@ mod tests {
         );
         assert!(ctx.has_triggered());
         assert!(ctx.state::<Tasks>().running.lock().unwrap().is_empty());
+        wait_for(|| !ctx.kept_alive()).await;
     }
 
     #[tokio::test]
