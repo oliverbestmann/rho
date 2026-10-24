@@ -17,8 +17,11 @@ session from the store again.
 - `Context::keep_alive` returns a guard; while one lives, the session counts
   as used. The background task extension holds one per running task.
 - A session that is unused (no viewer, no run, no queue, no guard) stays
-  loaded for 30 minutes (`Hub::with_idle_timeout`). Then it gets a
-  "Session idle" note, is saved and dropped. A task per session polls for
+  loaded for 30 minutes (`Hub::with_idle_timeout`). Then it is saved and
+  dropped. If it got user input or model text since it was created or
+  loaded, it gets a "Session idle" note first. Notices, tool calls and
+  thinking do not count, so a session that was only looked at stays as it
+  was. A task per session polls for
   this (`Hub::unload_when_idle`), every 30th of the timeout.
 - It is still saved as soon as it becomes unused, so notices survive a
   restart.

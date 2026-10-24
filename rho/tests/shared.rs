@@ -1173,25 +1173,31 @@ async fn an_unused_session_is_unloaded_after_the_idle_timeout() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("sessions.db");
     let life = Arc::new(Lifecycle::default());
-    let mut agent = Agent::new(Scripted::new(vec![]), ModelSpec::new("test", "m"), vec![]);
+    let mut agent = Agent::new(
+        Scripted::new(vec![answer("Hi.")]),
+        ModelSpec::new("test", "m"),
+        vec![],
+    );
     let path = db.clone();
     agent.sessions_db = Some(Arc::new(move |_| path.clone()));
     agent.extensions.push(life.clone());
+    let agent = Arc::new(agent);
     let hub = Arc::new(Hub::default().with_idle_timeout(Duration::from_millis(300)));
     let cwd = dir.path().to_path_buf();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
         Client.builder().connect_with(
-            rho::acp::agent_in(Arc::new(agent), hub, false),
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
                 let sid = cx
-                    .send_request(NewSessionRequest::new(cwd))
+                    .send_request(NewSessionRequest::new(cwd.clone()))
                     .block_task()
                     .await?
                     .session_id;
+                cx.send_request(prompt(&sid, "hi")).block_task().await?;
                 Ok(sid)
             },
         ),
@@ -1212,19 +1218,49 @@ async fn an_unused_session_is_unloaded_after_the_idle_timeout() {
         .await
         .unwrap();
     let store = rho::store::Store::open(&db).unwrap();
-    let history = store
-        .history(&rho::store::SessionId::new(&*sid.0))
+    let notes = async || {
+        let history = store
+            .history(&rho::store::SessionId::new(&*sid.0))
+            .await
+            .unwrap();
+        history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                Content::UserNote { title, .. } if title == "Session idle" => Some(title),
+                _ => None,
+            })
+            .count()
+    };
+    assert_eq!(notes().await, 1);
+
+    // Loaded and given only a notice, it unloads without another note.
+    life.ended
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent, hub, false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd))
+                    .block_task()
+                    .await?;
+                let ctx = life.ctx.lock().unwrap().clone().unwrap();
+                ctx.notify(rho::provider::NoteType::Info, "Notice", "", false);
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), wait_for(ended))
         .await
         .unwrap();
-    let notes: Vec<_> = history
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|c| match c {
-            Content::UserNote { title, .. } => Some(title.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(notes, ["Session idle"]);
+    assert_eq!(notes().await, 1);
 }
 
 #[tokio::test]

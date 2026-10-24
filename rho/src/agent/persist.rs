@@ -23,6 +23,9 @@ pub(super) struct Persist {
     pub(super) blocks: usize,
     /// The session row exists.
     pub(super) created: bool,
+    /// User input or model text was saved since the session was created or
+    /// loaded; notes, tool calls and thinking do not count.
+    changed: bool,
     /// A save failed and the user was told; not repeated.
     failed: bool,
     /// Edit diffs not saved yet.
@@ -42,6 +45,7 @@ impl Persist {
             last_len: 0,
             blocks: 0,
             created: false,
+            changed: false,
             failed: false,
             diffs: vec![],
             outputs: vec![],
@@ -62,6 +66,12 @@ impl Session {
     /// Number of compactions of the stored session; 0 if not stored.
     pub(crate) fn epoch(&self) -> i64 {
         self.persist.as_ref().map_or(0, |p| p.epoch)
+    }
+
+    /// User input or model text was saved since the session was created or
+    /// loaded.
+    pub(crate) fn changed(&self) -> bool {
+        self.persist.as_ref().is_some_and(|p| p.changed)
     }
 
     /// Writes new history and the session state (model, usage, ...) to the
@@ -117,6 +127,11 @@ impl Session {
             (p.base, blocks_of(&self.history).collect())
         };
         let count = blocks.len();
+        let real = blocks.iter().any(|(_, b)| match b {
+            Content::Text { text } => !text.trim().is_empty(),
+            Content::Image { .. } => true,
+            _ => false,
+        });
         let state = State {
             id: id.clone(),
             cwd: self.roots[0].clone(),
@@ -136,6 +151,7 @@ impl Session {
         p.store.save_state(state).await?;
         if !blocks.is_empty() || !grew {
             p.store.save_items(&id, p.epoch, seq, blocks).await?;
+            p.changed |= real;
         }
         if !diffs.is_empty() {
             p.store.save_diffs(&id, diffs).await?;

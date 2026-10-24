@@ -563,7 +563,7 @@ far (the current and the previous epoch) from the daemon's memory, including
 the text and output of a turn that is still running. A turn keeps running
 when its connection drops. A session is unloaded 30 minutes after no connection has
 it open, nothing runs, nothing is queued and no background task runs (ADR 0063);
-it gets a "Session idle" note. `session/close` by the last one cancels its turn
+it gets a "Session idle" note if it got user input or model text since it was loaded. `session/close` by the last one cancels its turn
 and clears its queue.
 
 The daemon also keeps a prompt queue per session (ADR 0062), so a message

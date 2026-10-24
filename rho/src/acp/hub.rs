@@ -324,10 +324,14 @@ impl Hub {
         if self.unused(sid) != Some(true) {
             return false;
         }
-        let minutes = idle.as_secs() / 60;
-        let text = format!("Unloaded after {minutes} minutes without a client.");
-        ctx.notify(NoteType::Info, "Session idle", &text, false);
         session.save().await;
+        // A session only looked at stays as it was.
+        if session.changed() {
+            let minutes = idle.as_secs() / 60;
+            let text = format!("Unloaded after {minutes} minutes without a client.");
+            ctx.notify(NoteType::Info, "Session idle", &text, false);
+            session.save().await;
+        }
         let mut sessions = self.sessions.lock().unwrap();
         let unused = sessions.get(sid).is_some_and(Entry::unused);
         if unused {
