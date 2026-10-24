@@ -25,7 +25,7 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatMenuModule } from '@angular/material/menu';
 import { Acp, Ask, errorText, Opened } from '../acp';
 import { loadHighlighter } from '../highlight';
-import { listSessions } from '../sessions/list';
+import { dir, listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
 import { Composer } from './composer';
 import { ContextUsage } from './context-usage';
@@ -151,6 +151,8 @@ export class Session {
       ? this.opened()?.state.call(a.request.toolCall.toolCallId)
       : undefined;
   }
+
+  protected readonly dir = dir;
 
   protected readonly title = computed(
     () => this.shown()?.state.title() ?? this.listTitle() ?? 'Session',

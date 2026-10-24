@@ -28,9 +28,21 @@
 
 .title {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
   cursor: pointer;
+
+  > * {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.dir {
+  font: var(--mat-sys-label-medium);
+  color: var(--mat-sys-on-surface-variant);
 }
 
 // Same look as the context usage details.

@@ -2,9 +2,15 @@
   <a matIconButton routerLink="/" aria-label="Back">
     <mat-icon>arrow_back</mat-icon>
   </a>
-  <span class="title" [matMenuTriggerFor]="fullTitle">{{ title() }}</span>
+  <span class="title" [matMenuTriggerFor]="fullTitle">
+    <span class="name">{{ title() }}</span>
+    <span class="dir">{{ dir(cwd()) }}</span>
+  </span>
   <mat-menu #fullTitle>
-    <div class="full-title">{{ title() }}</div>
+    <div class="full-title">
+      {{ title() }}
+      <div class="dir">{{ cwd() }}</div>
+    </div>
   </mat-menu>
   @if (usage(); as usage) {
     <app-context-usage [usage]="usage" />
