@@ -17,11 +17,29 @@ use crate::store;
 use crate::tools;
 
 use super::config::config_options;
-use super::frontend::{AcpFrontend, To};
+use super::frontend::{AcpFrontend, Cursor, To};
 use super::update::image_block;
 use super::{State, commands, register, run_unprompted, send_commands};
 
-/// `session/load` (with `replay`) and `session/resume`: opens the session
+/// What a connection that opens a session gets before the response.
+pub(super) enum Replay {
+    /// `session/resume`: nothing.
+    Nothing,
+    /// `session/load`: the transcript, after the cursor if the client sent
+    /// one as `_meta.rho.since`.
+    Since(Option<Cursor>),
+}
+
+impl Replay {
+    /// For `session/load`. A `since` that cannot be read is in no
+    /// transcript: the client gets a reset and everything.
+    pub(super) fn of_load(meta: Option<&agent_client_protocol::schema::v1::Meta>) -> Self {
+        let since = meta.and_then(|m| m.get("rho")?.get("since"));
+        Replay::Since(since.map(|s| serde_json::from_value(s.clone()).unwrap_or_default()))
+    }
+}
+
+/// `session/load` (with a replay) and `session/resume`: opens the session
 /// with `open_stored`, answers with `response`, then makes the connection
 /// ready and sends the commands.
 #[expect(clippy::too_many_arguments, reason = "the two handlers' shared body")]
@@ -32,7 +50,7 @@ pub(super) async fn attach<T: JsonRpcResponse>(
     sid: SessionId,
     cwd: PathBuf,
     additional_dirs: Vec<PathBuf>,
-    replay: bool,
+    replay: Replay,
     responder: Responder<T>,
     response: impl FnOnce(Vec<SessionConfigOption>) -> T,
 ) -> Result<(), Error> {
@@ -52,7 +70,7 @@ pub(super) async fn attach<T: JsonRpcResponse>(
 }
 
 /// The open session (also one opened by another connection), or the stored
-/// one continued. With `replay` the connection gets the transcript first.
+/// one continued. The connection gets `replay` first.
 /// Returns its frontend, config options, commands and, for a session that
 /// goes on with open tool calls, its context to start that run with. Call
 /// `AcpFrontend::ready` after the response.
@@ -63,7 +81,7 @@ async fn open_stored(
     sid: &SessionId,
     cwd: PathBuf,
     additional_dirs: Vec<PathBuf>,
-    replay: bool,
+    replay: Replay,
 ) -> anyhow::Result<(
     Arc<AcpFrontend>,
     Vec<SessionConfigOption>,
@@ -113,13 +131,14 @@ async fn open_stored(
     };
     drop(opening);
     let viewer = state.viewer(cx, false);
-    if replay {
-        frontend.attach_replayed(viewer);
-        if let Some(title) = ctx.title() {
-            frontend.send(AgentEvent::Title(&title), To::Only(state.conn));
+    match replay {
+        Replay::Since(since) => {
+            frontend.attach_replayed(viewer, since);
+            if let Some(title) = ctx.title() {
+                frontend.send(AgentEvent::Title(&title), To::Only(state.conn));
+            }
         }
-    } else {
-        frontend.attach(viewer);
+        Replay::Nothing => frontend.attach(viewer),
     }
     // A turn holds the session: the new directories are not applied.
     // shortcut: a lock-free copy of the roots would fix it.

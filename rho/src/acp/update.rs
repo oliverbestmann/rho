@@ -139,6 +139,14 @@ pub(super) fn queue_update(queue: &[super::queue::Queued]) -> SessionUpdate {
     )
 }
 
+/// Before a replay of everything to a client that asked for what came after
+/// its cursor: it drops what it shows.
+pub(super) fn reset_update() -> SessionUpdate {
+    SessionUpdate::SessionInfoUpdate(
+        SessionInfoUpdate::new().meta(meta(serde_json::json!({ "rho": { "reset": true } }))),
+    )
+}
+
 pub(super) fn busy_update(on: bool) -> SessionUpdate {
     SessionUpdate::SessionInfoUpdate(
         SessionInfoUpdate::new().meta(meta(serde_json::json!({ "rho": { "running": on } }))),

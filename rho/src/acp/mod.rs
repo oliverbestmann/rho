@@ -37,7 +37,7 @@ use config::{PROFILE_OPTION, config_options, set_config};
 use frontend::{AcpFrontend, To, Viewer};
 use hub::Entry;
 pub use hub::Hub;
-use load::attach;
+use load::{Replay, attach};
 use update::{meta, to_stop, turn_usage};
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
@@ -222,9 +222,10 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                 let (agent, state) = (load_state.agent.clone(), load_state.clone());
                 cx.clone().spawn(async move {
                     let (sid, cwd, dirs) = (req.session_id, req.cwd, req.additional_directories);
+                    let replay = Replay::of_load(req.meta.as_ref());
                     let respond = |o| LoadSessionResponse::new().config_options(o);
                     attach(
-                        &agent, &state, &cx, sid, cwd, dirs, true, responder, respond,
+                        &agent, &state, &cx, sid, cwd, dirs, replay, responder, respond,
                     )
                     .await
                 })
@@ -240,7 +241,15 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                     let (sid, cwd, dirs) = (req.session_id, req.cwd, req.additional_directories);
                     let respond = |o| ResumeSessionResponse::new().config_options(o);
                     attach(
-                        &agent, &state, &cx, sid, cwd, dirs, false, responder, respond,
+                        &agent,
+                        &state,
+                        &cx,
+                        sid,
+                        cwd,
+                        dirs,
+                        Replay::Nothing,
+                        responder,
+                        respond,
                     )
                     .await
                 })

@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use agent_client_protocol::schema::v1::{
     ContentChunk, CreateElicitationRequest, ElicitationAction, ElicitationFormMode,
     ElicitationSessionScope, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, SessionConfigOption, SessionId, SessionNotification, SessionUpdate,
-    ToolCallUpdate, ToolCallUpdateFields,
+    RequestPermissionRequest, SessionConfigOption, SessionId, SessionInfoUpdate,
+    SessionNotification, SessionUpdate, ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{Client, ConnectionTo, JsonRpcRequest};
 use futures::StreamExt;
 use futures::future::{AbortHandle, Abortable};
 use futures::stream::FuturesUnordered;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentEvent;
@@ -24,8 +25,8 @@ use crate::tools::DynTool;
 
 use super::queue::Queued;
 use super::update::{
-    LastUsage, Shown, busy_update, form_answers, form_schema, queue_update, terminal_output,
-    to_update, usage_update,
+    LastUsage, Shown, busy_update, form_answers, form_schema, meta, queue_update, reset_update,
+    terminal_output, to_update, usage_update,
 };
 use super::{ConnId, shell};
 
@@ -50,7 +51,27 @@ pub(super) struct Viewer {
     /// Updates held while the session starts, until `ready`: a client does
     /// not know a new session before the `session/new` response. Replays
     /// (`To::Only`) are not held.
-    pub(super) held: Option<Vec<SessionUpdate>>,
+    pub(super) held: Option<Vec<SessionNotification>>,
+}
+
+/// Where a viewer is in a transcript, sent as `_meta.rho.cursor` with each
+/// update the transcript has. A client that loads again sends back the last
+/// one as `_meta.rho.since` and gets only what came after it.
+/// The default is in no transcript: `session/load` sends everything.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct Cursor {
+    /// `AcpFrontend::id`: another one after a restart or an unload.
+    transcript: String,
+    #[serde(flatten)]
+    pos: Pos,
+}
+
+/// An entry of a transcript, counted from its start (also the dropped
+/// ones), and how many bytes of it were sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct Pos {
+    entry: u64,
+    len: usize,
 }
 
 /// Which viewers an update goes to. `All` and `Record` also add it to the
@@ -88,6 +109,8 @@ struct Transcript {
     entries: Vec<Entry>,
     /// Where the previous and the current epoch start in `entries`.
     epochs: [usize; 2],
+    /// Entries dropped by `new_epoch`, so `Pos::entry` stays the same.
+    dropped: u64,
 }
 
 enum Entry {
@@ -105,9 +128,36 @@ enum Entry {
     },
 }
 
+impl Entry {
+    /// Bytes of text or output; `Update`s are sent whole.
+    fn len(&self) -> usize {
+        match self {
+            Entry::Text(s) | Entry::Thinking(s) | Entry::Output { data: s, .. } => s.len(),
+            Entry::Update { .. } => 0,
+        }
+    }
+
+    /// The update for the entry from byte `from` on; terminal output only
+    /// for `terminal` viewers.
+    fn update(&self, from: usize, terminal: bool) -> Option<SessionUpdate> {
+        match self {
+            Entry::Text(t) => Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                t[from..].into(),
+            ))),
+            Entry::Thinking(t) => Some(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+                t[from..].into(),
+            ))),
+            Entry::Update { terminal: t, .. } if terminal => Some((**t).clone()),
+            Entry::Update { plain, .. } => Some((**plain).clone()),
+            Entry::Output { id, data } => terminal.then(|| terminal_output(id, &data[from..])),
+        }
+    }
+}
+
 impl Transcript {
-    /// Adds `entry`, merged into the last one if it continues it.
-    fn push(&mut self, entry: Entry) {
+    /// Adds `entry`, merged into the last one if it continues it. Returns
+    /// where it ends.
+    fn push(&mut self, entry: Entry) -> Pos {
         // Not into the previous epoch.
         let last = (self.entries.len() > self.epochs[1])
             .then(|| self.entries.last_mut())
@@ -124,32 +174,65 @@ impl Transcript {
             ) if *id == next => data.push_str(&more),
             (_, entry) => self.entries.push(entry),
         }
+        let last = self.entries.last().expect("pushed");
+        Pos {
+            entry: self.dropped + self.entries.len() as u64 - 1,
+            len: last.len(),
+        }
     }
 
     /// A compaction: the epoch before the current one is dropped.
     fn new_epoch(&mut self) {
+        self.dropped += self.epochs[1] as u64;
         self.entries.drain(..self.epochs[1]);
         self.epochs = [0, self.entries.len()];
     }
 
-    fn updates(&self, terminal: bool) -> impl Iterator<Item = SessionUpdate> + '_ {
-        self.entries.iter().filter_map(move |e| match e {
-            Entry::Text(t) => Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                t.as_str().into(),
-            ))),
-            Entry::Thinking(t) => Some(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-                t.as_str().into(),
-            ))),
-            Entry::Update { terminal: t, .. } if terminal => Some((**t).clone()),
-            Entry::Update { plain, .. } => Some((**plain).clone()),
-            Entry::Output { id, data } => terminal.then(|| terminal_output(id, data)),
-        })
+    /// The updates after `since` (all without it), each with where it ends.
+    /// `None` if `since` is not in the transcript (dropped, or not from it).
+    fn updates(
+        &self,
+        terminal: bool,
+        since: Option<Pos>,
+    ) -> Option<impl Iterator<Item = (SessionUpdate, Pos)> + '_> {
+        let (start, from) = match since {
+            None => (0, 0),
+            Some(pos) => {
+                let i = usize::try_from(pos.entry.checked_sub(self.dropped)?).ok()?;
+                let entry = self.entries.get(i)?;
+                let fits = match entry {
+                    Entry::Text(s) | Entry::Thinking(s) | Entry::Output { data: s, .. } => {
+                        s.is_char_boundary(pos.len)
+                    }
+                    Entry::Update { .. } => pos.len == 0,
+                };
+                if !fits {
+                    return None;
+                }
+                if pos.len == entry.len() {
+                    (i + 1, 0)
+                } else {
+                    (i, pos.len)
+                }
+            }
+        };
+        let updates = self.entries[start..].iter().enumerate();
+        Some(updates.filter_map(move |(j, e)| {
+            let from = if j == 0 { from } else { 0 };
+            let pos = Pos {
+                entry: self.dropped + (start + j) as u64,
+                len: e.len(),
+            };
+            e.update(from, terminal).map(|u| (u, pos))
+        }))
     }
 }
 
 /// One session's frontend, for every connection that opened it.
 pub(super) struct AcpFrontend {
     sid: SessionId,
+    /// Tells this transcript from the session's earlier ones, see `Cursor`.
+    id: String,
     /// For `Bash` calls shown as terminals.
     cwd: PathBuf,
     notices: AtomicU64,
@@ -180,6 +263,7 @@ impl AcpFrontend {
     pub(super) fn new(sid: &SessionId, cwd: &Path) -> Arc<Self> {
         Arc::new(Self {
             sid: sid.clone(),
+            id: format!("{:016x}", getrandom::u64().unwrap_or_default()),
             cwd: cwd.to_path_buf(),
             notices: AtomicU64::new(0),
             viewers: Mutex::default(),
@@ -215,12 +299,30 @@ impl AcpFrontend {
         viewers.push(viewer);
     }
 
-    /// `attach`, after sending `viewer` the transcript.
-    pub(super) fn attach_replayed(&self, mut viewer: Viewer) {
+    /// `attach`, after sending `viewer` the transcript: with `since` what
+    /// came after it. A `since` that is not in it gets `_meta.rho.reset`
+    /// and everything.
+    pub(super) fn attach_replayed(&self, mut viewer: Viewer, since: Option<Cursor>) {
         let mut viewers = self.viewers.lock().unwrap();
-        let conn = viewer.conn;
-        for update in self.transcript.lock().unwrap().updates(viewer.terminal) {
-            self.deliver(&mut viewer, update, To::Only(conn));
+        let (conn, terminal) = (viewer.conn, viewer.terminal);
+        let asked = since.is_some();
+        {
+            let transcript = self.transcript.lock().unwrap();
+            let after = since
+                .filter(|c| c.transcript == self.id)
+                .and_then(|c| transcript.updates(terminal, Some(c.pos)));
+            let updates = match after {
+                Some(updates) => updates,
+                None => {
+                    if asked {
+                        self.deliver(&mut viewer, reset_update(), To::Only(conn), None);
+                    }
+                    transcript.updates(terminal, None).expect("from the start")
+                }
+            };
+            for (update, pos) in updates {
+                self.deliver(&mut viewer, update, To::Only(conn), Some(pos));
+            }
         }
         viewers.retain(|v| v.conn != conn);
         viewers.push(viewer);
@@ -239,21 +341,27 @@ impl AcpFrontend {
     }
 
     /// Adds `update` to the transcript, for every viewer.
-    pub(super) fn record(&self, update: SessionUpdate) {
+    pub(super) fn record(&self, update: SessionUpdate) -> Pos {
         self.transcript.lock().unwrap().push(Entry::Update {
             terminal: Box::new(update.clone()),
             plain: Box::new(update),
-        });
+        })
     }
 
     /// A prompt from `conn`, or from the queue: the other viewers see it,
-    /// later ones too.
+    /// later ones too. `conn` gets only the cursor, so loading again does
+    /// not send it the prompt it shows already.
     pub(super) fn echo(&self, update: SessionUpdate, conn: Option<ConnId>) {
         let mut viewers = self.viewers.lock().unwrap();
-        self.record(update.clone());
+        let pos = self.record(update.clone());
         let to = conn.map_or(To::All, To::Except);
-        for v in viewers.iter_mut().filter(|v| to.includes(v.conn)) {
-            self.deliver(v, update.clone(), to);
+        for v in viewers.iter_mut() {
+            let update = if to.includes(v.conn) {
+                update.clone()
+            } else {
+                SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new())
+            };
+            self.deliver(v, update, to, Some(pos));
         }
     }
 
@@ -276,17 +384,17 @@ impl AcpFrontend {
         let held = v.held.take();
         // With these it got the busy state.
         let caught_up = held.is_some();
-        for update in held.into_iter().flatten() {
-            self.deliver(v, update, To::Only(conn));
+        for notification in held.into_iter().flatten() {
+            let _ = v.cx.send_notification(notification);
         }
-        if !caught_up && self.busy.load(Ordering::Relaxed) {
-            self.deliver(v, busy_update(true), To::Only(conn));
+        // Also when idle and empty: a client that loads again may still
+        // show what it saw before.
+        if !caught_up {
+            let busy = self.busy.load(Ordering::Relaxed);
+            self.deliver(v, busy_update(busy), To::Only(conn), None);
+            let queue = queue_update(&self.queue.lock().unwrap());
+            self.deliver(v, queue, To::Only(conn), None);
         }
-        let queue = self.queue.lock().unwrap();
-        if !caught_up && !queue.is_empty() {
-            self.deliver(v, queue_update(&queue), To::Only(conn));
-        }
-        drop(queue);
         // Nobody waiting is fine.
         let _ = self.ready.send(v.clone());
     }
@@ -405,13 +513,13 @@ impl AcpFrontend {
             _ => None,
         };
         let mut viewers = self.viewers.lock().unwrap();
-        if let Some(entry) = entry.filter(|_| to.records()) {
-            self.transcript.lock().unwrap().push(entry);
-        }
+        let pos = entry
+            .filter(|_| to.records())
+            .map(|entry| self.transcript.lock().unwrap().push(entry));
         for v in viewers.iter_mut() {
             if to.includes(v.conn) {
                 let update = if v.terminal { &terminal } else { &plain };
-                self.deliver(v, update.clone(), to);
+                self.deliver(v, update.clone(), to, pos);
             }
         }
         drop(viewers);
@@ -458,15 +566,15 @@ impl AcpFrontend {
     fn send_terminal(&self, id: &ToolCallId, data: &str, to: To) {
         let update = terminal_output(id, data);
         let mut viewers = self.viewers.lock().unwrap();
-        if to.records() {
+        let pos = to.records().then(|| {
             self.transcript.lock().unwrap().push(Entry::Output {
                 id: id.clone(),
                 data: data.into(),
-            });
-        }
+            })
+        });
         for v in viewers.iter_mut() {
             if v.terminal && to.includes(v.conn) {
-                self.deliver(v, update.clone(), to);
+                self.deliver(v, update.clone(), to, pos);
             }
         }
     }
@@ -485,19 +593,28 @@ impl AcpFrontend {
     pub(super) fn send_update(&self, update: SessionUpdate, to: To) {
         for v in self.viewers.lock().unwrap().iter_mut() {
             if to.includes(v.conn) {
-                self.deliver(v, update.clone(), to);
+                self.deliver(v, update.clone(), to, None);
             }
         }
     }
 
-    /// Sends `update` to `v`, or holds it while the session starts.
-    fn deliver(&self, v: &mut Viewer, update: SessionUpdate, to: To) {
+    /// Sends `update` to `v`, or holds it while the session starts. `pos`:
+    /// where it ends in the transcript, sent as `_meta.rho.cursor`.
+    fn deliver(&self, v: &mut Viewer, update: SessionUpdate, to: To, pos: Option<Pos>) {
+        let mut notification = SessionNotification::new(self.sid.clone(), update);
+        if let Some(pos) = pos {
+            let cursor = Cursor {
+                transcript: self.id.clone(),
+                pos,
+            };
+            notification =
+                notification.meta(meta(serde_json::json!({ "rho": { "cursor": cursor } })));
+        }
         match &mut v.held {
-            Some(held) if !matches!(to, To::Only(_)) => held.push(update),
+            Some(held) if !matches!(to, To::Only(_)) => held.push(notification),
             // Dropped updates only affect display; the turn continues.
             _ => {
-                let _ =
-                    v.cx.send_notification(SessionNotification::new(self.sid.clone(), update));
+                let _ = v.cx.send_notification(notification);
             }
         }
     }
@@ -596,20 +713,29 @@ mod tests {
     use super::*;
 
     fn texts(t: &Transcript, terminal: bool) -> Vec<String> {
-        t.updates(terminal)
-            .map(|u| match u {
-                SessionUpdate::AgentMessageChunk(c) | SessionUpdate::AgentThoughtChunk(c) => {
-                    serde_json::to_value(&c.content).unwrap()["text"]
-                        .as_str()
-                        .unwrap()
-                        .to_string()
-                }
-                other => serde_json::to_value(&other).unwrap()["_meta"]["terminal_output"]["data"]
-                    .as_str()
-                    .unwrap()
-                    .to_string(),
-            })
-            .collect()
+        texts_since(t, terminal, None).unwrap()
+    }
+
+    fn texts_since(t: &Transcript, terminal: bool, since: Option<Pos>) -> Option<Vec<String>> {
+        let updates = t.updates(terminal, since)?;
+        Some(
+            updates
+                .map(|(u, _)| match u {
+                    SessionUpdate::AgentMessageChunk(c) | SessionUpdate::AgentThoughtChunk(c) => {
+                        serde_json::to_value(&c.content).unwrap()["text"]
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    }
+                    other => {
+                        serde_json::to_value(&other).unwrap()["_meta"]["terminal_output"]["data"]
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    }
+                })
+                .collect(),
+        )
     }
 
     #[test]
@@ -635,5 +761,33 @@ mod tests {
         t.push(Entry::Text("third".into()));
         // The first epoch is gone; text does not merge across epochs.
         assert_eq!(texts(&t, false), ["second", "third"]);
+    }
+
+    #[test]
+    fn a_cursor_resumes_mid_entry_and_counts_dropped_entries() {
+        let mut t = Transcript::default();
+        let pos = |entry, len| Pos { entry, len };
+        let first = t.push(Entry::Text("Hel".into()));
+        assert_eq!(first, pos(0, 3));
+        assert_eq!(t.push(Entry::Text("lo".into())), pos(0, 5));
+        let thought = t.push(Entry::Thinking("hm".into()));
+        assert_eq!(thought, pos(1, 2));
+        // The rest of the text, then what follows.
+        assert_eq!(texts_since(&t, false, Some(first)).unwrap(), ["lo", "hm"]);
+        assert_eq!(
+            texts_since(&t, false, Some(thought)).unwrap(),
+            [] as [&str; 0]
+        );
+
+        t.new_epoch();
+        assert_eq!(t.push(Entry::Text("Next".into())), pos(2, 4));
+        t.new_epoch();
+        // The first epoch is gone, its positions with it.
+        assert!(t.updates(false, Some(first)).is_none());
+        assert_eq!(texts_since(&t, false, Some(pos(2, 2))).unwrap(), ["xt"]);
+        assert_eq!(t.push(Entry::Text("!".into())), pos(3, 1));
+        // Past the end of an entry, or of the transcript.
+        assert!(t.updates(false, Some(pos(2, 9))).is_none());
+        assert!(t.updates(false, Some(pos(9, 0))).is_none());
     }
 }

@@ -24,7 +24,22 @@ export class SessionState {
   readonly running = signal(false);
   /** Prompts rho runs after the current turn, from any client; in `_meta.rho.queue`. */
   readonly queue = signal<Queued[]>([]);
+  /** Where rho's last update was in its transcript, `_meta.rho.cursor`; sent back on a reload. */
+  cursor: unknown;
   private readonly tools = new Map<string, Extract<Entry, { kind: 'tool' }>>();
+
+  /** A `session/update` from rho. */
+  receive(n: acp.SessionNotification) {
+    const cursor = rhoMeta(n._meta)?.['cursor'];
+    if (cursor !== undefined) this.cursor = cursor;
+    // rho no longer has our cursor and sends everything again.
+    const u = n.update;
+    if (u.sessionUpdate === 'session_info_update' && rhoMeta(u._meta)?.['reset'] === true) {
+      this.tools.clear();
+      this.entries.set([]);
+    }
+    this.apply(u);
+  }
 
   apply(u: acp.SessionUpdate) {
     switch (u.sessionUpdate) {

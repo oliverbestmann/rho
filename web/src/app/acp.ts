@@ -59,6 +59,9 @@ export class Acp {
 
   /** Sessions loaded over this connection; rho keeps sending their updates. */
   private readonly opened = new Map<string, Opened>();
+  /** Sessions of lost connections to the same server; loading one again sends only what it missed. */
+  private readonly kept = new Map<string, SessionState>();
+  private url?: string;
   private connection?: acp.ClientConnection;
   private retries = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -82,15 +85,20 @@ export class Acp {
   session(agent: acp.ClientContext, sessionId: string, cwd: string): Opened {
     const cached = this.opened.get(sessionId);
     if (cached) return cached;
-    const opened: Opened = {
-      state: new SessionState(),
-      loading: signal(true),
-      error: signal(undefined),
-    };
+    const state = this.kept.get(sessionId) ?? new SessionState();
+    this.kept.delete(sessionId);
+    const opened: Opened = { state, loading: signal(true), error: signal(undefined) };
     this.opened.set(sessionId, opened);
-    // rho replays the history as updates before it answers.
+    // rho replays the history as updates before it answers: after `since` if it still has it,
+    // else it sends `_meta.rho.reset` and all.
+    const since = state.cursor;
     agent
-      .request(acp.methods.agent.session.load, { sessionId, cwd, mcpServers: [] })
+      .request(acp.methods.agent.session.load, {
+        sessionId,
+        cwd,
+        mcpServers: [],
+        ...(since !== undefined && { _meta: { rho: { since } } }),
+      })
       .then((res) => opened.state.options.set(res.configOptions ?? []))
       .catch((e: unknown) => {
         // Not kept, so the next visit tries again.
@@ -160,13 +168,14 @@ export class Acp {
   }
 
   private update(params: acp.SessionNotification) {
-    this.opened.get(params.sessionId)?.state.apply(params.update);
+    this.opened.get(params.sessionId)?.state.receive(params);
   }
 
   /** No connection: rho forgot what we viewed, the next visit loads again. */
   private disconnected() {
     this.agent.set(undefined);
     this.asks.set([]);
+    for (const [id, opened] of this.opened) this.kept.set(id, opened.state);
     this.opened.clear();
   }
 
@@ -175,6 +184,9 @@ export class Acp {
     this.connection?.close();
     this.connection = undefined;
     this.disconnected();
+    // Another rho has other transcripts.
+    if (server?.url !== this.url) this.kept.clear();
+    this.url = server?.url;
     if (!server) {
       this.status.set('offline');
       return;

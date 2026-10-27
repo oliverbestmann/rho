@@ -1294,3 +1294,164 @@ async fn a_prompt_queued_while_idle_runs_right_away() {
     .unwrap();
     assert_eq!(prompts(&provider), ["hi"]);
 }
+
+/// Notifications with their `_meta`.
+type Notes = Arc<Mutex<Vec<SessionNotification>>>;
+
+/// Loads `sid` on a new connection, with `since` as `_meta.rho.since`, and
+/// returns the replay.
+async fn load_since(
+    agent: &Arc<Agent>,
+    hub: &Arc<Hub>,
+    sid: &SessionId,
+    cwd: &std::path::Path,
+    since: Option<serde_json::Value>,
+) -> Vec<SessionNotification> {
+    let notes = Notes::default();
+    let record = notes.clone();
+    let mut load = LoadSessionRequest::new(sid.clone(), cwd.to_path_buf());
+    if let Some(since) = since {
+        let meta = serde_json::json!({ "rho": { "since": since } });
+        load = load.meta(meta.as_object().unwrap().clone());
+    }
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    record.lock().unwrap().push(n);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(
+                rho::acp::agent_in(agent.clone(), hub.clone(), false),
+                async |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    cx.send_request(load).block_task().await?;
+                    Ok(())
+                },
+            ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    notes.lock().unwrap().clone()
+}
+
+/// The last `_meta.rho.cursor`.
+fn last_cursor(notes: &[SessionNotification]) -> Option<serde_json::Value> {
+    notes
+        .iter()
+        .rev()
+        .find_map(|n| Some(n.meta.as_ref()?.get("rho")?.get("cursor")?.clone()))
+}
+
+fn note_updates(notes: &[SessionNotification]) -> Updates {
+    Arc::new(Mutex::new(notes.iter().map(|n| n.update.clone()).collect()))
+}
+
+fn reset(notes: &[SessionNotification]) -> bool {
+    notes.iter().any(|n| match &n.update {
+        SessionUpdate::SessionInfoUpdate(i) => {
+            i.meta.as_ref().is_some_and(|m| m["rho"]["reset"] == true)
+        }
+        _ => false,
+    })
+}
+
+#[tokio::test]
+async fn loading_again_with_a_cursor_sends_only_what_came_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let provider = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+
+    // A starts the session and prompts; its own prompt is not echoed, but
+    // the cursor still moves past it.
+    let a_notes = Notes::default();
+    let record = a_notes.clone();
+    let a_cwd = cwd.clone();
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    record.lock().unwrap().push(n);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(
+                rho::acp::agent_in(agent.clone(), hub.clone(), false),
+                async move |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    let sid = cx
+                        .send_request(NewSessionRequest::new(a_cwd))
+                        .block_task()
+                        .await?
+                        .session_id;
+                    cx.send_request(prompt(&sid, "hi")).block_task().await?;
+                    Ok(sid)
+                },
+            ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let cursor = last_cursor(&a_notes.lock().unwrap()).expect("a cursor");
+
+    // Meanwhile another client goes on.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                    .block_task()
+                    .await?;
+                cx.send_request(prompt(&sid, "again")).block_task().await?;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let after = load_since(&agent, &hub, &sid, &cwd, Some(cursor.clone())).await;
+    assert!(!reset(&after));
+    assert_eq!(
+        chunks(&note_updates(&after)),
+        ["user: again", "agent: Two."]
+    );
+    // Nothing new since the last cursor: nothing.
+    let last = last_cursor(&after).unwrap();
+    let none = load_since(&agent, &hub, &sid, &cwd, Some(last)).await;
+    assert!(chunks(&note_updates(&none)).is_empty());
+
+    // A cursor of another transcript, e.g. from before a restart: a reset
+    // and everything.
+    let mut stale = cursor;
+    stale["transcript"] = "elsewhere".into();
+    let all = load_since(&agent, &hub, &sid, &cwd, Some(stale)).await;
+    assert!(reset(&all));
+    assert_eq!(
+        chunks(&note_updates(&all)),
+        ["user: hi", "agent: One.", "user: again", "agent: Two."]
+    );
+    // Without a cursor: everything, no reset.
+    let plain = load_since(&agent, &hub, &sid, &cwd, None).await;
+    assert!(!reset(&plain));
+    assert_eq!(chunks(&note_updates(&plain)).len(), 4);
+}

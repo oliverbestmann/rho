@@ -84,6 +84,23 @@ describe('SessionState', () => {
     expect(s.queue()).toEqual([]);
   });
 
+  it('keeps the last cursor and starts over on a reset', () => {
+    const s = new SessionState();
+    const cursor = { transcript: 'a', entry: 0, len: 2 };
+    s.receive({
+      sessionId: 's',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } },
+      _meta: { rho: { cursor } },
+    });
+    s.receive({ sessionId: 's', update: { sessionUpdate: 'usage_update', used: 1, size: 2 } });
+    expect(s.cursor).toEqual(cursor);
+    s.receive({
+      sessionId: 's',
+      update: { sessionUpdate: 'session_info_update', _meta: { rho: { reset: true } } },
+    });
+    expect(s.entries()).toEqual([]);
+  });
+
   it('renders an image block as a markdown data URL', () => {
     const md = blockText({ type: 'image', mimeType: 'image/png', data: 'AAAA' });
     expect(md.trim()).toBe('![image](data:image/png;base64,AAAA)');

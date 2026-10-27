@@ -204,7 +204,8 @@ ACP sessions are saved to SQLite, `~/.config/rho/sessions.db`
 model, thinking level, profile, usage and cost. One-shot CLI runs are not saved.
 Clients can list them (`session/list`, filtered by cwd), continue them
 (`session/load` replays the current and the previous epoch, each compaction
-summary as a "Compacted" notice; `session/resume` replays nothing) and
+summary as a "Compacted" notice, or only what came after the client's
+`_meta.rho.since` cursor, ADR 0064; `session/resume` replays nothing) and
 `session/close` them. Sandbox grants are not saved: a continued session
 starts from `sandbox.json` again. Edit diffs and the streamed output of
 terminal calls are stored for 7 days and replayed with the call; older

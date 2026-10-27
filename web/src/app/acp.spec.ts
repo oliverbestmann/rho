@@ -28,6 +28,30 @@ describe('Acp.session', () => {
   });
 });
 
+describe('Acp reconnects', () => {
+  it('loads a kept session again from its cursor', async () => {
+    const request = vi.fn().mockResolvedValue({ configOptions: [] });
+    const agent = { request } as unknown as acp.ClientContext;
+    const a = TestBed.inject(Acp);
+    TestBed.tick(); // the connecting effect, which starts with an empty cache
+
+    const first = a.session(agent, 's', '/x');
+    await vi.waitFor(() => expect(first.loading()).toBe(false));
+    first.state.cursor = { transcript: 't', entry: 3, len: 0 };
+    (a as unknown as { disconnected(): void }).disconnected();
+
+    const again = a.session(agent, 's', '/x');
+    expect(again).not.toBe(first);
+    expect(again.state).toBe(first.state);
+    expect(request).toHaveBeenLastCalledWith(acp.methods.agent.session.load, {
+      sessionId: 's',
+      cwd: '/x',
+      mcpServers: [],
+      _meta: { rho: { since: { transcript: 't', entry: 3, len: 0 } } },
+    });
+  });
+});
+
 describe('Acp prompts', () => {
   /** An Acp with a loaded session `s`; prompts never end. */
   async function setup() {
