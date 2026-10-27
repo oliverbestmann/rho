@@ -59,8 +59,8 @@
           }
         }
         <!-- An open question is what the turn waits for, so it shows instead. -->
-        @if (stale()) {
-          <p class="offline" role="status"><mat-icon>cloud_off</mat-icon> Offline, reconnecting…</p>
+        @if (reconnecting()) {
+          <app-working>Reconnecting…</app-working>
         } @else if (running() && !asks().length) {
           <app-working />
         }

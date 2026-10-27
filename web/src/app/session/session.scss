@@ -66,23 +66,6 @@ main {
   color: var(--mat-sys-error);
 }
 
-// Like `app-working`, where the next output would appear.
-.offline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  padding-left: 16px;
-  color: var(--mat-sys-on-surface-variant);
-  font: var(--mat-sys-body-medium);
-
-  mat-icon {
-    width: 18px;
-    height: 18px;
-    font-size: 18px;
-  }
-}
-
 // Stands in for a chunk of older entries until it is scrolled to.
 .chunk-placeholder {
   height: 500px;

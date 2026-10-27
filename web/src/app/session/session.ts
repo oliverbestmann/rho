@@ -96,8 +96,10 @@ export class Session {
     computation: ({ id, opened }, prev) =>
       keepShown(opened, prev?.source.id === id ? prev.value : undefined),
   });
-  /** The view shows history from a lost connection. */
-  protected readonly stale = computed(() => !!this.shown() && this.shown() !== this.opened());
+  /** Offline, or the view shows history from a lost connection. */
+  protected readonly reconnecting = computed(
+    () => this.acp.status() !== 'online' || (!!this.shown() && this.shown() !== this.opened()),
+  );
   /** Loaded without error: rho takes prompts for it. */
   protected readonly ready = computed(() => {
     const o = this.opened();

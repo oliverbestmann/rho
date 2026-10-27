@@ -1,10 +1,11 @@
 import { Component } from '@angular/core';
 
-/** Like a chat typing indicator, where the next output appears. */
+/** Like a chat typing indicator, where the next output appears; the content replaces "Working…". */
 @Component({
   selector: 'app-working',
   host: { role: 'status' },
-  template: `<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> Working…`,
+  template: `<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <ng-content>Working…</ng-content>`,
   styles: `
     :host {
       display: flex;

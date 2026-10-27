@@ -7,6 +7,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, errorText } from '../acp';
+import { Working } from '../session/working';
 import { ago } from '../time';
 import { dir, isRunning, listSessions } from './list';
 
@@ -20,6 +21,7 @@ import { dir, isRunning, listSessions } from './list';
     MatProgressBarModule,
     MatProgressSpinnerModule,
     MatToolbarModule,
+    Working,
   ],
   template: `
     <mat-toolbar>
@@ -34,6 +36,9 @@ import { dir, isRunning, listSessions } from './list';
     </mat-toolbar>
     @if (sessions.isLoading()) {
       <mat-progress-bar mode="indeterminate" />
+    }
+    @if (acp.status() !== 'online') {
+      <app-working class="message">Reconnecting…</app-working>
     }
     @if (sessions.error(); as error) {
       <p class="message error">{{ errorText(error) }}</p>
@@ -128,7 +133,7 @@ import { dir, isRunning, listSessions } from './list';
   `,
 })
 export class Sessions {
-  private readonly acp = inject(Acp);
+  protected readonly acp = inject(Acp);
   private readonly router = inject(Router);
   protected readonly ago = ago;
   protected readonly dir = dir;

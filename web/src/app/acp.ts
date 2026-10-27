@@ -31,6 +31,13 @@ export type Ask =
 
 type Status = 'offline' | 'connecting' | 'online';
 
+/** Wait after a lost connection before connecting again. */
+const LOST_MS = 1000;
+/** How long a connection attempt may take. */
+const ATTEMPT_MS = 2000;
+/** Time between the starts of two attempts. */
+const RETRY_MS = 2000;
+
 /** An error with the JSON-RPC `data` rho puts the cause in. */
 export function errorText(e: unknown) {
   if (e instanceof acp.RequestError && typeof e.data === 'string') return `${e.message}: ${e.data}`;
@@ -63,7 +70,6 @@ export class Acp {
   private readonly kept = new Map<string, SessionState>();
   private url?: string;
   private connection?: acp.ClientConnection;
-  private retries = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private seq = 0;
 
@@ -72,9 +78,9 @@ export class Acp {
       const server = this.settings.server();
       untracked(() => this.open(server));
     });
-    // Phones drop sockets while asleep: retry at once when the page is back.
+    // Phones drop sockets while asleep: connect at once when the page is back, dropping a pending attempt.
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && this.status() === 'offline') this.open(this.settings.server());
+      if (!document.hidden && this.status() !== 'online') this.open(this.settings.server());
     });
   }
 
@@ -192,6 +198,7 @@ export class Acp {
       return;
     }
     this.status.set('connecting');
+    const started = Date.now();
 
     const stream = createWebSocketStream(server.url, {
       // Browsers cannot set headers, rho takes the token as a subprotocol.
@@ -220,17 +227,22 @@ export class Acp {
       )
       .connect(stream);
     this.connection = conn;
+    const timeout = setTimeout(() => conn.close(new Error('Timed out')), ATTEMPT_MS);
 
     conn.closed
       .catch(() => undefined)
       .then(() => {
+        clearTimeout(timeout);
         if (this.connection !== conn) return;
+        const lost = this.status() === 'online';
         this.connection = undefined;
         this.disconnected();
         this.status.set('offline');
         this.error.set(`Cannot reach ${server.url}`);
-        const delay = Math.min(1000 * 2 ** this.retries++, 30_000);
-        this.timer = setTimeout(() => this.open(this.settings.server()), delay);
+        // Attempts start RETRY_MS apart; a hidden page waits for `visibilitychange`.
+        const delay = lost ? LOST_MS : started + RETRY_MS - Date.now();
+        if (!document.hidden)
+          this.timer = setTimeout(() => this.open(this.settings.server()), delay);
       });
 
     try {
@@ -245,7 +257,7 @@ export class Acp {
       return;
     }
     if (this.connection !== conn) return;
-    this.retries = 0;
+    clearTimeout(timeout);
     this.error.set(undefined);
     this.status.set('online');
     this.agent.set(conn.agent);
