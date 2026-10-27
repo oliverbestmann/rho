@@ -47,7 +47,7 @@
                   <app-message from="note" [text]="entry.text()" />
                 }
                 @case ('thought') {
-                  <app-thought-card [text]="entry.text()" />
+                  <app-thought-card [text]="entry.text()" [done]="!newest().has(entry)" />
                 }
                 @case ('tool') {
                   <app-tool-card [call]="entry.call()" [terminal]="entry.terminal()" />

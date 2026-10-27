@@ -24,6 +24,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatMenuModule } from '@angular/material/menu';
 import { Acp, Ask, errorText, Opened } from '../acp';
+import type { Entry } from './session-state';
 import { loadHighlighter } from '../highlight';
 import { dir, listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
@@ -132,6 +133,16 @@ export class Session {
     }
     return chunks;
   });
+
+  /** The newest entries: thinking stays open until three newer ones follow it. */
+  protected readonly newest = computed(
+    () =>
+      new Set<Entry>(
+        this.shown()
+          ?.state.entries()
+          .slice(-3 - 1) ?? [],
+      ),
+  );
 
   /** Typed while a turn ran; sent after it, see `Acp.prompt`. */
   protected readonly queued = computed(

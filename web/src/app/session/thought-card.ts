@@ -3,12 +3,12 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { MarkdownPipe } from '../markdown';
 
-/** The agent's thinking, styled like a tool card. */
+/** The agent's thinking, styled like a tool card; it collapses once done. */
 @Component({
   selector: 'app-thought-card',
   imports: [MarkdownPipe, MatExpansionModule, MatIconModule],
   template: `
-    <mat-expansion-panel class="tool" hideToggle expanded>
+    <mat-expansion-panel class="tool" hideToggle [expanded]="!done()">
       <mat-expansion-panel-header>
         <mat-panel-title>
           <mat-icon class="status">psychology</mat-icon>
@@ -37,4 +37,6 @@ import { MarkdownPipe } from '../markdown';
 })
 export class ThoughtCard {
   readonly text = input.required<string>();
+  /** Three newer entries followed it. */
+  readonly done = input(false);
 }
