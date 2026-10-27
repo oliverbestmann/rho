@@ -40,7 +40,7 @@
                 ];
             };
             nodejs = pkgs.nodejs_26;
-            npmDepsHash = "sha256-VTuVhxoXHyQ1tPH+p9wNr7Qol3EKbZAWURmQa7e3CuE=";
+            npmDepsHash = "sha256-n9XZr1coHVAZtAgfNmjRwzTGIZte/J/K/YpdqbgfGuE=";
             NG_CLI_ANALYTICS = "false";
             # sass-embedded ships a prebuilt `dart`, linked for FHS systems.
             nativeBuildInputs = pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.autoPatchelfHook;

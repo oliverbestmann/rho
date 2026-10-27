@@ -37,6 +37,13 @@
     color: var(--mat-sys-on-surface-variant);
   }
 
+  svg.status {
+    fill: currentColor;
+    // Logos fill their whole box; a Material glyph leaves a margin.
+    padding: 2px;
+    box-sizing: border-box;
+  }
+
   &.failed .status {
     color: var(--mat-sys-error);
   }

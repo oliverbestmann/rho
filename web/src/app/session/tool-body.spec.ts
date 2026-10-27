@@ -1,5 +1,6 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { hasBody, toolBody, toolIcon } from './tool-body';
+import { siRust } from 'simple-icons';
+import { hasBody, toolBody, toolIcon, toolLogo } from './tool-body';
 
 const text = (t: string) => ({
   type: 'content' as const,
@@ -24,6 +25,12 @@ describe('toolIcon', () => {
     expect(toolIcon(call('read', { locations: [{ path: '/w/.gitignore' }] }))).toBe('commit');
     expect(toolIcon(call('edit', { locations: [{ path: '/w/LICENSE' }] }))).toBe('edit');
     expect(toolIcon(call('read'))).toBe('description');
+  });
+
+  it('shows a language logo for code files', () => {
+    expect(toolLogo(call('edit', { locations: [{ path: '/w/main.RS' }] }))).toBe(siRust.path);
+    expect(toolLogo(call('read', { locations: [{ path: '/w/README.md' }] }))).toBeUndefined();
+    expect(toolLogo(call('execute', { locations: [{ path: '/w/main.rs' }] }))).toBeUndefined();
   });
 
   it('shows a commit icon for git commit and push', () => {

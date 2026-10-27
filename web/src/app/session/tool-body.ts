@@ -1,6 +1,21 @@
 import { Pipe, PipeTransform } from '@angular/core';
 import type * as acp from '@agentclientprotocol/sdk';
 import { structuredPatch } from 'diff';
+import {
+  siC,
+  siCplusplus,
+  siGo,
+  siKotlin,
+  siNixos,
+  siOpenjdk,
+  siPython,
+  siReact,
+  siRuby,
+  siRust,
+  siSwift,
+  siTypescript,
+  type SimpleIcon,
+} from 'simple-icons';
 import { blockText } from './session-state';
 
 const KIND_ICONS: Record<string, string> = {
@@ -52,22 +67,48 @@ const FILE_ICONS: Record<string, string> = {
   '.gitmodules': 'commit',
   '.env': 'settings',
   '.editorconfig': 'settings',
-  ...Object.fromEntries(
-    ['rs', 'go', 'ts', 'tsx', 'jsx', 'py', 'java', 'kt', 'c', 'h', 'cpp', 'swift', 'rb', 'nix'].map(
-      (e) => [e, 'code'],
-    ),
-  ),
 };
 
+/** Language logos (Simple Icons) for code files, which have no Material icon. */
+const LOGOS: Record<string, SimpleIcon> = {
+  rs: siRust,
+  go: siGo,
+  ts: siTypescript,
+  tsx: siReact,
+  jsx: siReact,
+  py: siPython,
+  java: siOpenjdk,
+  kt: siKotlin,
+  c: siC,
+  h: siC,
+  cpp: siCplusplus,
+  swift: siSwift,
+  rb: siRuby,
+  nix: siNixos,
+};
+
+/** The file a Read, Write or Edit is about. */
+function filePath(call: acp.ToolCall) {
+  const path = call.locations?.[0]?.path;
+  return call.kind === 'read' || call.kind === 'edit' ? path : undefined;
+}
+
+/** The SVG path of the language logo for a Read, Write or Edit of a code file. */
+export function toolLogo(call: acp.ToolCall) {
+  const path = filePath(call);
+  return path ? LOGOS[ext(path)]?.path : undefined;
+}
+
 /**
- * The Material icon for a tool call: the file type for a Read, Write or Edit,
- * a commit icon for a git commit or push, else the icon of its kind.
+ * The Material icon for a tool call: the file type for a Read, Write or Edit
+ * (`code` for one with a `toolLogo`), a commit icon for a git commit or push,
+ * else the icon of its kind.
  */
 export function toolIcon(call: acp.ToolCall) {
-  const path = call.locations?.[0]?.path;
-  if ((call.kind === 'read' || call.kind === 'edit') && path) {
+  const path = filePath(call);
+  if (path) {
     const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
-    const icon = FILE_ICONS[name] ?? FILE_ICONS[ext(path)];
+    const icon = FILE_ICONS[name] ?? FILE_ICONS[ext(path)] ?? (LOGOS[ext(path)] && 'code');
     if (icon) return icon;
   }
   const command = (call.rawInput as { command?: unknown } | undefined)?.command;

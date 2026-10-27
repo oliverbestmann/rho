@@ -6,7 +6,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
 import { TerminalView } from './terminal';
-import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
+import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
 
 /** A tool call: status and title, its output when expanded. */
 @Component({
@@ -35,6 +35,10 @@ import { hasBody, toolIcon, ToolBodyPipe } from './tool-body';
             <mat-spinner class="status" diameter="20" />
           } @else if (c.status === 'failed') {
             <mat-icon class="status">error</mat-icon>
+          } @else if (logo(c); as path) {
+            <svg class="status" viewBox="0 0 24 24" aria-hidden="true">
+              <path [attr.d]="path" />
+            </svg>
           } @else {
             <mat-icon class="status">{{ icon(c) }}</mat-icon>
           }
@@ -58,5 +62,6 @@ export class ToolCard {
   /** Output for a terminal card, shown with xterm.js instead of markdown. */
   readonly terminal = input<string>();
   protected readonly icon = toolIcon;
+  protected readonly logo = toolLogo;
   protected readonly hasBody = hasBody;
 }
