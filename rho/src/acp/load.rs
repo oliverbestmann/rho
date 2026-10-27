@@ -2,7 +2,7 @@
 //! to an open one) and replay its history.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
@@ -40,8 +40,8 @@ impl Replay {
 }
 
 /// `session/load` (with a replay) and `session/resume`: opens the session
-/// with `open_stored`, answers with `response`, then makes the connection
-/// ready and sends the commands.
+/// (the one it joined, for an alias) with `open_stored`, answers with
+/// `response`, then makes the connection ready and sends the commands.
 #[expect(clippy::too_many_arguments, reason = "the two handlers' shared body")]
 pub(super) async fn attach<T: JsonRpcResponse>(
     agent: &Arc<Agent>,
@@ -54,40 +54,97 @@ pub(super) async fn attach<T: JsonRpcResponse>(
     responder: Responder<T>,
     response: impl FnOnce(Vec<SessionConfigOption>) -> T,
 ) -> Result<(), Error> {
-    match open_stored(agent, state, cx, &sid, cwd, additional_dirs, replay).await {
-        Ok((frontend, options, commands, resume)) => {
-            responder.respond(response(options))?;
-            frontend.ready(state.conn);
-            if let Some(ctx) = resume {
-                let (agent, hub) = (agent.clone(), state.hub.clone());
-                let sid = sid.clone();
-                tokio::spawn(async move { run_unprompted(&agent, &hub, &sid, &ctx).await });
+    let opened = async {
+        // An alias opens its session where it is, whatever the client says.
+        let (target, cwd, dirs) = match joined(agent, &sid, &cwd).await? {
+            Some(info) => {
+                let target = SessionId::new(info.id.as_str());
+                state.hub.alias(&sid, &target);
+                (target, info.cwd, info.additional_dirs)
             }
-            send_commands(cx, &sid, commands)
+            None => (sid.clone(), cwd, additional_dirs),
+        };
+        open_stored(agent, state, cx, &target, &sid, cwd, dirs, replay).await
+    };
+    match opened.await {
+        Ok(Opened {
+            frontend,
+            options,
+            commands,
+            resume,
+        }) => {
+            responder.respond(response(options))?;
+            ready(agent, state, cx, &sid, &frontend, commands, resume)
         }
         Err(e) => responder.respond_with_internal_error(format!("{e:#}")),
     }
 }
 
-/// The open session (also one opened by another connection), or the stored
-/// one continued. The connection gets `replay` first.
-/// Returns its frontend, config options, commands and, for a session that
-/// goes on with open tool calls, its context to start that run with. Call
-/// `AcpFrontend::ready` after the response.
-async fn open_stored(
+/// The stored session `sid` joined, if it did (ADR 0065).
+/// shortcut: looks in the database of `cwd` only; look in the target's if
+/// `sessions_db` ever splits by cwd.
+async fn joined(
+    agent: &Agent,
+    sid: &SessionId,
+    cwd: &Path,
+) -> anyhow::Result<Option<store::SessionInfo>> {
+    let Some(db) = &agent.sessions_db else {
+        return Ok(None);
+    };
+    let path = db(cwd);
+    let store = tokio::task::spawn_blocking(move || store::Store::open(path)).await??;
+    let info = store.session(&store::SessionId::new(&*sid.0)).await?;
+    match info.and_then(|i| i.alias_of) {
+        Some(target) => store.session(&target).await,
+        None => Ok(None),
+    }
+}
+
+/// After the response: the connection that opened the session as `sid` is
+/// ready, gets the commands, and a session that goes on with open tool
+/// calls starts that run.
+pub(super) fn ready(
     agent: &Arc<Agent>,
     state: &Arc<State>,
     cx: &ConnectionTo<Client>,
     sid: &SessionId,
+    frontend: &AcpFrontend,
+    commands: Vec<AvailableCommand>,
+    resume: Option<Context>,
+) -> Result<(), Error> {
+    frontend.ready(state.conn);
+    if let Some(ctx) = resume {
+        let (agent, hub) = (agent.clone(), state.hub.clone());
+        let sid = sid.clone();
+        tokio::spawn(async move { run_unprompted(&agent, &hub, &sid, &ctx).await });
+    }
+    send_commands(cx, sid, commands)
+}
+
+/// What `open_stored` opened.
+pub(super) struct Opened {
+    pub(super) frontend: Arc<AcpFrontend>,
+    pub(super) options: Vec<SessionConfigOption>,
+    pub(super) commands: Vec<AvailableCommand>,
+    /// For a session that goes on with open tool calls, its context to
+    /// start that run with.
+    pub(super) resume: Option<Context>,
+}
+
+/// The open session `sid` (also one opened by another connection), or the
+/// stored one continued. The connection, which knows it as `alias`, gets
+/// `replay` first. Call `ready` after the response.
+#[expect(clippy::too_many_arguments, reason = "load, resume and join")]
+pub(super) async fn open_stored(
+    agent: &Arc<Agent>,
+    state: &Arc<State>,
+    cx: &ConnectionTo<Client>,
+    sid: &SessionId,
+    alias: &SessionId,
     cwd: PathBuf,
     additional_dirs: Vec<PathBuf>,
     replay: Replay,
-) -> anyhow::Result<(
-    Arc<AcpFrontend>,
-    Vec<SessionConfigOption>,
-    Vec<AvailableCommand>,
-    Option<Context>,
-)> {
+) -> anyhow::Result<Opened> {
     let opening = state.hub.opening.lock().await;
     // An open session takes the new directories after the replay, so the
     // notice follows the history.
@@ -106,7 +163,7 @@ async fn open_stored(
             )
         }
         None => {
-            let frontend = AcpFrontend::new(sid, &cwd);
+            let frontend = AcpFrontend::new(&cwd);
             let session = agent
                 .resume_session(
                     &store::SessionId::new(&*sid.0),
@@ -130,7 +187,7 @@ async fn open_stored(
         }
     };
     drop(opening);
-    let viewer = state.viewer(cx, false);
+    let viewer = state.viewer(cx, alias, false);
     match replay {
         Replay::Since(since) => {
             frontend.attach_replayed(viewer, since);
@@ -146,7 +203,12 @@ async fn open_stored(
         // The usage the others saw; the run's next request sends a new one.
         frontend.resend_usage(state.conn, ctx.session_info().context_window);
         let options = frontend.options();
-        return Ok((frontend, options, commands, None));
+        return Ok(Opened {
+            frontend,
+            options,
+            commands,
+            resume: None,
+        });
     };
     if let Some(dirs) = dirs
         && agent.set_additional_dirs(&mut session, dirs)
@@ -159,7 +221,12 @@ async fn open_stored(
     let options = frontend.remember(config_options(&session));
     // Asks again what a restart left open, after the response.
     let resume = resuming.then_some(ctx);
-    Ok((frontend, options, commands, resume))
+    Ok(Opened {
+        frontend,
+        options,
+        commands,
+        resume,
+    })
 }
 
 /// Puts the history of a session that opens into its transcript: the

@@ -1,5 +1,5 @@
 //! The session's slash commands: rho's own (`/compact`, `/fork`, `/usage`,
-//! `/redact`) and the extensions'.
+//! `/redact`, `/sessions:list`) and the extensions'.
 
 use anyhow::{Context as _, Result, bail};
 
@@ -33,6 +33,11 @@ impl Agent {
                 "Mask a phrase in all saved sessions, the history index and memories",
                 Some("exact phrase"),
             ),
+            (
+                "sessions:list",
+                "List the sessions used last, with their ids",
+                None,
+            ),
         ];
         let own = own.map(|(name, description, hint)| SlashCommand {
             name: CommandName::from_static(name),
@@ -55,6 +60,7 @@ impl Agent {
         let result = match name {
             "compact" => self.compact(session, args).await,
             "fork" => fork(session).await,
+            "sessions:list" => list(session).await,
             "redact" => self.redact(session, args).await,
             "usage" => {
                 let report = session.usage_report();
@@ -145,6 +151,35 @@ async fn fork(session: &mut Session) -> Result<()> {
         "/fork",
         &format!("Forked into [{text}](/session/{id})."),
     );
+    Ok(())
+}
+
+/// How many sessions `/sessions:list` shows.
+const LISTED: usize = 10;
+
+/// `/sessions:list`: the sessions updated last, but not this one and no
+/// aliases (ADR 0065), with id, title and cwd.
+async fn list(session: &Session) -> Result<()> {
+    let store = session.ctx.store().context("sessions are not saved")?;
+    // shortcut: fewer than LISTED if most of the newest are aliases; page on if that happens.
+    let page = store.list(None, None, 5 * LISTED).await?;
+    let this = session.ctx.session_id();
+    let lines: Vec<_> = page
+        .sessions
+        .iter()
+        .filter(|s| s.alias_of.is_none() && s.id != *this)
+        .take(LISTED)
+        .map(|s| {
+            let title = s.title.as_deref().unwrap_or("(untitled)");
+            format!("- `{}` {title} (`{}`)", s.id, s.cwd.display())
+        })
+        .collect();
+    let text = if lines.is_empty() {
+        "No other sessions.".to_string()
+    } else {
+        lines.join("\n")
+    };
+    reply(session, "/sessions:list", &text);
     Ok(())
 }
 

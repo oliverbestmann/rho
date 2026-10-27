@@ -133,6 +133,11 @@ CREATE INDEX items_by_call ON items (session_id, tool_call_id)
     WHERE tool_call_id IS NOT NULL;
 CREATE INDEX items_with_display ON items (created_at) WHERE display IS NOT NULL;
 "#,
+    r#"
+-- The session this one joined (ADR 0065): clients that use this id get
+-- that one. Always a session that is no alias itself.
+ALTER TABLE sessions ADD COLUMN alias_of TEXT REFERENCES sessions (id) ON DELETE SET NULL;
+"#,
 ];
 
 /// Edit diffs and streamed outputs older than this are deleted; the call
@@ -142,7 +147,7 @@ const DIFF_DAYS: i64 = 7;
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
     output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
     last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, features, \
-    extension_state, created_at, updated_at";
+    extension_state, created_at, updated_at, alias_of";
 
 pub const MASK: &str = "REDACTED";
 
@@ -176,6 +181,8 @@ pub struct SessionInfo {
     /// Unix milliseconds.
     pub created_at: i64,
     pub updated_at: i64,
+    /// The session this one joined, see `Store::join`.
+    pub alias_of: Option<SessionId>,
 }
 
 /// One page of `Store::list`, newest first.
@@ -893,7 +900,7 @@ impl Store {
             // Every column but id, title and the timestamps.
             let copied = COLUMNS
                 .split(", ")
-                .filter(|c| !["id", "title", "created_at", "updated_at"].contains(c))
+                .filter(|c| !["id", "title", "created_at", "updated_at", "alias_of"].contains(c))
                 .collect::<Vec<_>>()
                 .join(", ");
             let n = tx.execute(
@@ -933,6 +940,42 @@ impl Store {
             )?;
             tx.commit()?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Makes `id` an alias of the session whose id starts with `prefix`:
+    /// clients that use `id` get that one. A target that is an alias stands
+    /// for its session, and aliases of `id` move along, so aliases point at
+    /// no alias. Returns the session `id` stands for now.
+    pub(crate) async fn join(&self, id: &SessionId, prefix: &str) -> Result<SessionInfo> {
+        let (id, prefix) = (id.clone(), prefix.to_string());
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT COALESCE(alias_of, id) FROM sessions
+                 WHERE substr(id, 1, length(?1)) = ?1 LIMIT 2",
+            )?;
+            let found = stmt
+                .query_map([&prefix], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<SessionId>>>()?;
+            drop(stmt);
+            let target = match <[SessionId; 1]>::try_from(found) {
+                Ok([target]) => target,
+                Err(found) if found.is_empty() => bail!("no session starts with {prefix}"),
+                Err(_) => bail!("more than one session starts with {prefix}"),
+            };
+            if target == id {
+                bail!("session {id} cannot join itself");
+            }
+            tx.execute(
+                "UPDATE sessions SET alias_of = ?2 WHERE id = ?1 OR alias_of = ?1",
+                params![id, target],
+            )?;
+            let sql = format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1");
+            let info = tx.query_row(&sql, [&target], read_info)??;
+            tx.commit()?;
+            Ok(info)
         })
         .await
     }
@@ -999,6 +1042,7 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
         extension_state: Default::default(),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
+        alias_of: r.get("alias_of")?,
     };
     Ok((|| {
         Ok(SessionInfo {
@@ -1315,6 +1359,36 @@ mod tests {
         assert_eq!(ids(&page), ["a"]);
         assert!(page.next.is_none());
         assert_eq!(store.list(None, None, 10).await.unwrap().sessions.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn aliases_point_at_no_alias() {
+        let store = Store::memory().unwrap();
+        for id in ["a", "b", "c"] {
+            store.save_state(state(id, "/w")).await.unwrap();
+        }
+        let id = SessionId::new;
+        let alias = async |s| store.session(&id(s)).await.unwrap().unwrap().alias_of;
+        assert_eq!(store.join(&id("a"), "b").await.unwrap().id, id("b"));
+        // b's alias a moves along to c.
+        store.join(&id("b"), "c").await.unwrap();
+        assert_eq!(alias("a").await, Some(id("c")));
+        assert_eq!(alias("b").await, Some(id("c")));
+        // Joining an alias joins its session.
+        let err = store.join(&id("c"), "a").await.unwrap_err();
+        assert!(format!("{err:#}").contains("itself"), "{err:#}");
+        assert!(store.join(&id("c"), "nope").await.is_err());
+        assert_eq!(alias("c").await, None);
+
+        // By prefix; one that matches only a session and its aliases is
+        // that session.
+        for s in ["x1", "x2", "y"] {
+            store.save_state(state(s, "/w")).await.unwrap();
+        }
+        let err = store.join(&id("y"), "x").await.unwrap_err();
+        assert!(format!("{err:#}").contains("more than one"), "{err:#}");
+        store.join(&id("x2"), "x1").await.unwrap();
+        assert_eq!(store.join(&id("y"), "x").await.unwrap().id, id("x1"));
     }
 
     #[test]

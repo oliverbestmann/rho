@@ -237,6 +237,14 @@ lists; the current session stays open, and the reply links to the fork in
 the web client. The fork's history ends with a system note that goes to the
 model with the next prompt and asks it to give the fork a new title.
 
+`/sessions:list` shows the 10 sessions updated last, with id, title and
+cwd. `/session:join <id>` (or a start of the id that only one session
+has) in a new session (say, one started in Zed) makes
+it an alias of that session (say, one started in the web client): the
+client gets its history and from then on talks to it, also after a
+restart, in the joined session's cwd. The alias's own rows stay in the
+database for History; `session/list` leaves aliases out (ADR 0065).
+
 `/redact <phrase>` replaces an exact phrase with the secrets marker
 (`store::MASK`) in every stored session (all epochs, titles), in the open
 session, and through each extension's `redact` hook in the `History`

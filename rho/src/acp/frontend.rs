@@ -41,6 +41,9 @@ struct Streamed {
 #[derive(Clone)]
 pub(super) struct Viewer {
     pub(super) conn: ConnId,
+    /// The id the connection knows the session by: an alias that joined
+    /// it (ADR 0065), or its own.
+    pub(super) sid: SessionId,
     pub(super) cx: ConnectionTo<Client>,
     /// The client can show elicitation forms, see `Frontend::ask`.
     pub(super) forms: bool,
@@ -230,7 +233,6 @@ impl Transcript {
 
 /// One session's frontend, for every connection that opened it.
 pub(super) struct AcpFrontend {
-    sid: SessionId,
     /// Tells this transcript from the session's earlier ones, see `Cursor`.
     id: String,
     /// For `Bash` calls shown as terminals.
@@ -260,9 +262,8 @@ pub(super) struct AcpFrontend {
 }
 
 impl AcpFrontend {
-    pub(super) fn new(sid: &SessionId, cwd: &Path) -> Arc<Self> {
+    pub(super) fn new(cwd: &Path) -> Arc<Self> {
         Arc::new(Self {
-            sid: sid.clone(),
             id: format!("{:016x}", getrandom::u64().unwrap_or_default()),
             cwd: cwd.to_path_buf(),
             notices: AtomicU64::new(0),
@@ -403,9 +404,13 @@ impl AcpFrontend {
     /// get ready while it waits. The first answer wins; the other requests
     /// are dropped, which cancels them. Errors do not count: a client that
     /// went away does not answer for the others.
-    async fn first_answer<R>(&self, fits: impl Fn(&Viewer) -> bool, request: R) -> R::Response
+    async fn first_answer<R>(
+        &self,
+        fits: impl Fn(&Viewer) -> bool,
+        request: impl Fn(&SessionId) -> R,
+    ) -> R::Response
     where
-        R: JsonRpcRequest + Clone,
+        R: JsonRpcRequest,
     {
         // Under the lock, so a viewer is in the list or in `ready`.
         let (mut ready, viewers) = {
@@ -424,7 +429,7 @@ impl AcpFrontend {
             if let Some(old) = asked.insert(v.conn, abort) {
                 old.abort();
             }
-            let answer = v.cx.send_request(request.clone()).block_task();
+            let answer = v.cx.send_request(request(&v.sid)).block_task();
             Abortable::new(answer, registration)
         };
         let mut pending: FuturesUnordered<_> = viewers.iter().map(&mut ask).collect();
@@ -601,7 +606,7 @@ impl AcpFrontend {
     /// Sends `update` to `v`, or holds it while the session starts. `pos`:
     /// where it ends in the transcript, sent as `_meta.rho.cursor`.
     fn deliver(&self, v: &mut Viewer, update: SessionUpdate, to: To, pos: Option<Pos>) {
-        let mut notification = SessionNotification::new(self.sid.clone(), update);
+        let mut notification = SessionNotification::new(v.sid.clone(), update);
         if let Some(pos) = pos {
             let cursor = Cursor {
                 transcript: self.id.clone(),
@@ -670,14 +675,16 @@ impl Frontend for AcpFrontend {
                 None => format!("confirm-{:016x}", getrandom::u64().unwrap_or_default()),
             };
             let call = ToolCallUpdate::new(id, fields);
-            let request = RequestPermissionRequest::new(
-                self.sid.clone(),
-                call,
-                vec![
-                    PermissionOption::new("allow", allow, PermissionOptionKind::AllowOnce),
-                    PermissionOption::new("reject", reject, PermissionOptionKind::RejectOnce),
-                ],
-            );
+            let request = |sid: &SessionId| {
+                RequestPermissionRequest::new(
+                    sid.clone(),
+                    call.clone(),
+                    vec![
+                        PermissionOption::new("allow", allow, PermissionOptionKind::AllowOnce),
+                        PermissionOption::new("reject", reject, PermissionOptionKind::RejectOnce),
+                    ],
+                )
+            };
             let r = self.first_answer(|_| true, request).await;
             matches!(r.outcome, RequestPermissionOutcome::Selected(s) if &*s.option_id.0 == "allow")
         })
@@ -693,13 +700,15 @@ impl Frontend for AcpFrontend {
             if unsupported {
                 return FormReply::Unsupported;
             }
-            let request = CreateElicitationRequest::new(
-                ElicitationFormMode::new(
-                    ElicitationSessionScope::new(self.sid.clone()),
-                    form_schema(form),
-                ),
-                form.message.clone(),
-            );
+            let request = |sid: &SessionId| {
+                CreateElicitationRequest::new(
+                    ElicitationFormMode::new(
+                        ElicitationSessionScope::new(sid.clone()),
+                        form_schema(form),
+                    ),
+                    form.message.clone(),
+                )
+            };
             match self.first_answer(|v| v.forms, request).await.action {
                 ElicitationAction::Accept(a) => FormReply::Answers(form_answers(a.content)),
                 _ => FormReply::Declined,

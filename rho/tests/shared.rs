@@ -1455,3 +1455,106 @@ async fn loading_again_with_a_cursor_sends_only_what_came_after() {
     assert!(!reset(&plain));
     assert_eq!(chunks(&note_updates(&plain)).len(), 4);
 }
+
+#[tokio::test]
+async fn a_session_joins_another_and_stands_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (web_cwd, zed_cwd) = (dir.path().join("web"), dir.path().join("zed"));
+    std::fs::create_dir_all(&web_cwd).unwrap();
+    std::fs::create_dir_all(&zed_cwd).unwrap();
+    let provider = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let hub = Arc::new(Hub::default());
+
+    // The web client starts the session that is joined later.
+    let cwd = web_cwd.clone();
+    let joined = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async move |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                cx.send_request(prompt(&sid, "hi")).block_task().await?;
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Zed starts its own, lists, joins and goes on.
+    let notes = Notes::default();
+    let record = notes.clone();
+    let (cwd, target) = (zed_cwd.clone(), joined.clone());
+    let (sid, listed) = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    record.lock().unwrap().push(n);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(
+                rho::acp::agent_in(agent.clone(), hub.clone(), false),
+                async move |cx: ConnectionTo<_>| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    let sid = cx
+                        .send_request(NewSessionRequest::new(cwd))
+                        .block_task()
+                        .await?
+                        .session_id;
+                    let send = |text: String| cx.send_request(prompt(&sid, &text)).block_task();
+                    send("/sessions:list".into()).await?;
+                    for bad in ["nope", &sid.0] {
+                        let joining = send(format!("/session:join {bad}")).await;
+                        assert!(joining.is_err(), "joined {bad}");
+                    }
+                    // A start of the id is enough.
+                    send(format!("/session:join {}", &target.0[..30])).await?;
+                    let again = send(format!("/session:join {}", target.0)).await;
+                    assert!(again.is_err(), "an alias joined again");
+                    send("more".into()).await?;
+                    let listed = cx
+                        .send_request(ListSessionsRequest::new())
+                        .block_task()
+                        .await?;
+                    Ok((sid, listed))
+                },
+            ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let notes = notes.lock().unwrap().clone();
+    assert!(notes.iter().all(|n| n.session_id == sid), "{notes:?}");
+    // The list with the session to join, its replay, then the prompt that
+    // ran in it.
+    let shown = chunks(&note_updates(&notes));
+    assert!(shown[0].contains(&*joined.0), "{shown:?}");
+    assert_eq!(shown[1..], ["user: hi", "agent: One.", "agent: Two."]);
+    let ids: Vec<_> = listed.sessions.iter().map(|s| &s.session_id).collect();
+    assert_eq!(ids, [&joined]);
+
+    // After a restart the alias still loads the joined session, wherever
+    // the client says it is.
+    let restarted = Arc::new(Hub::default());
+    let replay = load_since(&agent, &restarted, &sid, &zed_cwd, None).await;
+    assert_eq!(
+        chunks(&note_updates(&replay)),
+        ["user: hi", "agent: One.", "user: more", "agent: Two."]
+    );
+}

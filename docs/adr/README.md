@@ -72,3 +72,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0062](0062-server-side-prompt-queue.md) | Prompts queue in the daemon | Accepted |
 | [0063](0063-idle-sessions-unload-after-30-minutes.md) | Idle sessions unload after 30 minutes | Accepted |
 | [0064](0064-reconnects-replay-from-a-cursor.md) | Reconnects replay from a cursor | Accepted |
+| [0065](0065-sessions-join-others-through-aliases.md) | Sessions join others through aliases | Accepted |

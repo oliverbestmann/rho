@@ -60,6 +60,9 @@ impl Drop for Entry {
 /// that is unused for `idle_timeout` is saved and unloaded.
 pub struct Hub {
     pub(super) sessions: Mutex<HashMap<SessionId, Entry>>,
+    /// Sessions that joined another one (ADR 0065), to it. Every method
+    /// that takes a client's id resolves it.
+    aliases: Mutex<HashMap<SessionId, SessionId>>,
     next_run: AtomicU64,
     next_queued: AtomicU64,
     /// Held while a stored session opens, so two connections that open it at
@@ -73,6 +76,7 @@ impl Default for Hub {
     fn default() -> Self {
         Self {
             sessions: Mutex::default(),
+            aliases: Mutex::default(),
             next_run: AtomicU64::default(),
             next_queued: AtomicU64::default(),
             opening: tokio::sync::Mutex::default(),
@@ -90,12 +94,37 @@ impl Hub {
         }
     }
 
+    /// The session `sid` stands for: the one it joined, or itself.
+    fn resolve(&self, sid: &SessionId) -> SessionId {
+        let aliases = self.aliases.lock().unwrap();
+        aliases.get(sid).unwrap_or(sid).clone()
+    }
+
+    pub(super) fn is_alias(&self, sid: &SessionId) -> bool {
+        self.aliases.lock().unwrap().contains_key(sid)
+    }
+
+    /// From now on `sid` stands for `target`. The open session `sid` goes;
+    /// it is returned, so it ends (`session_end`) outside the lock.
+    pub(super) fn alias(&self, sid: &SessionId, target: &SessionId) -> Option<Entry> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let entry = sessions.remove(sid);
+        let mut aliases = self.aliases.lock().unwrap();
+        // Aliases of `sid` move along, like in the store.
+        for t in aliases.values_mut().filter(|t| *t == sid) {
+            *t = target.clone();
+        }
+        aliases.insert(sid.clone(), target.clone());
+        entry
+    }
+
     /// The session, if `conn` opened it.
     pub(super) fn session(
         &self,
         sid: &SessionId,
         conn: ConnId,
     ) -> Option<(SharedSession, Context, Arc<AcpFrontend>)> {
+        let sid = &self.resolve(sid);
         let sessions = self.sessions.lock().unwrap();
         let e = sessions.get(sid)?;
         e.frontend
@@ -105,6 +134,7 @@ impl Hub {
 
     /// `name` is one of the open session's slash commands.
     pub(super) fn is_command(&self, sid: &SessionId, name: &str) -> bool {
+        let sid = &self.resolve(sid);
         let sessions = self.sessions.lock().unwrap();
         sessions
             .get(sid)
@@ -121,6 +151,7 @@ impl Hub {
         Arc<AcpFrontend>,
         Vec<AvailableCommand>,
     )> {
+        let sid = &self.resolve(sid);
         let sessions = self.sessions.lock().unwrap();
         let e = sessions.get(sid)?;
         Some((
@@ -139,6 +170,7 @@ impl Hub {
         sid: &SessionId,
         conn: Option<ConnId>,
     ) -> Option<(SharedSession, Arc<AcpFrontend>, Run, AbortRegistration)> {
+        let sid = &self.resolve(sid);
         let (abort, registration) = AbortHandle::new_pair();
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let mut sessions = self.sessions.lock().unwrap();
@@ -165,6 +197,7 @@ impl Hub {
 
     /// Adds a prompt to the queue of `sid`, if `conn` opened it.
     pub(super) fn enqueue(&self, sid: &SessionId, conn: ConnId, text: String) -> bool {
+        let sid = &self.resolve(sid);
         let mut sessions = self.sessions.lock().unwrap();
         let Some(entry) = sessions.get_mut(sid).filter(|e| e.frontend.viewing(conn)) else {
             return false;
@@ -177,6 +210,7 @@ impl Hub {
 
     /// Removes queued prompt `id` of `sid`, if `conn` opened it.
     pub(super) fn unqueue(&self, sid: &SessionId, conn: ConnId, id: u64) -> bool {
+        let sid = &self.resolve(sid);
         let mut sessions = self.sessions.lock().unwrap();
         let Some(entry) = sessions.get_mut(sid).filter(|e| e.frontend.viewing(conn)) else {
             return false;
@@ -189,6 +223,7 @@ impl Hub {
     /// The next queued prompt, unless the queue is held. `ended`: a turn
     /// just ended, normally or not; `None`: only if nothing runs.
     pub(super) fn take_queued(&self, sid: &SessionId, ended: Option<bool>) -> Option<String> {
+        let sid = &self.resolve(sid);
         let mut sessions = self.sessions.lock().unwrap();
         let entry = sessions.get_mut(sid)?;
         match ended {
@@ -206,12 +241,23 @@ impl Hub {
 
     /// A run is registered for the session.
     pub(super) fn busy(&self, sid: &SessionId) -> bool {
+        let sid = &self.resolve(sid);
         let sessions = self.sessions.lock().unwrap();
         sessions.get(sid).is_some_and(|e| !e.running.is_empty())
     }
 
+    /// The session is open, and nothing runs or waits in its queue.
+    pub(super) fn idle(&self, sid: &SessionId) -> bool {
+        let sid = &self.resolve(sid);
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .get(sid)
+            .is_some_and(|e| e.running.is_empty() && e.queue.is_empty())
+    }
+
     /// Aborts the session's runs, if `conn` opened it.
     pub(super) fn cancel(&self, sid: &SessionId, conn: ConnId) {
+        let sid = &self.resolve(sid);
         if let Some(entry) = self.sessions.lock().unwrap().get_mut(sid)
             && entry.frontend.viewing(conn)
         {
@@ -225,6 +271,7 @@ impl Hub {
     /// `conn` stops looking at `sid` (`session/close`). The last one to go
     /// cancels the runs.
     pub(super) fn close(self: &Arc<Self>, sid: &SessionId, conn: ConnId) {
+        let sid = &self.resolve(sid);
         let mut sessions = self.sessions.lock().unwrap();
         let Some(entry) = sessions.get_mut(sid) else {
             return;

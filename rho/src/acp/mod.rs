@@ -28,6 +28,7 @@ mod config;
 mod dirs;
 mod frontend;
 mod hub;
+mod join;
 mod load;
 mod queue;
 mod shell;
@@ -68,11 +69,13 @@ struct State {
 }
 
 impl State {
-    /// A viewer for `cx`, ready after the response (`AcpFrontend::ready`).
-    /// While the session `starts`, its updates are held until then.
-    fn viewer(&self, cx: &ConnectionTo<Client>, starts: bool) -> Viewer {
+    /// A viewer for `cx` that knows the session as `sid`, ready after the
+    /// response (`AcpFrontend::ready`). While the session `starts`, its
+    /// updates are held until then.
+    fn viewer(&self, cx: &ConnectionTo<Client>, sid: &SessionId, starts: bool) -> Viewer {
         Viewer {
             conn: self.conn,
+            sid: sid.clone(),
             cx: cx.clone(),
             forms: self.caps.forms.load(Ordering::Relaxed),
             terminal: self.caps.terminal_output.load(Ordering::Relaxed),
@@ -180,9 +183,9 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                 let (agent, state) = (new_state.agent.clone(), new_state.clone());
                 // Extension session_start hooks are async; keep them off the dispatch loop.
                 cx.clone().spawn(async move {
-                    let frontend = AcpFrontend::new(&sid, &req.cwd);
+                    let frontend = AcpFrontend::new(&req.cwd);
                     // session_start hooks must not ask: questions wait for the response.
-                    frontend.attach(state.viewer(&cx, true));
+                    frontend.attach(state.viewer(&cx, &sid, true));
                     let started = agent
                         .start_session(id, req.cwd, req.additional_directories, frontend.clone())
                         .await;
@@ -280,7 +283,16 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+            async move |req: PromptRequest,
+                        responder: Responder<PromptResponse>,
+                        cx: ConnectionTo<Client>| {
+                if let Some((join::COMMAND, target)) = slash_command(&req.prompt) {
+                    let (agent, state) = (prompt_state.agent.clone(), prompt_state.clone());
+                    let sid = req.session_id;
+                    return cx.clone().spawn(async move {
+                        join::join(&agent, &state, &cx, sid, target, responder).await
+                    });
+                }
                 let conn = prompt_state.conn;
                 let Some((session, frontend, run, registration)) =
                     prompt_state.hub.start_run(&req.session_id, Some(conn))
@@ -429,7 +441,13 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
 /// Built-in slash commands plus the extensions'.
 fn commands(agent: &Agent, session: &Session) -> Vec<AvailableCommand> {
     let commands = agent.commands(session).into_iter();
+    let join = crate::extension::SlashCommand {
+        name: crate::extension::CommandName::from_static(join::COMMAND),
+        description: "Continue another session here; this one is gone for clients".into(),
+        hint: Some("session id or its start, see /sessions:list".into()),
+    };
     commands
+        .chain([join])
         .map(|c| {
             let command = AvailableCommand::new(c.name.to_string(), c.description);
             match c.hint {
@@ -518,9 +536,11 @@ async fn list_sessions(
     let page = store
         .list(req.cwd.as_deref(), req.cursor.as_deref(), LIST_PAGE)
         .await?;
+    // A page may hold fewer sessions then; the cursor still works.
     let sessions = page
         .sessions
         .into_iter()
+        .filter(|s| s.alias_of.is_none())
         .map(|s| {
             let sid = SessionId::new(s.id.to_string());
             let info = AcpSessionInfo::new(sid.clone(), s.cwd)
