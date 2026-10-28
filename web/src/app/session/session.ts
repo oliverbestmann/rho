@@ -20,10 +20,9 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectChange } from '@angular/material/select';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatMenuModule } from '@angular/material/menu';
-import { Acp, Ask, errorText, Opened } from '../acp';
+import { Acp, Ask, Opened } from '../acp';
 import type { Entry } from './session-state';
 import { loadHighlighter } from '../highlight';
 import { dir, listSessions } from '../sessions/list';
@@ -71,7 +70,6 @@ export class Session {
   readonly listTitle = input<string | undefined>(undefined, { alias: 'title' });
 
   private readonly acp = inject(Acp);
-  private readonly snackBar = inject(MatSnackBar);
 
   /** Kept in localStorage per session, so it survives a reload. */
   protected readonly draft = linkedSignal(() => localStorage.getItem(draftKey(this.id())) ?? '');
@@ -254,7 +252,7 @@ export class Session {
       });
       state.options.set(res.configOptions);
     } catch (e) {
-      this.snackBar.open(errorText(e), 'OK');
+      this.acp.report(e);
       // Back to the value rho still has.
       change.source.value = option.currentValue;
     }

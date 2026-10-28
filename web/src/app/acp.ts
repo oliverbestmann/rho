@@ -1,6 +1,14 @@
-import { effect, inject, Injectable, signal, untracked, WritableSignal } from '@angular/core';
+import {
+  DestroyRef,
+  effect,
+  inject,
+  Injectable,
+  signal,
+  untracked,
+  WritableSignal,
+} from '@angular/core';
 import * as acp from '@agentclientprotocol/sdk';
-import { MatSnackBar } from '@angular/material/snack-bar';
+import { MatSnackBar, MatSnackBarRef, TextOnlySnackBar } from '@angular/material/snack-bar';
 import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client';
 import { Server, Settings } from './settings';
 import { SessionState } from './session/session-state';
@@ -78,10 +86,37 @@ export class Acp {
       const server = this.settings.server();
       untracked(() => this.open(server));
     });
-    // Phones drop sockets while asleep: connect at once when the page is back, dropping a pending attempt.
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && this.status() !== 'online') this.open(this.settings.server());
-    });
+    // Phones drop sockets while asleep or without network: connect at once when both are back,
+    // dropping a pending attempt.
+    const done = new AbortController();
+    inject(DestroyRef).onDestroy(() => done.abort());
+    const { signal } = done;
+    const resume = () => {
+      if (this.canConnect() && this.status() !== 'online') this.open(this.settings.server());
+    };
+    document.addEventListener('visibilitychange', resume, { signal });
+    let note: MatSnackBarRef<TextOnlySnackBar> | undefined;
+    window.addEventListener(
+      'online',
+      () => {
+        note?.dismiss();
+        resume();
+      },
+      { signal },
+    );
+    const offline = () => (note = this.snackBar.open('No network'));
+    window.addEventListener('offline', offline, { signal });
+    if (!navigator.onLine) offline();
+  }
+
+  /** Hidden pages and devices without network wait for the events that end that. */
+  private canConnect() {
+    return !document.hidden && navigator.onLine;
+  }
+
+  /** Only rho's own errors: a lost connection shows as the reconnecting marker. */
+  report(e: unknown) {
+    if (e instanceof acp.RequestError) this.snackBar.open(errorText(e), 'OK');
   }
 
   /**
@@ -132,7 +167,7 @@ export class Acp {
     try {
       await this.agent()?.request(method, params);
     } catch (e) {
-      this.snackBar.open(errorText(e), 'OK');
+      this.report(e);
     }
   }
 
@@ -161,8 +196,7 @@ export class Acp {
         this.snackBar.open(`Stopped: ${res.stopReason}`, 'OK', { duration: 5000 });
       }
     } catch (e) {
-      // A lost connection shows as the offline note in the session.
-      if (!(e instanceof Event) && this.agent() === agent) this.snackBar.open(errorText(e), 'OK');
+      this.report(e);
     } finally {
       prompting(false);
     }
@@ -239,9 +273,9 @@ export class Acp {
         this.disconnected();
         this.status.set('offline');
         this.error.set(`Cannot reach ${server.url}`);
-        // Attempts start RETRY_MS apart; a hidden page waits for `visibilitychange`.
+        // Attempts start RETRY_MS apart.
         const delay = lost ? LOST_MS : started + RETRY_MS - Date.now();
-        if (!document.hidden)
+        if (this.canConnect())
           this.timer = setTimeout(() => this.open(this.settings.server()), delay);
       });
 

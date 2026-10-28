@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import * as acp from '@agentclientprotocol/sdk';
 import { Acp, errorText } from './acp';
 import { Settings } from './settings';
+import { MatSnackBar } from '@angular/material/snack-bar';
 
 describe('Acp.session', () => {
   it('loads a session once and keeps it', async () => {
@@ -85,13 +86,16 @@ class FakeSocket extends EventTarget {
 
 describe('Acp reconnect policy', () => {
   let hidden = false;
+  let online = true;
   let a: Acp;
 
   beforeEach(async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     vi.stubGlobal('WebSocket', FakeSocket);
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => online });
     hidden = false;
+    online = true;
     FakeSocket.all = [];
     FakeSocket.answering = true;
     TestBed.inject(Settings).server.set({ url: 'ws://rho', token: 't' });
@@ -101,12 +105,10 @@ describe('Acp reconnect policy', () => {
   });
 
   afterEach(() => {
-    // Without a server this Acp ignores later tests' `visibilitychange`.
-    TestBed.inject(Settings).server.set(undefined);
-    TestBed.tick();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     delete (document as { hidden?: boolean }).hidden;
+    delete (navigator as { onLine?: boolean }).onLine;
   });
 
   function setHidden(value: boolean) {
@@ -158,6 +160,28 @@ describe('Acp reconnect policy', () => {
     expect(FakeSocket.all[1].closed).toBe(true);
     expect(FakeSocket.all).toHaveLength(3);
     await vi.waitFor(() => expect(a.status()).toBe('online'));
+  });
+
+  it('waits without network and connects at once when it is back', async () => {
+    online = false;
+    window.dispatchEvent(new Event('offline'));
+    FakeSocket.all[0].close();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(FakeSocket.all).toHaveLength(1);
+
+    online = true;
+    window.dispatchEvent(new Event('online'));
+    expect(FakeSocket.all).toHaveLength(2);
+    await vi.waitFor(() => expect(a.status()).toBe('online'));
+  });
+
+  it('shows rho errors but not a lost connection', () => {
+    const open = vi.spyOn(TestBed.inject(MatSnackBar), 'open');
+    a.report(new Error('ACP connection closed'));
+    a.report(new Event('error'));
+    expect(open).not.toHaveBeenCalled();
+    a.report(new acp.RequestError(-32603, 'Internal error', 'boom'));
+    expect(open).toHaveBeenCalledWith('Internal error: boom', 'OK');
   });
 });
 
