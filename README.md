@@ -7,7 +7,7 @@ A small ACP-native coding agent in Rust. Prototype.
 - ACP agent for Zed and other clients, plus a one-shot CLI. No TUI.
 - Claude through a Pro/Max subscription (OAuth), with adaptive thinking and
   prompt caching. Claude and GPT models through GitHub Copilot.
-- `models.json` limits the models a session may use, by path.
+- The `models` config limits the models a session may use, by path.
 - A web client in `web/` for following, answering and starting sessions
   from a phone, through the daemon.
 - Built-in tools: `Read`, `ReadImage`, `Write`, `Edit` (exact replacements),
@@ -71,7 +71,8 @@ Cargo workspace:
 - `rho/src/provider.rs` - `Provider` trait (streamed `Event`s) and a `provider/model` registry
 - `rho/src/anthropic.rs` - Anthropic Messages API with Claude Pro/Max subscription shaping
 - `rho/src/copilot.rs` - GitHub Copilot: login, token exchange, Claude via `anthropic`, GPT via `openai.rs` (Responses API)
-- `rho/src/models.rs` - `models.json`: allowed, default and compaction models by path
+- `rho/src/config.rs` - `config.d`: merged JSON config and prompt files
+- `rho/src/models.rs` - `"models"` config: allowed, default and compaction models by path
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
 - `rho/src/tools.rs` - `Tool` trait and built-ins: `Read`, `ReadImage`, `Write`, `Bash`, `RequestAccess`
 - `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
@@ -128,23 +129,49 @@ RHO_AUTH_FILE=$PWD/_rho-auth.json cargo test -p rho --test live -- --ignored --n
 Credentials live in `~/.config/rho/auth.json` (`RHO_AUTH_FILE` overrides). The
 layout is the same as pi's `~/.pi/agent/auth.json`.
 
+## Configuration
+
+Configuration lives in `~/.config/rho/config.d` (`rho/src/config.rs`, ADR
+0066). Its `*.json` files are read at startup in file name order and each one
+is applied on top of the earlier ones as a JSON merge patch (RFC 7396):
+objects merge, other values (arrays too) replace, and `null` deletes a key.
+The result has one key per subsystem:
+
+```json
+{
+  "sandbox":  { "paths": { "~/go": "readwrite" } },
+  "features": { "ssh": { "paths": { "~/.ssh": "read" } } },
+  "models":   { "~/github": { "allow": ["github-copilot/*"] } },
+  "mcps":     { "github": { "type": "http", "url": "https://..." } }
+}
+```
+
+So `10-base.json` can define everything and `50-work.json` add a feature,
+change one field of a rule or remove an MCP server with `"github": null`.
+An invalid file stops rho. The old files (`sandbox.json`, `features.json`,
+`models.json`, `mcp.json`, `PREAMBLE_SYSTEM.md` and `APPEND_SYSTEM.md`
+directly in `~/.config/rho`) stop rho too, with a hint where they go. State
+that rho writes itself (`auth.json`, `sessions.db`, `memory.db`,
+`project_context.json`, `acp-token`) stays in `~/.config/rho`.
+
 ## System prompt
 
 Built per session like pi's (`rho/src/prompt.rs`), after the extensions'
 `session_start`: preamble, `<tools>` (every tool, also the extensions'),
 `<rules>` (each tool's `Tool::rules`, e.g. `Grep` over `rg` in `Bash`),
-then `<addendum>` from `~/.config/rho/APPEND_SYSTEM.md`, `<project_context>`
+then `<addendum>` from `config.d/*APPEND_SYSTEM.md`, `<project_context>`
 from the config dir's `AGENTS.md`/`CLAUDE.md` and `<cwd>`, then what
 extensions added to `SessionSetup::system`. Context files in the cwd and its
 parents are added last, by the `ProjectContext` extension, only if the user
 approves them; the answer is remembered per directory in
 `~/.config/rho/project_context.json`.
-`~/.config/rho/PREAMBLE_SYSTEM.md` replaces the preamble. It and
-`APPEND_SYSTEM.md` are created on startup if missing, the first with the
-built-in preamble, the second empty; empty files are ignored.
-To reuse pi's addendum:
+`config.d/*PREAMBLE_SYSTEM.md` replaces the preamble. Files with the same
+suffix are joined in file name order, with a blank line between them, and
+are read for every session. Without any preamble file,
+`config.d/00-rho.PREAMBLE_SYSTEM.md` is written with the built-in preamble
+on startup. Empty files are ignored. To reuse pi's addendum:
 
-    ln -sf ~/.dotfiles/pia/config/APPEND_SYSTEM.md ~/.config/rho/APPEND_SYSTEM.md
+    ln -sf ~/.dotfiles/pia/config/APPEND_SYSTEM.md ~/.config/rho/config.d/APPEND_SYSTEM.md
 
 ## Compaction
 
@@ -153,7 +180,7 @@ replaces the history with a pi-style structured summary (`rho/src/compact.rs`).
 If the last request was less than 4.5 minutes ago, the prompt cache is
 assumed warm: the session model summarizes with the exact same prefix, so the
 history is billed as cache reads. Otherwise `RHO_COMPACT_MODEL` or the path's
-`compact` model (`models.json`) gets the conversation as text, without tool
+`compact` model (`models` config) gets the conversation as text, without tool
 outputs and with tool arguments cut to 2000 chars; without one, the session
 model does. The notice shows which path
 ran and its token usage.
@@ -165,18 +192,18 @@ the run goes on from the summary (ADR 0061).
 
 ## Models by path
 
-`~/.config/rho/models.json` limits the models a session may use, and sets the
+`"models"` in the config limits the models a session may use, and sets the
 model it starts with and the compaction model, by the session's cwd
-(`rho/src/models.rs`). It is read at startup; an invalid file stops rho.
+(`rho/src/models.rs`). Rules are keyed by path:
 
 ```json
 {
-  "rules": [
-    { "path": "~/github", "allow": ["github-copilot/*"],
+  "models": {
+    "~/github": { "allow": ["github-copilot/*"],
       "default": "github-copilot/claude-sonnet-5.5",
       "compact": "github-copilot/claude-haiku-5.5" },
-    { "path": "~/github/sandbox-repo", "allow": ["*"] }
-  ]
+    "~/github/sandbox-repo": { "allow": ["*"] }
+  }
 }
 ```
 
@@ -207,7 +234,7 @@ Clients can list them (`session/list`, filtered by cwd), continue them
 summary as a "Compacted" notice, or only what came after the client's
 `_meta.rho.since` cursor, ADR 0064; `session/resume` replays nothing) and
 `session/close` them. Sandbox grants are not saved: a continued session
-starts from `sandbox.json` again. Edit diffs and the streamed output of
+starts from the `"sandbox"` config again. Edit diffs and the streamed output of
 terminal calls are stored for 7 days and replayed with the call; older
 calls show only their output for the model (ADR 0041, 0060).
 
@@ -265,14 +292,19 @@ only), deny by default. A session starts with system directories (`/nix/store`,
 `/etc`, `/usr`, ...) read-only, a few `/dev` files read-write, and its
 workspace directories read-write: the cwd plus ACP `additionalDirectories`.
 
-More access is configured in `~/.config/rho/sandbox.json` (next to
-`APPEND_SYSTEM.md`); paths are absolute or start with `~/`, an invalid file
-stops rho at startup:
+More access is configured under `"sandbox"` in the config; paths are
+absolute or start with `~/`:
 
 ```json
 {
-  "read": ["~/.config/git/config", "~/.ssh/known_hosts", "~/.ssh/id_ed25519.pub"],
-  "read_write": ["~/go", "~/.cache", "/tmp"]
+  "sandbox": {
+    "paths": {
+      "~/.config/git/config": "read",
+      "~/.ssh/known_hosts": "read",
+      "~/go": "readwrite",
+      "/tmp": "readwrite"
+    }
+  }
 }
 ```
 
@@ -302,21 +334,21 @@ during a session: `/enable ssh git`, `/disable ssh`, and `/features` to
 list them with their state and paths (`FeatureCommands`, enabled in the `rho` binary).
 The system prompt lists the features (not their state, so the prompt cache
 holds), and the model can ask for one with `RequestFeature`; the user
-approves like `RequestAccess`. They are defined
-in `~/.config/rho/features.json`, with paths like in `sandbox.json`:
+approves like `RequestAccess`. They are defined by id
+under `"features"` in the config, with paths like in `"sandbox"`:
 
 ```json
-[
-  {
-    "id": "ssh",
-    "description": "SSH keys for git",
-    "enabled": false,
-    "read": ["~/.ssh"],
-    "read_write": [],
-    "tools": ["mcp__github__create_pull_request"],
-    "instructions": "Use SSH remotes."
+{
+  "features": {
+    "ssh": {
+      "description": "SSH keys for git",
+      "enabled": false,
+      "paths": { "~/.ssh": "read" },
+      "tools": ["mcp__github__create_pull_request"],
+      "instructions": "Use SSH remotes."
+    }
   }
-]
+}
 ```
 
 `enabled` turns a feature on when a session starts. A tool listed by any
@@ -465,8 +497,8 @@ Ports of the other pi extensions:
   instead. `read` shows the
   messages around a result (ADR 0032). The user can search too with
   `/history <query>`; the results are not shown to the model.
-- `Mcp` adds the tools of MCP servers over Streamable HTTP from `mcp.json`
-  in the config dir (Claude's `mcpServers` format, `type: "http"`, headers
+- `Mcp` adds the tools of MCP servers over Streamable HTTP from `"mcps"`
+  in the config (by name, servers as in Claude's `mcpServers`, `type: "http"`, headers
   with `${VAR}` from the environment) as `mcp__<server>__<tool>` (ADR 0031).
 - `Skills` loads [Agent Skills](https://agentskills.io) from `skills` in the
   config dir and `~/.agents/skills`. The system prompt lists them, the

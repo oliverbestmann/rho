@@ -64,7 +64,7 @@ fn model_options(session: &Session) -> Vec<SessionConfigOption> {
             models.insert(0, SessionConfigSelectOption::new(current.clone(), &current));
         }
         options.push(
-            // Per `models.json` rule, so clients remember a pick per rule.
+            // Per `models` config rule, so clients remember a pick per rule.
             SessionConfigOption::select(session.model_key.clone(), "Model", current, models)
                 .category(SessionConfigOptionCategory::Model)
                 .description("Model for this session"),

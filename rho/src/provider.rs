@@ -502,7 +502,7 @@ impl std::fmt::Display for ModelSpec {
 }
 
 /// Providers by name, see `ModelSpec`; optionally limited to some models
-/// (`models.json`).
+/// (the `models` config).
 #[derive(Default, Clone)]
 pub struct Registry {
     providers: HashMap<ProviderName, Arc<dyn Provider>>,
@@ -545,7 +545,7 @@ impl Registry {
     /// The provider serving `spec`; fails if `spec` is not allowed.
     pub fn resolve(&self, spec: &ModelSpec) -> Result<Arc<dyn Provider>> {
         if !self.allows(spec) {
-            anyhow::bail!("model {spec} is not allowed here (models.json)");
+            anyhow::bail!("model {spec} is not allowed here (config.d: models)");
         }
         let name = spec.provider();
         let provider = self

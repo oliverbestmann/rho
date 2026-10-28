@@ -37,13 +37,9 @@ async fn compact_after(cache_age: Option<Duration>) -> Run {
     agent
         .registry
         .register(ProviderName::new("cheap"), cheap.clone());
-    // The `models.json` compaction model wins over the global one.
+    // The `models` config compaction model wins over the global one.
     agent.compact_model = Some(ModelSpec::new("cheap", "global"));
-    agent.models = rho::models::Config::parse(
-        r#"{"rules": [{"path": "/", "compact": "cheap/small"}]}"#,
-        "models.json".as_ref(),
-    )
-    .unwrap();
+    agent.models = serde_json::from_str(r#"{"/": {"compact": "cheap/small"}}"#).unwrap();
 
     let cwd = std::env::current_dir().unwrap();
     let (mut session, _log) = common::session(&agent, &cwd).await;

@@ -1,7 +1,7 @@
 //! System prompt, built like pi's: preamble, tools, rules, then the
-//! `APPEND_SYSTEM.md` addendum, the config dir's context file and the cwd, each in
-//! `<section>` tags. `PREAMBLE_SYSTEM.md` in the config dir replaces the
-//! preamble.
+//! addendum (`config.d/*APPEND_SYSTEM.md`), the config dir's context file
+//! and the cwd, each in `<section>` tags. `config.d/*PREAMBLE_SYSTEM.md`
+//! replaces the preamble. Files with the same suffix are joined in name order.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,22 +19,19 @@ const CONTEXT_FILES: [&str; 5] = [
     "CLAUDE.MD",
 ];
 
-/// Creates `PREAMBLE_SYSTEM.md` (with `PREAMBLE`) and an empty
-/// `APPEND_SYSTEM.md` in `config_dir` if missing, to be edited. Best effort.
+pub const PREAMBLE_SUFFIX: &str = "PREAMBLE_SYSTEM.md";
+pub const APPEND_SUFFIX: &str = "APPEND_SYSTEM.md";
+
+/// Creates `config.d` and, without any preamble file in it,
+/// `00-rho.PREAMBLE_SYSTEM.md` with `PREAMBLE`, to be edited. Best effort.
 pub fn ensure_files(config_dir: &Path) {
-    use std::io::Write as _;
-    let _ = std::fs::create_dir_all(config_dir);
-    for (name, content) in [
-        ("PREAMBLE_SYSTEM.md", format!("{PREAMBLE}\n")),
-        ("APPEND_SYSTEM.md", String::new()),
-    ] {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(config_dir.join(name))
-        {
-            let _ = f.write_all(content.as_bytes());
-        }
+    let dir = config_dir.join(crate::config::DIR);
+    let _ = std::fs::create_dir_all(&dir);
+    if crate::config::files(config_dir, PREAMBLE_SUFFIX).is_ok_and(|f| f.is_empty()) {
+        let _ = std::fs::write(
+            dir.join(format!("00-rho.{PREAMBLE_SUFFIX}")),
+            format!("{PREAMBLE}\n"),
+        );
     }
 }
 
@@ -49,8 +46,8 @@ pub fn build(
     let mut sections: Vec<(&str, String)> = vec![];
 
     let mut prompt = config_dir
-        .and_then(|d| read(d, "PREAMBLE_SYSTEM.md"))
-        .map_or_else(|| preamble.to_string(), |p| p.trim().to_string());
+        .and_then(|d| crate::config::text(d, PREAMBLE_SUFFIX))
+        .unwrap_or_else(|| preamble.to_string());
 
     let list: Vec<String> = tools
         .iter()
@@ -78,8 +75,8 @@ pub fn build(
     let rules: Vec<String> = rules.iter().map(|r| format!("- {r}")).collect();
     sections.push(("rules", rules.join("\n")));
 
-    if let Some(addendum) = config_dir.and_then(|d| read(d, "APPEND_SYSTEM.md")) {
-        sections.push(("addendum", addendum.trim().to_string()));
+    if let Some(addendum) = config_dir.and_then(|d| crate::config::text(d, APPEND_SUFFIX)) {
+        sections.push(("addendum", addendum));
     }
 
     // Project context files in the cwd's ancestors need the user's consent;
@@ -167,7 +164,9 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let cwd = project.path().join("sub");
         std::fs::create_dir(&cwd).unwrap();
-        std::fs::write(config.path().join("APPEND_SYSTEM.md"), "# Mine\nuse rg\n").unwrap();
+        let d = config.path().join(crate::config::DIR);
+        std::fs::create_dir(&d).unwrap();
+        std::fs::write(d.join("APPEND_SYSTEM.md"), "# Mine\nuse rg\n").unwrap();
         std::fs::write(config.path().join("AGENTS.md"), "global rules").unwrap();
         std::fs::write(project.path().join("CLAUDE.md"), "project rules").unwrap();
         std::fs::write(cwd.join("AGENTS.md"), "sub rules").unwrap();
@@ -198,8 +197,9 @@ mod tests {
 
         // The written preamble is the default; empty files count as absent.
         ensure_files(config.path());
+        let written = d.join("00-rho.PREAMBLE_SYSTEM.md");
         assert_eq!(
-            std::fs::read_to_string(config.path().join("PREAMBLE_SYSTEM.md")).unwrap(),
+            std::fs::read_to_string(&written).unwrap(),
             format!("{PREAMBLE}\n")
         );
         let empty = build(
@@ -209,7 +209,7 @@ mod tests {
             std::slice::from_ref(&cwd),
         );
         assert_eq!(empty, p);
-        std::fs::write(config.path().join("APPEND_SYSTEM.md"), " \n").unwrap();
+        std::fs::write(d.join("APPEND_SYSTEM.md"), " \n").unwrap();
         let p = build(
             PREAMBLE,
             &crate::tools::builtin(),
@@ -217,17 +217,20 @@ mod tests {
             std::slice::from_ref(&cwd),
         );
         assert!(!p.contains("<addendum>"), "{p}");
-        std::fs::write(config.path().join("APPEND_SYSTEM.md"), "# Mine\nuse rg\n").unwrap();
+        std::fs::write(d.join("APPEND_SYSTEM.md"), "# Mine\nuse rg\n").unwrap();
 
-        // PREAMBLE_SYSTEM.md replaces only the preamble.
-        std::fs::write(config.path().join("PREAMBLE_SYSTEM.md"), "Custom.\n").unwrap();
+        // Preamble files replace only the preamble, joined in name order.
+        std::fs::write(&written, "Custom.\n").unwrap();
+        std::fs::write(d.join("50-more.PREAMBLE_SYSTEM.md"), "More.").unwrap();
+        // An existing preamble file is kept.
+        ensure_files(config.path());
         let p = build(
             PREAMBLE,
             &crate::tools::builtin(),
             Some(config.path()),
             std::slice::from_ref(&cwd),
         );
-        assert!(p.starts_with("Custom.\n\n<tools>\n- Read:"), "{p}");
+        assert!(p.starts_with("Custom.\n\nMore.\n\n<tools>\n- Read:"), "{p}");
         assert!(p.contains("- Use Read to examine files"), "{p}");
         assert!(!p.contains("<additional_directories>"), "{p}");
 

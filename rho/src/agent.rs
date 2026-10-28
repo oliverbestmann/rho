@@ -108,15 +108,15 @@ pub struct Agent {
     pub model: ModelSpec,
     /// Preamble of the system prompt, see `prompt::build`.
     pub system: String,
-    /// Where `PREAMBLE_SYSTEM.md`, `APPEND_SYSTEM.md` and a global `AGENTS.md` are read from.
+    /// Where `config.d` (prompt files) and a global `AGENTS.md` are read from.
     pub config_dir: Option<PathBuf>,
     /// Cheaper model for compacting when the prompt cache expired.
     pub compact_model: Option<ModelSpec>,
     /// `model` / `compact_model` were given explicitly: they win over the
-    /// `models.json` defaults, and a session fails if its path forbids them.
+    /// `models` config defaults, and a session fails if its path forbids them.
     pub model_pinned: bool,
     pub compact_pinned: bool,
-    /// Allowed, default and compaction models by cwd, from `models.json`.
+    /// Allowed, default and compaction models by cwd, from the `models` config.
     pub models: crate::models::Config,
     pub tools: Vec<Arc<dyn DynTool>>,
     pub extensions: Vec<Arc<dyn DynExtension>>,
@@ -125,9 +125,9 @@ pub struct Agent {
     pub max_tokens: u32,
     /// Reasoning effort new sessions start with.
     pub thinking: Thinking,
-    /// Starting sandbox for each session, from `sandbox.json`.
+    /// Starting sandbox for each session, from the `sandbox` config.
     pub sandbox: crate::sandbox::Config,
-    /// Features each session starts with, from `features.json`.
+    /// Features each session starts with, from the `features` config.
     pub features: Vec<Feature>,
     /// Where sessions are saved, by cwd. Each session opens its own
     /// connection. `None`: sessions are not saved and cannot be resumed.

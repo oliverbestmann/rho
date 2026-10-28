@@ -4,10 +4,11 @@
 //!
 //! Deny by default: a session starts with read access to system directories
 //! (enough to run programs) and read-write access to its workspace
-//! directories. Everything else comes from the user's `sandbox.json` in the
-//! config dir, from extensions (`ctx.grant`), or from the model through the
+//! directories. Everything else comes from `"sandbox"` in the user's
+//! config (`config.d`), from extensions (`ctx.grant`), or from the model through the
 //! `RequestAccess` tool after the user approves.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -60,40 +61,60 @@ const DEVICES_RW: &[&str] = &[
     "/dev/tty",
 ];
 
-/// `sandbox.json` in the config dir. Paths are absolute or start with `~/`.
+/// `"sandbox"` in the config (`config.d`). Paths are absolute or start with `~/`.
 ///
 /// ```json
-/// { "read": ["~/.config/git"], "read_write": ["~/go", "~/.cache", "/tmp"] }
+/// { "disabled": false, "paths": { "~/.config/git": "read", "~/go": "readwrite" } }
 /// ```
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawConfig")]
 pub struct Config {
     /// Turn the sandbox off.
-    #[serde(default)]
     pub disabled: bool,
-    #[serde(default)]
     pub read: Vec<PathBuf>,
-    #[serde(default)]
     pub read_write: Vec<PathBuf>,
 }
 
-impl Config {
-    pub const FILE: &str = "sandbox.json";
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    paths: Paths,
+}
 
-    /// A missing file is the default (sandboxed, no extra paths); an invalid one is an error.
-    pub fn load(config_dir: &Path) -> Result<Self> {
-        let path = config_dir.join(Self::FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
-        let mut config: Self =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        expand(config.read.iter_mut().chain(&mut config.read_write), &path)?;
-        Ok(config)
+impl TryFrom<RawConfig> for Config {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawConfig) -> Result<Self> {
+        let (read, read_write) = split(raw.paths)?;
+        Ok(Self {
+            disabled: raw.disabled,
+            read,
+            read_write,
+        })
     }
+}
 
+/// `{ "path": "read" | "readwrite" }`, a map so config files can add and
+/// remove (`null`) paths.
+pub(crate) type Paths = BTreeMap<PathBuf, Access>;
+
+/// `paths` expanded, split into read and read-write.
+pub(crate) fn split(paths: Paths) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let (mut read, mut read_write) = (vec![], vec![]);
+    for (mut path, access) in paths {
+        expand(std::iter::once(&mut path))?;
+        match access {
+            Access::Read => read.push(path),
+            Access::ReadWrite => read_write.push(path),
+        }
+    }
+    Ok((read, read_write))
+}
+
+impl Config {
     /// The starting policy for a session with these workspace directories.
     pub fn policy(&self, roots: &[PathBuf]) -> Option<Policy> {
         if self.disabled {
@@ -110,15 +131,15 @@ impl Config {
     }
 }
 
-/// Expands `~/` in `paths` and fails (naming `file`) if one is not absolute.
-pub(crate) fn expand<'a>(paths: impl Iterator<Item = &'a mut PathBuf>, file: &Path) -> Result<()> {
+/// Expands `~/` in `paths` and fails if one is not absolute.
+pub(crate) fn expand<'a>(paths: impl Iterator<Item = &'a mut PathBuf>) -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     for p in paths {
         if let (Ok(rest), Some(home)) = (p.strip_prefix("~"), &home) {
             *p = home.join(rest);
         }
         if !p.is_absolute() {
-            bail!("{}: {} is not absolute", file.display(), p.display());
+            bail!("{} is not absolute", p.display());
         }
     }
     Ok(())
@@ -239,7 +260,7 @@ fn raw_error(e: nono::sandbox::RawSandboxError) -> std::io::Error {
 
 #[cfg(not(target_os = "linux"))]
 const UNSUPPORTED: &str =
-    "the sandbox is only supported on Linux; set \"disabled\": true in sandbox.json";
+    "the sandbox is only supported on Linux; set \"sandbox\": {\"disabled\": true} in config.d";
 
 /// `/grant-read <path>` and `/grant-write <path>`: the user widens the
 /// session's sandbox. The model is told with the next prompt. `/sandbox`
@@ -331,12 +352,10 @@ mod tests {
 
     #[test]
     fn config_expands_home_and_rejects_relative() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(Config::load(dir.path()).unwrap().policy(&[]).is_some());
+        let load = serde_json::from_str::<Config>;
+        assert!(Config::default().policy(&[]).is_some());
 
-        let file = dir.path().join(Config::FILE);
-        std::fs::write(&file, r#"{"read": ["~/x"], "read_write": ["/tmp"]}"#).unwrap();
-        let config = Config::load(dir.path()).unwrap();
+        let config = load(r#"{"paths": {"~/x": "read", "/tmp": "readwrite"}}"#).unwrap();
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
         assert_eq!(config.read, [home.join("x")]);
         let roots = [PathBuf::from("/w1"), PathBuf::from("/w2")];
@@ -364,9 +383,13 @@ mod tests {
             "Read:\n- `/r`\n- `/x`\n\nRead-write:\n- `/w`"
         );
 
-        std::fs::write(&file, r#"{"read": ["rel"]}"#).unwrap();
-        assert!(Config::load(dir.path()).is_err());
-        std::fs::write(&file, r#"{"disabled": true}"#).unwrap();
-        assert!(Config::load(dir.path()).unwrap().policy(&roots).is_none());
+        assert!(load(r#"{"paths": {"rel": "read"}}"#).is_err());
+        assert!(load(r#"{"read": ["/x"]}"#).is_err());
+        assert!(
+            load(r#"{"disabled": true}"#)
+                .unwrap()
+                .policy(&roots)
+                .is_none()
+        );
     }
 }

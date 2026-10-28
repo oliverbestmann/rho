@@ -33,7 +33,7 @@ use crate::tools::DynTool;
 pub struct SessionInfo {
     /// `None` for a `Context` outside an agent session.
     pub model: Option<ModelSpec>,
-    /// For `/compact` with a cold cache (`models.json` `compact`,
+    /// For `/compact` with a cold cache (`compact` in the `models` config,
     /// `RHO_COMPACT_MODEL`); `None` if the session model compacts.
     pub compact_model: Option<ModelSpec>,
     pub context_window: u64,
@@ -280,7 +280,7 @@ pub struct SessionSetup {
     /// Profiles the user can switch between; starts with `Profile::write`.
     /// Extensions add their own (or hide their tools in `write`).
     pub profiles: Vec<Profile>,
-    /// Features the user can turn on and off; starts with `features.json`.
+    /// Features the user can turn on and off; starts with the `features` config.
     pub features: Vec<Feature>,
 }
 

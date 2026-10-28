@@ -5,7 +5,7 @@
 //!
 //! The checks run the model's code, so they run in the session's sandbox,
 //! like Bash: the module cache and `GOCACHE` must be writable (`~/go`,
-//! `~/.cache` in `sandbox.json`). Not in a read-only profile: nothing could
+//! `~/.cache` in the `sandbox` config). Not in a read-only profile: nothing could
 //! have changed there, and `go` could not write its cache.
 
 use std::path::PathBuf;

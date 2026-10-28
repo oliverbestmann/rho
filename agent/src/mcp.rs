@@ -1,8 +1,8 @@
-//! `Mcp`: tools from MCP servers over Streamable HTTP, configured in
-//! `mcp.json` in rho's config dir (Claude's format):
+//! `Mcp`: tools from MCP servers over Streamable HTTP, configured under
+//! `"mcps"` in rho's config (`config.d`, servers as in Claude's `mcpServers`):
 //!
 //! ```json
-//! { "mcpServers": { "github": { "type": "http", "url": "https://...",
+//! { "mcps": { "github": { "type": "http", "url": "https://...",
 //!     "headers": { "Authorization": "Bearer ${GITHUB_TOKEN}" } } } }
 //! ```
 //!
@@ -27,16 +27,10 @@ use rho::tools::{Tool, truncate};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const CONFIG_FILE: &str = "mcp.json";
+/// The config key.
+const KEY: &str = "mcps";
 const PROTOCOL: &str = "2025-06-18";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct Config {
-    #[serde(default)]
-    mcp_servers: BTreeMap<ServerName, ServerConfig>,
-}
 
 #[derive(Deserialize)]
 struct ServerConfig {
@@ -59,16 +53,13 @@ impl Mcp {
     }
 
     fn load(dir: &Path) -> Self {
-        let path = dir.join(CONFIG_FILE);
-        let config = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        };
+        let config = rho::config::load(dir)
+            .and_then(|c| rho::config::section::<BTreeMap<ServerName, ServerConfig>>(&c, KEY))
+            .map_err(|e| format!("{e:#}"));
         let (mut servers, mut problems) = (vec![], vec![]);
         match config {
             Ok(config) => {
-                for (name, c) in config.mcp_servers {
+                for (name, c) in config {
                     match Server::new(name.clone(), c) {
                         Ok(s) => servers.push(Arc::new(s)),
                         Err(e) => problems.push(format!("MCP server {name}: {e:#}")),
@@ -115,7 +106,7 @@ impl Extension for Mcp {
 }
 
 rho::id_type! {
-    /// An MCP server's name in `mcp.json`.
+    /// An MCP server's name in the `mcps` config.
     ServerName
 }
 
@@ -597,12 +588,14 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await });
 
         let dir = tempfile::tempdir().unwrap();
-        let config = json!({"mcpServers": {
+        let config = json!({KEY: {
             "json": {"type": "http", "url": format!("{base}/json")},
             "sse": {"type": "http", "url": format!("{base}/sse")},
             "local": {"command": "npx"},
         }});
-        std::fs::write(dir.path().join(CONFIG_FILE), config.to_string()).unwrap();
+        let d = dir.path().join(rho::config::DIR);
+        std::fs::create_dir(&d).unwrap();
+        std::fs::write(d.join("mcp.json"), config.to_string()).unwrap();
         let mcp = Mcp::load(dir.path());
         assert_eq!(mcp.servers.len(), 2);
         assert!(mcp.problems[0].contains("local"), "{:?}", mcp.problems);

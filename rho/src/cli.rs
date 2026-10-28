@@ -30,11 +30,14 @@ env:
   RHO_SESSIONS_DB    database for ACP sessions, default ~/.config/rho/sessions.db
   RHO_ACP_TOKEN      token for `daemon --listen`, default from ~/.config/rho/acp-token (created)
 
-files in ~/.config/rho: PREAMBLE_SYSTEM.md (replaces the preamble), APPEND_SYSTEM.md, AGENTS.md,
-project_context.json (approved project AGENTS.md dirs), mcp.json (MCP servers over HTTP),
-models.json (allowed, default and compaction models by path);
-the first two are created on startup if missing (the preamble written out),
-and empty files are ignored";
+files in ~/.config/rho/config.d, each kind in file name order:
+  *.json                merged (objects merge, later values win, null deletes) into
+                        sandbox, features, models (by path) and mcps (MCP servers over HTTP)
+  *PREAMBLE_SYSTEM.md   joined, replace the preamble (00-rho.PREAMBLE_SYSTEM.md is
+                        written on startup without one)
+  *APPEND_SYSTEM.md     joined, added to the system prompt
+files in ~/.config/rho: AGENTS.md, project_context.json (approved project AGENTS.md dirs);
+empty files are ignored";
 
 /// What a `rho` binary is made of. Start from the defaults and change what
 /// you need:
@@ -195,7 +198,7 @@ fn acp_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) -> 
     Ok(agent)
 }
 
-/// `model`: from `-m` / `RHO_MODEL`, it wins over `models.json` defaults.
+/// `model`: from `-m` / `RHO_MODEL`, it wins over the `models` config defaults.
 fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) -> Result<Agent> {
     let model_pinned = model.is_some();
     let model = model.unwrap_or(options.model);
@@ -205,10 +208,12 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     agent.model_pinned = model_pinned;
     agent.registry = options.providers;
     let config_dir = crate::config_dir();
+    crate::config::check_old(&config_dir)?;
     crate::prompt::ensure_files(&config_dir);
-    agent.sandbox = crate::sandbox::Config::load(&config_dir)?;
-    agent.features = crate::feature::load(&config_dir)?;
-    agent.models = crate::models::Config::load(&config_dir)?;
+    let config = crate::config::load(&config_dir)?;
+    agent.sandbox = crate::config::section(&config, "sandbox")?;
+    agent.features = crate::feature::load(&config)?;
+    agent.models = crate::config::section(&config, crate::models::Config::KEY)?;
     agent.config_dir = Some(config_dir);
     let compact = match std::env::var("RHO_COMPACT_MODEL") {
         Ok(m) => {

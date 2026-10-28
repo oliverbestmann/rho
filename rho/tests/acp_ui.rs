@@ -222,15 +222,14 @@ async fn model_and_thinking_are_session_config_options() {
 }
 
 #[tokio::test]
-async fn models_json_limits_and_defaults_models_by_path() {
+async fn models_config_limits_and_defaults_models_by_path() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("repo");
     std::fs::create_dir(&cwd).unwrap();
-    let rules = format!(
-        r#"{{ "rules": [ {{ "path": "{}", "allow": ["fake/small"], "default": "fake/small" }} ] }}"#,
-        dir.path().display()
-    );
-    let models = rho::models::Config::parse(&rules, "models.json".as_ref()).unwrap();
+    let models: rho::models::Config = serde_json::from_value(serde_json::json!({
+        dir.path().display().to_string(): { "allow": ["fake/small"], "default": "fake/small" }
+    }))
+    .unwrap();
     let key = format!("model:{}", dir.path().display());
     let scripted = Scripted::new(vec![vec![text("hi"), Event::Done(StopReason::EndTurn)]]);
     let mut agent = Arc::into_inner(agent_with(scripted.clone(), vec![])).unwrap();

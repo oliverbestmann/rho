@@ -2,10 +2,11 @@
 //! on and off during a session (`/enable ssh git`, `/disable ssh`).
 //!
 //! A tool listed by any feature is hidden until one of its features is on.
-//! Features come from `features.json` in the config dir and from extensions
-//! (`SessionSetup::features`).
+//! Features come from `"features"` in the config (`config.d`) and from
+//! extensions (`SessionSetup::features`).
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
@@ -25,56 +26,63 @@ crate::id_type! {
     pub FeatureId
 }
 
-/// `features.json` holds a list of these. Paths are absolute or start with `~/`.
-///
-/// ```json
-/// [{ "id": "ssh", "description": "SSH keys", "read": ["~/.ssh"] }]
-/// ```
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Feature {
     pub id: FeatureId,
-    #[serde(default)]
     pub description: String,
     /// On when a session starts.
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub read: Vec<PathBuf>,
-    #[serde(default)]
     pub read_write: Vec<PathBuf>,
     /// Hidden from the model unless a feature listing them is on.
-    #[serde(default)]
     pub tools: Vec<ToolName>,
     /// Told to the model when the feature is turned on.
-    #[serde(default)]
     pub instructions: Option<String>,
 }
 
-pub const FILE: &str = "features.json";
+/// The config key: features by id. Paths are absolute or start with `~/`.
+///
+/// ```json
+/// { "features": { "ssh": { "description": "SSH keys", "paths": { "~/.ssh": "read" } } } }
+/// ```
+pub const KEY: &str = "features";
 
-/// The features in `features.json`. A missing file means none; an invalid one is an error.
-pub fn load(config_dir: &Path) -> Result<Vec<Feature>> {
-    let path = config_dir.join(FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let mut features: Vec<Feature> =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    for f in &mut features {
-        if f.id.as_str().is_empty() || f.id.as_str().contains(char::is_whitespace) {
-            bail!("{}: invalid feature id {:?}", path.display(), f.id.as_str());
-        }
-        crate::sandbox::expand(f.read.iter_mut().chain(&mut f.read_write), &path)?;
-    }
-    for (i, f) in features.iter().enumerate() {
-        if features[..i].iter().any(|g| g.id == f.id) {
-            bail!("{}: feature {} is defined twice", path.display(), f.id);
-        }
-    }
-    Ok(features)
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFeature {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    paths: crate::sandbox::Paths,
+    #[serde(default)]
+    tools: Vec<ToolName>,
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+/// The features in the merged `config`; none without the key.
+pub fn load(config: &Value) -> Result<Vec<Feature>> {
+    let raw: BTreeMap<FeatureId, RawFeature> = crate::config::section(config, KEY)?;
+    let at = |id: &FeatureId| format!("{}: {KEY}: {id}", crate::config::DIR);
+    raw.into_iter()
+        .map(|(id, f)| {
+            if id.as_str().is_empty() || id.as_str().contains(char::is_whitespace) {
+                bail!("{}: invalid feature id", at(&id));
+            }
+            let (read, read_write) = crate::sandbox::split(f.paths).with_context(|| at(&id))?;
+            Ok(Feature {
+                id,
+                description: f.description,
+                enabled: f.enabled,
+                read,
+                read_write,
+                tools: f.tools,
+                instructions: f.instructions,
+            })
+        })
+        .collect()
 }
 
 impl Feature {
@@ -233,7 +241,10 @@ impl Extension for FeatureCommands {
 fn list(ctx: &Context) -> String {
     let features = ctx.features();
     if features.is_empty() {
-        return format!("No features defined; add them to {FILE} in the config dir.");
+        return format!(
+            "No features defined; add them to \"{KEY}\" in {}.",
+            crate::config::DIR
+        );
     }
     let active = ctx.active_features();
     let mut lines = vec![];
@@ -304,27 +315,25 @@ mod tests {
 
     #[test]
     fn load_validates_and_expands() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load(dir.path()).unwrap().is_empty());
-        let file = dir.path().join(FILE);
-        std::fs::write(
-            &file,
-            r#"[{"id": "ssh", "read": ["~/.ssh"], "tools": ["X"]}]"#,
-        )
+        use serde_json::json;
+        assert!(load(&json!({})).unwrap().is_empty());
+        let features = load(&json!({KEY: {
+            "ssh": {"paths": {"~/.ssh": "read", "/w": "readwrite"}, "tools": ["X"]}
+        }}))
         .unwrap();
-        let features = load(dir.path()).unwrap();
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(features[0].id, FeatureId::new("ssh"));
         assert_eq!(features[0].read, [home.join(".ssh")]);
+        assert_eq!(features[0].read_write, [PathBuf::from("/w")]);
         assert!(!features[0].enabled);
 
         for bad in [
-            r#"[{"id": "a b"}]"#,
-            r#"[{"id": "a"}, {"id": "a"}]"#,
-            r#"[{"id": "a", "read": ["rel"]}]"#,
-            r#"[{"id": "a", "nope": 1}]"#,
+            json!({"a b": {}}),
+            json!({"a": {"paths": {"rel": "read"}}}),
+            json!({"a": {"read": ["/x"]}}),
+            json!({"a": {"nope": 1}}),
         ] {
-            std::fs::write(&file, bad).unwrap();
-            assert!(load(dir.path()).is_err(), "{bad}");
+            assert!(load(&json!({KEY: bad})).is_err(), "{bad}");
         }
     }
 

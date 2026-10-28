@@ -165,11 +165,10 @@ async fn resume_falls_back_when_the_stored_model_is_forbidden() {
             .unwrap(),
     );
 
-    let rules = format!(
-        r#"{{"rules": [{{"path": "{}", "allow": ["test/other"], "default": "test/other"}}]}}"#,
-        cwd.display()
-    );
-    agent.models = rho::models::Config::parse(&rules, "models.json".as_ref()).unwrap();
+    agent.models = serde_json::from_value(serde_json::json!({
+        cwd.display().to_string(): {"allow": ["test/other"], "default": "test/other"}
+    }))
+    .unwrap();
     let log = Arc::new(common::Log::default());
     let resumed = agent
         .resume_session(&SessionId::new("s"), &cwd, vec![], log.clone())
