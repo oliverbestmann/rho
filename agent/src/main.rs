@@ -26,31 +26,35 @@ use std::sync::Arc;
 async fn main() -> anyhow::Result<()> {
     let secrets = secrets::Secrets::new();
     rho::run(rho::Options {
-        extensions: vec![
-            Arc::new(rho::sandbox::GrantCommands),
-            Arc::new(git_gate::GitGate),
-            Arc::new(go_check::GoCheck::default()),
-            Arc::new(ripgrep_find::RipgrepFind),
-            Arc::new(go_doc::GoDoc),
-            Arc::new(semantic_search::SemanticSearch),
-            Arc::new(fetch_url::FetchUrl),
-            Arc::new(mcp::Mcp::from_config()),
-            Arc::new(memory::Memory::default()),
-            Arc::new(history::History::default()),
-            Arc::new(session_title::SessionTitle),
-            Arc::new(background_task::BackgroundTasks),
-            Arc::new(context_notice::ContextNotice),
-            Arc::new(ask_user::AskUser),
-            Arc::new(plan_mode::PlanMode),
-            Arc::new(ponytail::Ponytail),
-            Arc::new(skills::Skills::from_config()),
-            // After every extension that adds features, so all are listed.
-            Arc::new(rho::feature::FeatureCommands),
-            // Last, so the project instructions end the system prompt.
-            Arc::new(project_context::ProjectContext::default()),
-            // After every extension that changes prompts or tool output.
-            Arc::new(secrets),
-        ],
+        extensions: [
+            rho::builtin(),
+            vec![
+                Arc::new(rho::sandbox::GrantCommands),
+                Arc::new(git_gate::GitGate),
+                Arc::new(go_check::GoCheck::default()),
+                Arc::new(ripgrep_find::RipgrepFind),
+                Arc::new(go_doc::GoDoc),
+                Arc::new(semantic_search::SemanticSearch),
+                Arc::new(fetch_url::FetchUrl),
+                Arc::new(mcp::Mcp::from_config()),
+                Arc::new(memory::Memory::default()),
+                Arc::new(history::History::default()),
+                Arc::new(session_title::SessionTitle),
+                Arc::new(background_task::BackgroundTasks),
+                Arc::new(context_notice::ContextNotice),
+                Arc::new(ask_user::AskUser),
+                Arc::new(plan_mode::PlanMode),
+                Arc::new(ponytail::Ponytail),
+                Arc::new(skills::Skills::from_config()),
+                // After every extension that adds features, so all are listed.
+                Arc::new(rho::feature::FeatureCommands),
+                // Last, so the project instructions end the system prompt.
+                Arc::new(project_context::ProjectContext::default()),
+                // After every extension that changes prompts or tool output.
+                Arc::new(secrets),
+            ],
+        ]
+        .concat(),
         ..Default::default()
     })
     .await

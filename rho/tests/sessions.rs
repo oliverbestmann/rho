@@ -24,7 +24,10 @@ mod common;
 use common::{Scripted, text};
 
 fn agent(provider: Arc<Scripted>, db: &Path) -> Agent {
-    let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), rho::tools::builtin());
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider, ModelSpec::new("test", "m"))
+    };
     let db = db.to_path_buf();
     agent.sessions_db = Some(Arc::new(move |_| db.clone()));
     agent
@@ -1023,7 +1026,7 @@ async fn a_read_cut_off_by_a_restart_runs_again() {
     ]);
     let with = |hang| {
         let mut a = agent(provider.clone(), &db);
-        a.tools = vec![Arc::new(Look { hang })];
+        a.extensions = vec![Arc::new(rho::tools::ToolExtension::from(Look { hang }))];
         a
     };
     let before = with(true);

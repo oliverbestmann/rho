@@ -102,7 +102,10 @@ fn tool_results(r: &Request) -> Vec<(String, bool)> {
 }
 
 fn agent(scripted: Arc<Scripted>, db: Option<std::path::PathBuf>) -> Agent {
-    let mut agent = Agent::new(scripted, ModelSpec::new("test", "m"), rho::tools::builtin());
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(scripted, ModelSpec::new("test", "m"))
+    };
     agent.extensions.push(Arc::new(Look));
     if let Some(db) = db {
         agent.sessions_db = Some(Arc::new(move |_| db.clone()));
@@ -204,11 +207,10 @@ async fn a_restricting_first_profile_is_announced_on_the_first_request() {
         vec![text("a"), Event::Done(StopReason::EndTurn)],
         vec![text("b"), Event::Done(StopReason::EndTurn)],
     ]);
-    let mut agent = Agent::new(
-        scripted.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(scripted.clone(), ModelSpec::new("test", "m"))
+    };
     agent.extensions.push(Arc::new(Narrow));
     let mut session = agent
         .start_session(
@@ -337,7 +339,6 @@ async fn sessions_without_profiles_have_no_selector() {
     let agent = Arc::new(Agent::new(
         Scripted::new(vec![]),
         ModelSpec::new("test", "m"),
-        vec![],
     ));
     let client =
         Client

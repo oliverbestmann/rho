@@ -33,7 +33,7 @@ impl Extension for PlanMode {
             id: PLAN,
             name: "Plan".into(),
             description: "Read-only: explore and plan, no changes".into(),
-            hidden_tools: vec![rho::tools::WRITE, rho::edit::EDIT, ENTER],
+            hidden_tools: vec![rho::tools::WRITE, rho::tools::EDIT, ENTER],
             read_only: true,
             instructions: Some(INSTRUCTIONS.into()),
         });
@@ -219,10 +219,12 @@ mod tests {
         let [write, plan] = &setup.profiles[..] else {
             panic!("two profiles");
         };
-        assert!(write.shows(&PRESENT) && write.shows(&ENTER) && write.shows(&rho::edit::EDIT));
+        assert!(write.shows(&PRESENT) && write.shows(&ENTER) && write.shows(&rho::tools::EDIT));
         assert!(plan.read_only);
         assert!(
-            !plan.shows(&rho::tools::WRITE) && !plan.shows(&rho::edit::EDIT) && !plan.shows(&ENTER)
+            !plan.shows(&rho::tools::WRITE)
+                && !plan.shows(&rho::tools::EDIT)
+                && !plan.shows(&ENTER)
         );
         assert!(
             plan.shows(&PRESENT) && plan.shows(&rho::tools::READ) && plan.shows(&rho::tools::BASH)

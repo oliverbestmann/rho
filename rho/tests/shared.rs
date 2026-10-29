@@ -29,7 +29,7 @@ use common::{Scripted, text};
 type Updates = Arc<Mutex<Vec<SessionUpdate>>>;
 
 fn agent(provider: Arc<dyn Provider>, db: &std::path::Path) -> Arc<Agent> {
-    let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![]);
+    let mut agent = Agent::new(provider, ModelSpec::new("test", "m"));
     let db = db.to_path_buf();
     agent.sessions_db = Some(Arc::new(move |_| db.clone()));
     Arc::new(agent)
@@ -446,14 +446,13 @@ async fn a_question_waits_for_the_next_connection() {
         ],
         answer("ok"),
     ]);
-    let mut agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
     let db = dir.path().join("sessions.db");
     agent.sessions_db = Some(Arc::new(move |_| db.clone()));
-    agent.extensions = vec![Arc::new(Confirmer)];
+    agent.extensions.push(Arc::new(Confirmer));
     let agent = Arc::new(agent);
     let hub = Arc::new(Hub::default());
 
@@ -717,14 +716,13 @@ async fn a_question_open_at_a_restart_is_asked_again() {
         ],
         answer("ok"),
     ]);
-    let mut agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
     let db = dir.path().join("sessions.db");
     agent.sessions_db = Some(Arc::new(move |_| db.clone()));
-    agent.extensions = vec![Arc::new(Confirmer)];
+    agent.extensions.push(Arc::new(Confirmer));
     let agent = Arc::new(agent);
 
     // The question is open when rho stops.
@@ -1176,7 +1174,6 @@ async fn an_unused_session_is_unloaded_after_the_idle_timeout() {
     let mut agent = Agent::new(
         Scripted::new(vec![answer("Hi.")]),
         ModelSpec::new("test", "m"),
-        vec![],
     );
     let path = db.clone();
     agent.sessions_db = Some(Arc::new(move |_| path.clone()));

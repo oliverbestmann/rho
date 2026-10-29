@@ -29,11 +29,10 @@ async fn compact_after(cache_age: Option<Duration>) -> Run {
         vec![text("## Goal\nwarm summary")],
     ]);
     let cheap = Scripted::new(vec![vec![text("## Goal\ncold summary")]]);
-    let mut agent = Agent::new(
-        main.clone(),
-        ModelSpec::new("test", "big"),
-        rho::tools::builtin(),
-    );
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(main.clone(), ModelSpec::new("test", "big"))
+    };
     agent
         .registry
         .register(ProviderName::new("cheap"), cheap.clone());
@@ -144,11 +143,10 @@ async fn model_compacts(used: u64) -> (Arc<Scripted>, Session) {
         vec![text("## Goal\nwarm summary")],
         vec![text("continued")],
     ]);
-    let agent = Agent::new(
-        main.clone(),
-        ModelSpec::new("test", "big"),
-        rho::tools::builtin(),
-    );
+    let agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(main.clone(), ModelSpec::new("test", "big"))
+    };
     let cwd = std::env::current_dir().unwrap();
     let (mut session, _log) = common::session(&agent, &cwd).await;
     agent
@@ -203,7 +201,7 @@ async fn compaction_counts_its_usage() {
     };
     let main = Scripted::new(vec![vec![text("done")]]);
     let cheap = Scripted::new(vec![vec![text("## Goal\nsummary"), Event::Usage(usage)]]);
-    let mut agent = Agent::new(main, ModelSpec::new("test", "big"), vec![]);
+    let mut agent = Agent::new(main, ModelSpec::new("test", "big"));
     agent
         .registry
         .register(ProviderName::new("cheap"), cheap.clone());
@@ -229,7 +227,7 @@ async fn the_model_hears_about_the_profile_again_after_compaction() {
         vec![text("## Goal\nwarm summary")],
         vec![text("again")],
     ]);
-    let agent = Agent::new(main.clone(), ModelSpec::new("test", "big"), vec![]);
+    let agent = Agent::new(main.clone(), ModelSpec::new("test", "big"));
     let cwd = std::env::current_dir().unwrap();
     let (mut session, _log) = common::session(&agent, &cwd).await;
     let look = Profile {
@@ -272,7 +270,7 @@ async fn a_running_card_shows_the_compaction_until_it_is_done() {
         vec![text("## Goal\nsummary")],
         vec![],
     ]);
-    let agent = Agent::new(main, ModelSpec::new("test", "big"), vec![]);
+    let agent = Agent::new(main, ModelSpec::new("test", "big"));
     let cwd = std::env::current_dir().unwrap();
     let (mut session, log) = common::session(&agent, &cwd).await;
     agent

@@ -852,7 +852,6 @@ mod tests {
         let mut agent = Agent::new(
             Arc::new(Scripted(Mutex::new(answers.to_vec()))),
             ModelSpec::new("test", "m"),
-            vec![],
         );
         agent.sessions_db = Some(Arc::new(move |_| db.clone()));
         // Answers `summarizeOver`.

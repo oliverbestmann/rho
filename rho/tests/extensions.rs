@@ -128,12 +128,11 @@ async fn hooks_register_tools_block_rewrite_and_continue() {
     ]);
     let recorder = Arc::new(Recorder::default());
     let ended = recorder.ended.clone();
-    let mut agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
-    agent.extensions = vec![recorder.clone()];
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
+    agent.extensions.push(recorder.clone());
 
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     let stop = agent
@@ -223,8 +222,11 @@ async fn run_end_sees_the_session_info_before_and_after() {
         vec![text("again"), usage(30)],
     ]);
     let runs = Arc::new(Runs::default());
-    let mut agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![Arc::new(Echo)]);
-    agent.extensions = vec![runs.clone()];
+    let mut agent = Agent {
+        extensions: vec![Arc::new(rho::tools::ToolExtension::from(Echo))],
+        ..Agent::new(provider, ModelSpec::new("test", "m"))
+    };
+    agent.extensions.push(runs.clone());
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     let info = session.ctx.session_info();
     assert_eq!(
@@ -282,11 +284,10 @@ async fn async_messages_steer_queue_and_trigger_turns() {
         vec![text("got it")],
         vec![text("second prompt")],
     ]);
-    let agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        vec![Arc::new(Later)],
-    );
+    let agent = Agent {
+        extensions: vec![Arc::new(rho::tools::ToolExtension::from(Later))],
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
     let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
 
     agent
@@ -391,12 +392,11 @@ fn confirm_agent(own_card: bool) -> (Arc<Scripted>, Agent) {
         )],
         vec![text("ok")],
     ]);
-    let mut agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
-    agent.extensions = vec![Arc::new(Confirmer { own_card })];
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
+    agent.extensions.push(Arc::new(Confirmer { own_card }));
     (provider, agent)
 }
 
@@ -516,7 +516,10 @@ async fn acp_background_message_starts_a_turn_without_prompt() {
         vec![text("waiting")],
         vec![text("got it")],
     ]);
-    let agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![Arc::new(Later)]);
+    let agent = Agent {
+        extensions: vec![Arc::new(rho::tools::ToolExtension::from(Later))],
+        ..Agent::new(provider, ModelSpec::new("test", "m"))
+    };
 
     let client = Client
         .builder()
@@ -585,12 +588,11 @@ async fn run_with_stopper(
     Arc<common::Log>,
 ) {
     let provider = Scripted::new(responses);
-    let mut agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
-    agent.extensions = vec![Arc::new(Stopper(at))];
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
+    agent.extensions.push(Arc::new(Stopper(at)));
     let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
     let stop = agent
         .run(&mut session, vec![Content::text("hi")])
@@ -669,7 +671,7 @@ async fn stop_in_before_settle_prevents_continuation() {
 #[tokio::test]
 async fn stop_while_idle_does_not_affect_the_next_run() {
     let provider = Scripted::new(vec![vec![text("ok")]]);
-    let agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![]);
+    let agent = Agent::new(provider, ModelSpec::new("test", "m"));
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     session.ctx.stop("stale");
     let stop = agent
@@ -684,12 +686,11 @@ async fn grant_commands_widen_the_sandbox_and_tell_the_model() {
     let cwd = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let provider = Scripted::new(vec![vec![text("ok")]]);
-    let mut agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
-    agent.extensions = vec![Arc::new(rho::sandbox::GrantCommands)];
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
+    agent.extensions.push(Arc::new(rho::sandbox::GrantCommands));
     let (mut session, log) = common::session(&agent, cwd.path()).await;
     let names: Vec<_> = session.commands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["grant-read", "grant-write", "sandbox"]);

@@ -23,11 +23,13 @@ fn agent() -> Agent {
         rho::anthropic::NAME,
     ));
     let model = std::env::var("RHO_MODEL").unwrap_or_else(|_| "claude-sonnet-5-5".into());
-    let mut agent = Agent::new(
-        Arc::new(Anthropic::new(http, store)),
-        ModelSpec::new("anthropic", model),
-        rho::tools::builtin(),
-    );
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(
+            Arc::new(Anthropic::new(http, store)),
+            ModelSpec::new("anthropic", model),
+        )
+    };
     agent.thinking = Thinking::Low;
     agent
 }
@@ -206,11 +208,13 @@ async fn copilot_tool_round_trip() {
         let path = std::env::var("RHO_AUTH_FILE").expect("set RHO_AUTH_FILE");
         let http = reqwest::Client::new();
         let store = Arc::new(AuthStore::new(path.into(), http.clone(), rho::copilot::KEY));
-        let mut agent = Agent::new(
-            Arc::new(rho::copilot::Copilot::new(http, store)),
-            ModelSpec::new("github-copilot", model),
-            rho::tools::builtin(),
-        );
+        let mut agent = Agent {
+            extensions: rho::builtin(),
+            ..Agent::new(
+                Arc::new(rho::copilot::Copilot::new(http, store)),
+                ModelSpec::new("github-copilot", model),
+            )
+        };
         agent.thinking = Thinking::Low;
         let mut s = session(&agent).await;
         let (usages, answer, ..) = prompt(

@@ -104,7 +104,7 @@ mod tests {
 
     #[tokio::test]
     async fn reminds_after_the_first_turn_until_titled() {
-        let mut agent = Agent::new(Arc::new(Echo), ModelSpec::new("test", "m"), vec![]);
+        let mut agent = Agent::new(Arc::new(Echo), ModelSpec::new("test", "m"));
         agent.extensions.push(Arc::new(SessionTitle));
         let mut s = agent
             .start_session(SessionId::new("s"), "/tmp", vec![], Arc::new(NoFrontend))

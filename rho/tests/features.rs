@@ -55,11 +55,10 @@ async fn features_unlock_tools_and_sandbox_until_turned_off() {
         vec![text("done"), Event::Done(StopReason::EndTurn)],
         vec![text("off"), Event::Done(StopReason::EndTurn)],
     ]);
-    let mut agent = Agent::new(
-        scripted.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
+    let mut agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(scripted.clone(), ModelSpec::new("test", "m"))
+    };
     agent.extensions.push(Arc::new(FeatureCommands));
     agent.features = vec![Feature {
         id: FeatureId::new("files"),

@@ -14,11 +14,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 mod common;
 
 fn agent() -> Agent {
-    Agent::new(
-        common::Scripted::new(vec![]),
-        ModelSpec::new("test", "m"),
-        vec![],
-    )
+    Agent::new(common::Scripted::new(vec![]), ModelSpec::new("test", "m"))
 }
 
 async fn server() -> String {
@@ -172,7 +168,7 @@ impl rho::extension::Extension for Greeter {
 #[tokio::test]
 async fn session_start_notices_follow_the_new_session_response() {
     let mut agent = agent();
-    agent.extensions = vec![Arc::new(Greeter)];
+    agent.extensions.push(Arc::new(Greeter));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/", listener.local_addr().unwrap());
     tokio::spawn(rho::acp_ws::serve(

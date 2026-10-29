@@ -60,7 +60,7 @@ The reasons behind these are in [docs/adr](docs/adr/README.md).
 
 Cargo workspace:
 
-- `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). No extensions.
+- `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). Its only extensions are the built-in tools (`rho::builtin()`), `GrantCommands` and `FeatureCommands`.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
@@ -74,8 +74,8 @@ Cargo workspace:
 - `rho/src/config.rs` - `config.d`: merged JSON config and prompt files
 - `rho/src/models.rs` - `"models"` config: allowed, default and compaction models by path
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
-- `rho/src/tools.rs` - `Tool` trait and built-ins: `Read`, `ReadImage`, `Write`, `Bash`, `RequestAccess`
-- `rho/src/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
+- `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
+- `rho/src/tools/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat); saving in `agent/persist.rs`, slash commands in `agent/commands.rs`, usage reports in `agent/usage.rs`
 - `rho/src/compact.rs` - `/compact` and the `Compact` tool
 - `rho/src/prompt.rs` - the system prompt
@@ -366,9 +366,11 @@ tool.
 
 Implement `rho::extension::Extension` (all hooks optional) in a binary crate
 and pass it to `rho::run`, like `agent/src/main.rs`. `rho::Options` also
-sets providers, tools, the default model and the compaction model; its
-`Default` is anthropic and github-copilot + the built-in tools + no
-extensions. A tool returns `ToolOutput` (`.into()` from a `String`); set
+sets providers, the default model and the compaction model; its
+`Default` is anthropic and github-copilot + `rho::builtin()`, the built-in
+tools, each its own extension. Tools come only from extensions
+(`SessionSetup::tools`); `Arc::new(ToolExtension::from(MyTool))` registers a
+single tool. A tool returns `ToolOutput` (`.into()` from a `String`); set
 its `diff` to show a file change to ACP clients. `Tool::kind` picks the
 client's icon, and `Tool::titled` makes the `description` input the card
 title (ADR 0050).
@@ -389,7 +391,11 @@ object-safe twins `DynExtension` / `DynTool`, implemented automatically;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rho::run(rho::Options {
-        extensions: vec![Arc::new(GitGate), Arc::new(GoCheck::default())],
+        extensions: [
+            rho::builtin(),
+            vec![Arc::new(GitGate), Arc::new(GoCheck::default())],
+        ]
+        .concat(),
         ..Default::default()
     })
     .await
@@ -525,7 +531,7 @@ session.profiles.push(Profile {
     id: ProfileId::from_static("plan"),
     name: "Plan".into(),
     description: "Read-only: explore and plan, no changes".into(),
-    hidden_tools: vec![rho::tools::WRITE, rho::edit::EDIT],
+    hidden_tools: vec![rho::tools::WRITE, rho::tools::EDIT],
     read_only: true,                  // sandboxed tools can only read
     instructions: Some("...".into()), // told to the model on switching here
 });

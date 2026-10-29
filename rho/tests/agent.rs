@@ -64,11 +64,10 @@ fn tool_then_answer() -> Vec<Vec<Event>> {
 #[tokio::test]
 async fn agent_runs_tools_and_feeds_results_back() {
     let provider = Scripted::new(tool_then_answer());
-    let agent = Agent::new(
-        provider.clone(),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
+    let agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider.clone(), ModelSpec::new("test", "m"))
+    };
     let dir = tempfile::tempdir().unwrap();
 
     let (mut session, log) = common::session(&agent, dir.path()).await;
@@ -129,11 +128,13 @@ async fn agent_runs_tools_and_feeds_results_back() {
 
 #[tokio::test]
 async fn usage_report_shows_cache_details() {
-    let agent = Agent::new(
-        Scripted::new(tool_then_answer()),
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    );
+    let agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(
+            Scripted::new(tool_then_answer()),
+            ModelSpec::new("test", "m"),
+        )
+    };
     let dir = tempfile::tempdir().unwrap();
     let (mut session, _log) = common::session(&agent, dir.path()).await;
     assert!(session.usage_report().contains("No requests yet."));
@@ -169,7 +170,7 @@ async fn unknown_tool_is_reported_as_error() {
         })],
         vec![text("ok")],
     ]);
-    let agent = Agent::new(provider, ModelSpec::new("test", "m"), vec![]);
+    let agent = Agent::new(provider, ModelSpec::new("test", "m"));
     let (mut session, log) = common::session(&agent, std::path::Path::new(".")).await;
     agent
         .run(&mut session, vec![Content::text("hi")])
@@ -196,7 +197,7 @@ async fn failed_turn_keeps_history_valid() {
             stream::iter([Err(anyhow::anyhow!("boom"))]).boxed()
         }
     }
-    let agent = Agent::new(Arc::new(Failing), ModelSpec::new("test", "m"), vec![]);
+    let agent = Agent::new(Arc::new(Failing), ModelSpec::new("test", "m"));
     let (mut session, _log) = common::session(&agent, std::path::Path::new(".")).await;
     for prompt in ["a", "b"] {
         let result = agent.run(&mut session, vec![Content::text(prompt)]).await;
@@ -215,11 +216,10 @@ async fn failed_turn_keeps_history_valid() {
 #[tokio::test]
 async fn acp_session_streams_text_and_tool_calls() {
     let provider = Scripted::new(tool_then_answer());
-    let agent = Arc::new(Agent::new(
-        provider,
-        ModelSpec::new("test", "m"),
-        rho::tools::builtin(),
-    ));
+    let agent = Arc::new(Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider, ModelSpec::new("test", "m"))
+    });
 
     let client = Client
         .builder()
@@ -307,11 +307,7 @@ async fn acp_cancel_stops_a_running_prompt() {
                 .boxed()
         }
     }
-    let agent = Arc::new(Agent::new(
-        Arc::new(Hangs),
-        ModelSpec::new("test", "m"),
-        vec![],
-    ));
+    let agent = Arc::new(Agent::new(Arc::new(Hangs), ModelSpec::new("test", "m")));
 
     let client = Client
         .builder()
@@ -368,7 +364,10 @@ async fn cancelled_tool_call_is_ended() {
         }),
         Event::Done(StopReason::ToolUse),
     ]]);
-    let agent = Agent::new(provider, ModelSpec::new("test", "m"), rho::tools::builtin());
+    let agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(provider, ModelSpec::new("test", "m"))
+    };
     let dir = tempfile::tempdir().unwrap();
     let (mut session, log) = common::session(&agent, dir.path()).await;
     // Dropping the run future is how ACP cancels it.
@@ -427,11 +426,10 @@ async fn tool_images_the_api_rejects_become_errors() {
         vec![call, Event::Done(StopReason::ToolUse)],
         vec![text("ok"), Event::Done(StopReason::EndTurn)],
     ]);
-    let agent = Agent::new(
-        provider,
-        ModelSpec::new("test", "m"),
-        vec![Arc::new(BadImage)],
-    );
+    let agent = Agent {
+        extensions: vec![Arc::new(rho::tools::ToolExtension::from(BadImage))],
+        ..Agent::new(provider, ModelSpec::new("test", "m"))
+    };
     let dir = tempfile::tempdir().unwrap();
     let (mut session, _) = common::session(&agent, dir.path()).await;
     agent
@@ -460,8 +458,8 @@ async fn before_send_changes_the_body_but_not_the_history() {
         }
     }
     let provider = Scripted::new(vec![vec![text("ok"), Event::Done(StopReason::EndTurn)]]);
-    let mut agent = Agent::new(provider.clone(), ModelSpec::new("test", "m"), vec![]);
-    agent.extensions = vec![Arc::new(Mask)];
+    let mut agent = Agent::new(provider.clone(), ModelSpec::new("test", "m"));
+    agent.extensions.push(Arc::new(Mask));
     let dir = tempfile::tempdir().unwrap();
     let (mut session, _) = common::session(&agent, dir.path()).await;
     agent

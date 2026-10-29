@@ -146,7 +146,7 @@ impl Extension for Secrets {
     async fn session_start(&self, session: &mut SessionSetup) {
         for tool in &mut session.tools {
             let name = tool.spec().name;
-            if name == rho::edit::EDIT || name == rho::tools::WRITE {
+            if name == rho::tools::EDIT || name == rho::tools::WRITE {
                 *tool = Arc::new(AllowMasked(tool.clone()));
             }
         }
@@ -185,7 +185,7 @@ impl Extension for Secrets {
             return Decision::Allow;
         }
         let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
-        let adds = if call.name == rho::edit::EDIT {
+        let adds = if call.name == rho::tools::EDIT {
             let edits = input["edits"].as_array().into_iter().flatten();
             edits
                 .into_iter()
@@ -249,13 +249,16 @@ mod tests {
         let ctx = ctx(dir.path());
         let mut setup = SessionSetup {
             ctx: ctx.clone(),
-            tools: rho::tools::builtin(),
+            tools: vec![],
             system: String::new(),
             commands: vec![],
             resumed: false,
             profiles: vec![],
             features: vec![],
         };
+        for ext in rho::builtin() {
+            ext.session_start(&mut setup).await;
+        }
         Secrets::new().session_start(&mut setup).await;
         let tool = |name| {
             let t = setup.tools.iter().find(|t| t.spec().name == name).unwrap();
@@ -264,7 +267,7 @@ mod tests {
                 t.spec().input_schema["properties"]["allowMasked"].is_object(),
             )
         };
-        assert!(tool(rho::edit::EDIT).1);
+        assert!(tool(rho::tools::EDIT).1);
         assert!(!tool(rho::tools::BASH).1);
         let (write, has) = tool(rho::tools::WRITE);
         assert!(has);
@@ -352,7 +355,7 @@ mod tests {
         };
         let write = |path: &str, content: &str| json!({"path": path, "content": content});
         let edit = |old: &str, new: &str| json!({"path": "f", "edits": [{"oldText": "x", "newText": "y"}, {"oldText": old, "newText": new}]});
-        use rho::edit::EDIT;
+        use rho::tools::EDIT;
         use rho::tools::WRITE;
         assert!(matches!(
             decide(WRITE, write("new", "k=REDACTED")).await,

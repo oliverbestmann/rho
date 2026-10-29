@@ -7,7 +7,6 @@ use crate::auth::{self, AuthStore, Pkce};
 use crate::copilot::{self, Copilot};
 use crate::extension::{DynExtension, Frontend};
 use crate::provider::{Content, ModelSpec, ProviderName, Registry, Thinking, Usage};
-use crate::tools::DynTool;
 use anyhow::{Context, Result, bail};
 
 const USAGE: &str = "\
@@ -46,7 +45,7 @@ empty files are ignored";
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
 ///     rho::run(rho::Options {
-///         extensions: vec![Arc::new(MyExtension)],
+///         extensions: [rho::builtin(), vec![Arc::new(MyExtension)]].concat(),
 ///         ..Default::default()
 ///     })
 ///     .await
@@ -56,10 +55,9 @@ pub struct Options {
     /// Providers by name; `-m name/model` picks one. Default: `anthropic`
     /// and `github-copilot` (auth from `RHO_AUTH_FILE` / `~/.config/rho/auth.json`).
     pub providers: Registry,
-    /// Default: `tools::builtin()` (`Read`, `ReadImage`, `Write`, `Edit`,
-    /// `Bash`, `RequestAccess`, `Compact`).
-    pub tools: Vec<Arc<dyn DynTool>>,
-    /// Default: none.
+    /// Default: `rho::builtin()`, the built-in tools (`Read`, `ReadImage`,
+    /// `Write`, `Edit`, `Bash`, `RequestAccess`, `Compact`). Keep them first
+    /// when adding your own.
     pub extensions: Vec<Arc<dyn DynExtension>>,
     /// Unless `-m` or `RHO_MODEL` is set.
     pub model: ModelSpec,
@@ -87,8 +85,7 @@ impl Default for Options {
         );
         Self {
             providers,
-            tools: crate::tools::builtin(),
-            extensions: vec![],
+            extensions: crate::tools::builtin(),
             model: ModelSpec::from_static("anthropic", "claude-sonnet-5-5"),
             compact_model: None,
             sessions_db: Some(Arc::new(|_| crate::store::default_path())),
@@ -203,7 +200,7 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     let model_pinned = model.is_some();
     let model = model.unwrap_or(options.model);
     let provider = options.providers.resolve(&model)?;
-    let mut agent = Agent::new(provider, model, options.tools);
+    let mut agent = Agent::new(provider, model);
     agent.thinking = thinking;
     agent.model_pinned = model_pinned;
     agent.registry = options.providers;

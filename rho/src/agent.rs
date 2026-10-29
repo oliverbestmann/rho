@@ -118,7 +118,7 @@ pub struct Agent {
     pub compact_pinned: bool,
     /// Allowed, default and compaction models by cwd, from the `models` config.
     pub models: crate::models::Config,
-    pub tools: Vec<Arc<dyn DynTool>>,
+    /// Hooks, and the tools: also the built-in ones come from `rho::builtin()`.
     pub extensions: Vec<Arc<dyn DynExtension>>,
     /// Available to extensions through `Context::complete`.
     pub registry: Registry,
@@ -321,11 +321,7 @@ impl Drop for Session {
 }
 
 impl Agent {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        model: ModelSpec,
-        tools: Vec<Arc<dyn DynTool>>,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, model: ModelSpec) -> Self {
         Self {
             provider,
             model,
@@ -335,7 +331,6 @@ impl Agent {
             model_pinned: false,
             compact_pinned: false,
             models: Default::default(),
-            tools,
             extensions: vec![],
             registry: Registry::default(),
             max_tokens: 32_000,
@@ -501,7 +496,7 @@ impl Agent {
         }
         let mut setup = SessionSetup {
             ctx: ctx.clone(),
-            tools: self.tools.clone(),
+            tools: vec![],
             system: String::new(),
             commands: vec![],
             resumed,

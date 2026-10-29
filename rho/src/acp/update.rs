@@ -12,10 +12,10 @@ use agent_client_protocol::schema::v1::{
 };
 
 use crate::agent::AgentEvent;
-use crate::edit::EDIT;
 use crate::extension::{Answers, Field, FieldKey, FieldKind, Form, red};
 use crate::provider::{self, ImageSource, NoteType, ToolName, Usage};
 use crate::tools;
+use crate::tools::EDIT;
 
 use super::PROFILE_OPTION;
 use super::frontend::Published;

@@ -160,6 +160,7 @@ mod tests {
 
     #[test]
     fn builds_sections_from_files() {
+        let tools: Vec<Arc<dyn DynTool>> = vec![Arc::new(crate::tools::Read)];
         let config = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let cwd = project.path().join("sub");
@@ -173,7 +174,7 @@ mod tests {
 
         let p = build(
             PREAMBLE,
-            &crate::tools::builtin(),
+            &tools,
             Some(config.path()),
             std::slice::from_ref(&cwd),
         );
@@ -204,7 +205,7 @@ mod tests {
         );
         let empty = build(
             PREAMBLE,
-            &crate::tools::builtin(),
+            &tools,
             Some(config.path()),
             std::slice::from_ref(&cwd),
         );
@@ -212,7 +213,7 @@ mod tests {
         std::fs::write(d.join("APPEND_SYSTEM.md"), " \n").unwrap();
         let p = build(
             PREAMBLE,
-            &crate::tools::builtin(),
+            &tools,
             Some(config.path()),
             std::slice::from_ref(&cwd),
         );
@@ -226,7 +227,7 @@ mod tests {
         ensure_files(config.path());
         let p = build(
             PREAMBLE,
-            &crate::tools::builtin(),
+            &tools,
             Some(config.path()),
             std::slice::from_ref(&cwd),
         );

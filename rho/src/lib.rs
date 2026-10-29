@@ -7,7 +7,6 @@ pub mod cli;
 pub mod compact;
 pub mod config;
 pub mod copilot;
-pub mod edit;
 pub mod extension;
 pub mod feature;
 pub mod form;
@@ -24,6 +23,7 @@ pub mod tools;
 use std::path::PathBuf;
 
 pub use cli::{Options, run};
+pub use tools::builtin;
 
 /// `$XDG_CONFIG_HOME/rho`, else `~/.config/rho`.
 pub fn config_dir() -> PathBuf {

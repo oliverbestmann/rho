@@ -61,9 +61,15 @@ impl Provider for Models {
     }
 }
 
-fn agent_with(scripted: Arc<Scripted>, tools: Vec<Arc<dyn rho::tools::DynTool>>) -> Arc<Agent> {
+fn agent_with(
+    scripted: Arc<Scripted>,
+    extensions: Vec<Arc<dyn rho::extension::DynExtension>>,
+) -> Arc<Agent> {
     let provider = Arc::new(Models(scripted));
-    let mut agent = Agent::new(provider.clone(), ModelSpec::new("fake", "big"), tools);
+    let mut agent = Agent {
+        extensions,
+        ..Agent::new(provider.clone(), ModelSpec::new("fake", "big"))
+    };
     agent.registry.register(ProviderName::new("fake"), provider);
     Arc::new(agent)
 }
@@ -310,7 +316,7 @@ fn bash_run() -> Vec<Vec<Event>> {
 }
 
 async fn run_bash(client_meta: Option<Meta>) -> Vec<SessionUpdate> {
-    let agent = agent_with(Scripted::new(bash_run()), rho::tools::builtin());
+    let agent = agent_with(Scripted::new(bash_run()), rho::builtin());
     let updates = Updates::default();
     let record = recording(&updates);
     let mut capabilities = ClientCapabilities::new();
@@ -468,7 +474,10 @@ async fn ask_with(form_support: bool, reply: Option<(&'static str, &'static str)
         ],
         vec![text("ok"), Event::Done(StopReason::EndTurn)],
     ]);
-    let agent = agent_with(scripted.clone(), vec![Arc::new(Ask)]);
+    let agent = agent_with(
+        scripted.clone(),
+        vec![Arc::new(rho::tools::ToolExtension::from(Ask))],
+    );
     let schemas = Arc::new(Mutex::new(vec![]));
     let seen = schemas.clone();
     let mut capabilities = ClientCapabilities::new();
@@ -620,7 +629,7 @@ async fn read_image_sends_the_image_to_model_and_client() {
         ],
         vec![text("a dot"), Event::Done(StopReason::EndTurn)],
     ]);
-    let agent = agent_with(scripted.clone(), rho::tools::builtin());
+    let agent = agent_with(scripted.clone(), rho::builtin());
     let updates = Updates::default();
     let record = recording(&updates);
     let cwd = dir.path().to_path_buf();
