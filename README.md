@@ -73,6 +73,7 @@ Cargo workspace:
 - `rho/src/copilot.rs` - GitHub Copilot: login, token exchange, Claude via `anthropic`, GPT via `openai.rs` (Responses API)
 - `rho/src/config.rs` - `config.d`: merged JSON config and prompt files
 - `rho/src/models.rs` - `"models"` config: allowed, default and compaction models by path
+- `rho/src/openai_api.rs` - OpenAI-compatible `/v1/chat/completions` and `/v1/models` on the daemon (`"api"` config)
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
 - `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
 - `rho/src/tools/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
@@ -142,7 +143,8 @@ The result has one key per subsystem:
   "sandbox":  { "paths": { "~/go": "readwrite" } },
   "features": { "ssh": { "paths": { "~/.ssh": "read" } } },
   "models":   { "~/github": { "allow": ["github-copilot/*"] } },
-  "mcps":     { "github": { "type": "http", "url": "https://..." } }
+  "mcps":     { "github": { "type": "http", "url": "https://..." } },
+  "api":      { "enabled": true, "models": ["anthropic/*"], "token": "..." }
 }
 ```
 
@@ -642,6 +644,29 @@ open a WebSocket to localhost. It is `RHO_ACP_TOKEN`, else
 it as `Authorization: Bearer <token>`, or, from browsers, as a
 `bearer.<token>` subprotocol next to `acp.v1` (acp-ui does this for an
 `Authorization` header in its config). Only `acp.v1` is echoed back.
+
+### OpenAI-compatible API
+
+With `"api": {"enabled": true, "models": ["anthropic/*"]}` in the config,
+the daemon also serves `GET /v1/models` and `POST /v1/chat/completions`
+(streaming or not) on both listeners, so other clients can use rho's
+providers (ADR 0068). `models` takes the same patterns as `models.allow`
+(`*`, `provider/*`, `provider/model`); it is empty by default, which offers
+nothing. Model ids are `provider/model`. On `--listen` the API key is
+`api.token` if set, else the ACP token; the socket needs none.
+
+```sh
+curl http://ADDR/v1/chat/completions -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "anthropic/claude-opus-5-5", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+Input is text and images as base64 `data:` URLs; `tools`, `tool` messages
+and remote image URLs are rejected. `reasoning_effort` maps to rho's thinking
+levels (default off). `usage` includes `prompt_tokens_details.cached_tokens`
+(cache reads) and `cache_write_tokens` (cache writes, named as OpenRouter
+does). Requests go straight to the provider: no session, no
+system prompt of rho's, no extensions, nothing saved.
 
 ## Notes on subscription auth
 

@@ -129,6 +129,8 @@ pub struct Agent {
     pub sandbox: crate::sandbox::Config,
     /// Features each session starts with, from the `features` config.
     pub features: Vec<Feature>,
+    /// The OpenAI-compatible endpoints, from the `api` config.
+    pub api: crate::openai_api::Config,
     /// Where sessions are saved, by cwd. Each session opens its own
     /// connection. `None`: sessions are not saved and cannot be resumed.
     pub sessions_db: Option<SessionsDb>,
@@ -337,6 +339,7 @@ impl Agent {
             thinking: Thinking::default(),
             sandbox: Default::default(),
             features: vec![],
+            api: Default::default(),
             sessions_db: None,
         }
     }

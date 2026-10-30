@@ -83,6 +83,17 @@ where
     L::Addr: std::fmt::Debug,
 {
     let mut app = Router::new().route("/", get(upgrade));
+    if agent.api.enabled {
+        let mut api = crate::openai_api::router(agent.clone());
+        if let Some(token) = &token {
+            let token = agent.api.token.as_ref().unwrap_or(token);
+            api = api.layer(middleware::from_fn_with_state(
+                Arc::<str>::from(token.as_str()),
+                require_token,
+            ));
+        }
+        app = app.merge(api);
+    }
     if let Some(dir) = &web {
         // The client's routes (`/session/...`) are its page too, but a missing
         // hashed file (an old chunk after an update) is a 404, not the page.
@@ -320,6 +331,19 @@ fn is_hashed(path: &str) -> bool {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     });
     hashed && matches!(ext, "js" | "css")
+}
+
+/// The OpenAI API key: `api.token`, else the ACP token.
+async fn require_token(
+    State(token): State<Arc<str>>,
+    headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !authorized(&headers, &token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(req).await
 }
 
 fn authorized(headers: &HeaderMap, token: &str) -> bool {

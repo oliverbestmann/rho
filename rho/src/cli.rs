@@ -31,7 +31,8 @@ env:
 
 files in ~/.config/rho/config.d, each kind in file name order:
   *.json                merged (objects merge, later values win, null deletes) into
-                        sandbox, features, models (by path) and mcps (MCP servers over HTTP)
+                        sandbox, features, models (by path), mcps (MCP servers over HTTP)
+                        and api (OpenAI-compatible /v1 on the daemon's listeners)
   *PREAMBLE_SYSTEM.md   joined, replace the preamble (00-rho.PREAMBLE_SYSTEM.md is
                         written on startup without one)
   *APPEND_SYSTEM.md     joined, added to the system prompt
@@ -211,6 +212,7 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     agent.sandbox = crate::config::section(&config, "sandbox")?;
     agent.features = crate::feature::load(&config)?;
     agent.models = crate::config::section(&config, crate::models::Config::KEY)?;
+    agent.api = crate::config::section(&config, crate::openai_api::Config::KEY)?;
     agent.config_dir = Some(config_dir);
     let compact = match std::env::var("RHO_COMPACT_MODEL") {
         Ok(m) => {

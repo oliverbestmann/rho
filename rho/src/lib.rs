@@ -13,6 +13,7 @@ pub mod form;
 pub mod id;
 pub mod models;
 pub mod openai;
+pub mod openai_api;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
