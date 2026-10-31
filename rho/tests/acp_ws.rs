@@ -183,9 +183,10 @@ async fn session_start_notices_follow_the_new_session_response() {
     let cwd = std::env::current_dir().unwrap();
     let new = json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
         "params": {"cwd": cwd, "mcpServers": []}});
-    ws.send(Message::text(format!("{}\n{new}\n", initialize(1))))
-        .await
-        .unwrap();
+    // ACP rejects session/new until the initialize response is out.
+    ws.send(Message::text(initialize(1))).await.unwrap();
+    ws.next().await.unwrap().unwrap();
+    ws.send(Message::text(new.to_string())).await.unwrap();
     let mut sid = None;
     let read = async {
         loop {
