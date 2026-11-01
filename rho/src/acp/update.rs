@@ -117,6 +117,8 @@ pub(super) struct LastUsage {
     request: Usage,
     total: Usage,
     cost: f64,
+    history_bytes: u64,
+    request_bytes: u64,
 }
 
 impl LastUsage {
@@ -173,6 +175,8 @@ pub(super) fn usage_update(last: &LastUsage, size: u64) -> SessionUpdate {
             "session": counts(&last.total),
             "cacheHitRate": hit_rate,
             "cacheTtlSecs": crate::compact::CACHE_TTL.as_secs(),
+            "historyBytes": last.history_bytes,
+            "requestBytes": last.request_bytes,
         }
     })));
     if last.cost > 0.0 {
@@ -360,6 +364,8 @@ pub(super) fn to_update(
             context_window,
             total,
             cost,
+            history_bytes,
+            request_bytes,
         } => {
             *last_usage = LastUsage {
                 model: model.to_string(),
@@ -367,6 +373,8 @@ pub(super) fn to_update(
                 request: usage,
                 total,
                 cost,
+                history_bytes,
+                request_bytes,
             };
             usage_update(last_usage, context_window)
         }
@@ -818,6 +826,8 @@ mod tests {
                 context_window: 1_000_000,
                 total,
                 cost: 0.5,
+                history_bytes: 4096,
+                request_bytes: 3000,
             },
             0,
             None,
@@ -837,6 +847,10 @@ mod tests {
         assert_eq!(rho["session"]["cacheRead"], 1000);
         assert_eq!(rho["cacheHitRate"], 0.9);
         assert_eq!(rho["cacheTtlSecs"], 300);
+        assert_eq!(
+            (rho["historyBytes"].clone(), rho["requestBytes"].clone()),
+            (json!(4096), json!(3000))
+        );
 
         // A model switch republishes the context with the new window.
         let wire = serde_json::to_value(to_update(

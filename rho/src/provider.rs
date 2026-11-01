@@ -196,6 +196,24 @@ fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
 /// unless `shrink` keeps them.
 const REENCODE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Bytes of `value` as JSON, counted without building the string.
+pub fn json_size(value: &impl Serialize) -> u64 {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Writing to `Count` cannot fail, and our types serialize.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,

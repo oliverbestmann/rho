@@ -87,7 +87,7 @@ export class SessionState {
         this.commands.set(u.availableCommands);
         break;
       case 'usage_update':
-        this.usage.set({ used: u.used, size: u.size, cost: u.cost });
+        this.usage.set({ used: u.used, size: u.size, cost: u.cost, _meta: u._meta });
         break;
     }
   }
@@ -148,7 +148,7 @@ export interface Queued {
 }
 
 /** `_meta.rho`, rho's own fields; undefined if not sent. */
-function rhoMeta(meta: Meta) {
+export function rhoMeta(meta: Meta) {
   const rho = meta?.['rho'];
   return typeof rho === 'object' && rho ? (rho as { [key: string]: unknown }) : undefined;
 }

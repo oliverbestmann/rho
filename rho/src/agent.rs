@@ -49,6 +49,9 @@ pub enum AgentEvent<'a> {
         /// USD for the session so far; requests to models without a known
         /// price are not included.
         cost: f64,
+        /// See `Session::history_bytes` and `Session::request_bytes`.
+        history_bytes: u64,
+        request_bytes: u64,
     },
     ToolStart {
         id: &'a ToolCallId,
@@ -165,6 +168,9 @@ pub struct Session {
     pub history: Vec<Message>,
     /// Start of the last model request, to guess if the prompt cache is warm.
     pub last_request: Option<Instant>,
+    /// Approximate size of the last request (system, messages, tools as
+    /// JSON); 0 before the first.
+    pub request_bytes: u64,
     /// The profile and features that were on when the model was last told;
     /// `None` before the first request (and after a compaction).
     pub(crate) seen: Option<(ProfileId, Vec<FeatureId>)>,
@@ -225,7 +231,14 @@ impl Session {
             context_window: self.provider.context_window(self.model.id()),
             total: self.usage,
             cost: self.cost,
+            history_bytes: self.history_bytes(),
+            request_bytes: self.request_bytes,
         });
+    }
+
+    /// Approximate memory the history takes: its size as JSON.
+    pub fn history_bytes(&self) -> u64 {
+        crate::provider::json_size(&self.history)
     }
 
     /// Specs of all tools. Every request carries all of them, whatever the
@@ -262,6 +275,8 @@ impl Session {
     async fn stream(&mut self, request: Request) -> Result<(Vec<Content>, StopReason, Usage)> {
         let ctx = self.ctx.clone();
         self.last_request = Some(Instant::now());
+        self.request_bytes =
+            crate::provider::json_size(&(&request.system, &request.messages, &request.tools));
         self.requests += 1;
         let mut stream = ctx.stream(&*self.provider, request);
         let mut content: Vec<Content> = Vec::new();
@@ -299,6 +314,8 @@ impl Session {
                         context_window: self.provider.context_window(self.model.id()),
                         total: self.usage,
                         cost: self.cost,
+                        history_bytes: self.history_bytes(),
+                        request_bytes: self.request_bytes,
                     });
                 }
                 Event::Done(reason) => stop = reason,
@@ -537,6 +554,7 @@ impl Agent {
             commands: setup.commands,
             history: vec![],
             last_request: None,
+            request_bytes: 0,
             seen: None,
             roots,
             extensions: self.extensions.clone(),

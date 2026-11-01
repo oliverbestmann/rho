@@ -44,6 +44,10 @@ impl Session {
         if self.cost > 0.0 {
             out += &format!("- Cost: ${:.4}\n", self.cost);
         }
+        out += &format!("- History in memory: ~{}\n", bytes(self.history_bytes()));
+        if self.request_bytes > 0 {
+            out += &format!("- Last request: ~{}\n", bytes(self.request_bytes));
+        }
         let ttl = crate::compact::CACHE_TTL;
         out += &match self.last_request.map(|t| t.elapsed()) {
             Some(age) if age < ttl => {
@@ -60,6 +64,15 @@ impl Session {
             ),
         };
         out
+    }
+}
+
+/// 1536 -> "1.5 KB", in binary units.
+pub(crate) fn bytes(n: u64) -> String {
+    match n {
+        ..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
+        _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
     }
 }
 
@@ -104,6 +117,14 @@ fn hit_rate(u: &Usage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_are_readable() {
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(1536), "1.5 KB");
+        assert_eq!(bytes(3 * 1_048_576), "3.0 MB");
+        assert_eq!(crate::provider::json_size(&serde_json::json!({"a": 1})), 7);
+    }
 
     #[test]
     fn turn_report_sums_up_the_run() {

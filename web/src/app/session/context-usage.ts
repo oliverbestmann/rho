@@ -2,6 +2,7 @@ import { Component, computed, input } from '@angular/core';
 import type * as acp from '@agentclientprotocol/sdk';
 import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule } from '@angular/material/menu';
+import { rhoMeta } from './session-state';
 
 /** A ring that fills with the context used, like Zed's; tap it for the numbers. */
 @Component({
@@ -31,6 +32,12 @@ import { MatMenuModule } from '@angular/material/menu';
         <div>{{ tokens(usage().used) }} of {{ tokens(usage().size) }} tokens, {{ percent() }}%</div>
         @if (cost(); as cost) {
           <div>Cost: {{ cost }}</div>
+        }
+        @if (sizes(); as s) {
+          <div>History in memory: ~{{ s.history }}</div>
+          @if (s.request) {
+            <div>Last request: ~{{ s.request }}</div>
+          }
         }
       </div>
     </mat-menu>
@@ -88,7 +95,25 @@ export class ContextUsage {
     );
   });
 
+  /** rho's approximate history and last request sizes, from `_meta.rho`. */
+  protected readonly sizes = computed(() => {
+    const rho = rhoMeta(this.usage()._meta);
+    const [history, request] = [rho?.['historyBytes'], rho?.['requestBytes']];
+    if (typeof history !== 'number') return undefined;
+    return {
+      history: bytes(history),
+      request: typeof request === 'number' && request > 0 ? bytes(request) : undefined,
+    };
+  });
+
   protected tokens(n: number) {
     return `${Math.round(n / 1000)}k`;
   }
+}
+
+/** 1536 -> "1.5 KB", in binary units like rho's `/usage`. */
+export function bytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
