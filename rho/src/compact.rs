@@ -59,6 +59,39 @@ impl Tool for Compact {
     }
 }
 
+const TOKEN_STEP: u64 = 100_000;
+const BYTES_STEP: u64 = 1_000_000;
+const BYTES_NOTE: u64 = 10 * BYTES_STEP;
+
+/// A note for the model on how large the session is: the context from 200k
+/// tokens (from 300k with a hint to compact), the history from 10 MB.
+/// `noted` holds the 100k token and 1 MB steps of the last call; without
+/// `force` there is only a note if one of them grew since.
+pub(crate) fn size_note(
+    tokens: u64,
+    bytes: u64,
+    noted: &mut (u64, u64),
+    force: bool,
+) -> Option<String> {
+    let steps = (tokens / TOKEN_STEP, bytes / BYTES_STEP);
+    let grew = steps.0 > noted.0 || steps.1 > noted.1;
+    *noted = steps;
+    if !force && !grew {
+        return None;
+    }
+    let mut note = vec![];
+    if tokens >= 2 * TOKEN_STEP {
+        note.push(format!("{}k tokens of context are used.", tokens / 1000));
+    }
+    if tokens >= 3 * TOKEN_STEP {
+        note.push("If you do not need the full earlier conversation anymore (e.g. the previous task is done), use the Compact tool. Put anything that must stay exact into its `verbatim` field.".into());
+    }
+    if bytes >= BYTES_NOTE {
+        note.push(format!("The session history is {} MB large. Compact soon, at the next point where the earlier conversation is not needed in full.", bytes / 1_000_000));
+    }
+    (!note.is_empty()).then(|| note.join(" "))
+}
+
 /// Anthropic's default cache lifetime, refreshed on every hit.
 pub const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// Treat the cache as expired a bit early: the clock starts at request start
@@ -352,6 +385,39 @@ mod tests {
     use crate::provider::ToolCallId;
     use crate::provider::ToolName;
     use serde_json::json;
+
+    #[test]
+    fn size_note_from_200k_tokens_or_10_mb_and_on_each_step() {
+        let mut noted = (0, 0);
+        assert_eq!(size_note(199_000, 0, &mut noted, true), None);
+        assert_eq!(
+            size_note(250_000, 0, &mut noted, false).unwrap(),
+            "250k tokens of context are used."
+        );
+        // Same step: only forced (run start).
+        assert_eq!(size_note(290_000, 0, &mut noted, false), None);
+        assert!(size_note(290_000, 0, &mut noted, true).is_some());
+        assert!(
+            size_note(300_000, 0, &mut noted, false)
+                .unwrap()
+                .contains("Compact tool")
+        );
+        assert!(
+            size_note(300_000, 12_000_000, &mut noted, false)
+                .unwrap()
+                .contains("12 MB")
+        );
+        // Every MB from 10 MB on.
+        assert_eq!(size_note(300_000, 12_500_000, &mut noted, false), None);
+        assert!(
+            size_note(300_000, 13_000_000, &mut noted, false)
+                .unwrap()
+                .contains("13 MB")
+        );
+        // After a compaction the steps start low again.
+        assert_eq!(size_note(0, 0, &mut noted, false), None);
+        assert!(size_note(210_000, 0, &mut noted, false).is_some());
+    }
 
     #[test]
     fn serialize_drops_tool_outputs_and_cuts_args() {

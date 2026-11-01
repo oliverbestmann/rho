@@ -17,6 +17,13 @@ may ask it to compact in a prompt.
 - An optional `verbatim` text is shown to the summarizer (which is told to
   leave its content out) and appended unchanged to the summary under
   `## Notes`. The model uses it to keep important information exact.
+- A hidden system note (`compact::size_note`) tells the model the context
+  size from 200k tokens, and suggests the Compact tool from 300k. It also
+  says to compact soon once the history is over 10 MB. Absolute numbers, not
+  a share of the window, so 1M-token models get it too. It comes at the start
+  of each run, and before the next request whenever the context crosses a
+  100k-token step or the history (from 10 MB) another MB. It is appended to the
+  history, so the prompt cache stays valid.
 - Below 10% of the context window (the last request's prompt plus output)
   the tool does nothing and says so. With an unknown window it compacts.
 - The tool only sets a flag on the `Context`. The agent loop compacts after

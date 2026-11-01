@@ -174,6 +174,8 @@ pub struct Session {
     /// The profile and features that were on when the model was last told;
     /// `None` before the first request (and after a compaction).
     pub(crate) seen: Option<(ProfileId, Vec<FeatureId>)>,
+    /// See `compact::size_note`.
+    size_noted: (u64, u64),
     /// The cwd, then the additional directories.
     roots: Vec<PathBuf>,
     extensions: Vec<Arc<dyn DynExtension>>,
@@ -239,6 +241,16 @@ impl Session {
     /// Approximate memory the history takes: its size as JSON.
     pub fn history_bytes(&self) -> u64 {
         crate::provider::json_size(&self.history)
+    }
+
+    /// Tells the model how large the session is, see `compact::size_note`.
+    /// Hidden from the user like all system notes.
+    fn push_size_note(&mut self, force: bool) {
+        let tokens = self.last_usage.prompt() + self.last_usage.output;
+        let bytes = self.history_bytes();
+        if let Some(note) = crate::compact::size_note(tokens, bytes, &mut self.size_noted, force) {
+            push_user(&mut self.history, vec![Content::system_note(note)]);
+        }
     }
 
     /// Specs of all tools. Every request carries all of them, whatever the
@@ -556,6 +568,7 @@ impl Agent {
             last_request: None,
             request_bytes: 0,
             seen: None,
+            size_noted: (0, 0),
             roots,
             extensions: self.extensions.clone(),
             persist: store.map(Persist::new),
@@ -702,6 +715,7 @@ impl Agent {
             return Ok(stop);
         }
         session.push_notes();
+        session.push_size_note(true);
         push_user(&mut session.history, setup.content);
         session.save().await;
 
@@ -713,6 +727,7 @@ impl Agent {
             {
                 push_user(&mut session.history, vec![Content::system_note(note)]);
             }
+            session.push_size_note(false);
             let mut request = Request {
                 model: session.model.id().clone(),
                 system: setup.system.clone(),
