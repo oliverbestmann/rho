@@ -125,8 +125,8 @@ impl ImageSource {
     /// itself, so bigger ones only cost upload on every request.
     pub const MAX_SIDE: u32 = 1568;
 
-    /// Scales the image down to `MAX_SIDE` (as JPEG, like images over
-    /// `REENCODE_BYTES`; see `shrink`), then fails if a provider would
+    /// Scales the image down to `MAX_SIDE` (as JPEG, like PNGs and images
+    /// over `REENCODE_BYTES`; see `shrink`), then fails if a provider would
     /// still reject it. A rejected image in the history fails every later
     /// request of the session, so images are fitted before they are added.
     pub fn fit(&mut self) -> Result<()> {
@@ -157,9 +157,10 @@ impl ImageSource {
 }
 
 /// `bytes` scaled down to fit `ImageSource::MAX_SIDE`, as (media type,
-/// bytes); `None` if it fits and is at most `REENCODE_BYTES`, or nothing
-/// smaller comes out. JPEG, except GIFs and images with transparent pixels,
-/// which JPEG cannot hold: those become PNG, and only when scaled.
+/// bytes); `None` if it fits and is a PNG or at most `REENCODE_BYTES`
+/// where nothing smaller comes out. JPEG, except GIFs and images with
+/// transparent pixels, which JPEG cannot hold: those become PNG, and only
+/// when scaled.
 fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
     use image::ImageReader;
     let reader = || ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format();
@@ -168,8 +169,11 @@ fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
         .context("cannot read the image")?;
     let max = ImageSource::MAX_SIDE;
     let resize = width.max(height) > max;
-    let gif = reader()?.format() == Some(image::ImageFormat::Gif);
-    if !resize && (gif || bytes.len() <= REENCODE_BYTES) {
+    let format = reader()?.format();
+    let gif = format == Some(image::ImageFormat::Gif);
+    // PNGs are often screenshots and photos that JPEG holds in less.
+    let png = format == Some(image::ImageFormat::Png);
+    if !resize && (gif || (!png && bytes.len() <= REENCODE_BYTES)) {
         return Ok(None);
     }
     let mut img = reader()?.decode().context("cannot read the image")?;
@@ -187,7 +191,8 @@ fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
     }
     img.to_rgb8()
         .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
-            &mut out, 85,
+            &mut out,
+            JPEG_QUALITY,
         ))?;
     Ok((resize || out.len() < bytes.len()).then_some(("image/jpeg", out)))
 }
@@ -195,6 +200,7 @@ fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
 /// Images above this are sent as JPEG even when they fit `MAX_SIDE`,
 /// unless `shrink` keeps them.
 const REENCODE_BYTES: usize = 2 * 1024 * 1024;
+const JPEG_QUALITY: u8 = 90;
 
 /// Bytes of `value` as JSON, counted without building the string.
 pub fn json_size(value: &impl Serialize) -> u64 {
@@ -742,7 +748,7 @@ mod tests {
         let small = png(10, 10);
         let mut fits = source("image/png", &small);
         fits.fit().unwrap();
-        assert_eq!(fits, source("image/png", &small), "left as it is");
+        assert_eq!(fits, source("image/png", &small), "JPEG is larger");
 
         let err = |mut s: ImageSource| s.fit().unwrap_err().to_string();
         assert!(err(source("image/tiff", "AAAA")).contains("unsupported image type"));
@@ -754,6 +760,21 @@ mod tests {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             image::Rgb(seed.to_le_bytes()[..3].try_into().unwrap())
         });
+        let mut photo = vec![];
+        image::imageops::crop_imm(&noise, 0, 0, 200, 200)
+            .to_image()
+            .write_to(
+                &mut std::io::Cursor::new(&mut photo),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let mut s = source("image/png", &b64.encode(&photo));
+        s.fit().unwrap();
+        let ImageSource::Base64 { media_type, .. } = &s;
+        assert_eq!(
+            media_type, "image/jpeg",
+            "a small PNG that JPEG holds in less"
+        );
         let mut big = vec![];
         noise
             .write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png)
