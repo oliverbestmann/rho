@@ -9,6 +9,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
+import { MatMenuModule } from '@angular/material/menu';
 
 /** An image to send, as in an ACP image block. */
 export interface Image {
@@ -39,6 +40,7 @@ export function readImage(file: File): Promise<Image> {
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
+    MatMenuModule,
   ],
   template: `
     @if (images().length) {
@@ -53,8 +55,28 @@ export function readImage(file: File): Promise<Image> {
         }
       </ul>
     }
+    <button matIconButton class="narrow" aria-label="More actions" [matMenuTriggerFor]="more">
+      <mat-icon>more_vert</mat-icon>
+    </button>
+    <mat-menu #more>
+      <button mat-menu-item (click)="optionsOpen.update((v) => !v)">
+        <mat-icon>tune</mat-icon>
+        <span>{{ optionsOpen() ? 'Hide settings' : 'Session settings' }}</span>
+      </button>
+      <button mat-menu-item (click)="file.click()">
+        <mat-icon>image</mat-icon>
+        <span>Attach image</span>
+      </button>
+      @if (running()) {
+        <button mat-menu-item (click)="cancel.emit()">
+          <mat-icon>stop</mat-icon>
+          <span>Stop</span>
+        </button>
+      }
+    </mat-menu>
     <button
       matIconButton
+      class="wide"
       aria-label="Session settings"
       aria-controls="session-options"
       [attr.aria-expanded]="optionsOpen()"
@@ -94,11 +116,11 @@ export function readImage(file: File): Promise<Image> {
       hidden
       (change)="attach($any($event.target).files); file.value = ''"
     />
-    <button matIconButton aria-label="Attach image" (click)="file.click()">
+    <button matIconButton class="wide" aria-label="Attach image" (click)="file.click()">
       <mat-icon>image</mat-icon>
     </button>
     @if (running()) {
-      <button matIconButton aria-label="Stop" (click)="cancel.emit()">
+      <button matIconButton class="wide" aria-label="Stop" (click)="cancel.emit()">
         <mat-icon>stop</mat-icon>
       </button>
     }
@@ -146,6 +168,17 @@ export function readImage(file: File): Promise<Image> {
     }
     .field {
       flex: 1;
+    }
+    .narrow {
+      display: none;
+    }
+    @media (max-width: 599px) {
+      .narrow {
+        display: inline-flex;
+      }
+      .wide {
+        display: none;
+      }
     }
     .slash-name {
       font: var(--mat-sys-body-small);
