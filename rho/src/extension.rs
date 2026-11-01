@@ -438,8 +438,8 @@ struct Inner {
     inbox: Mutex<Vec<(String, bool)>>,
     /// Set by `Context::stop`, read by the agent loop.
     stop: Mutex<Option<String>>,
-    /// Set by the `Compact` tool (its focus), read by the agent loop.
-    compact: Mutex<Option<String>>,
+    /// Set by the `Compact` tool (its focus and verbatim text), read by the agent loop.
+    compact: Mutex<Option<(String, String)>>,
     wake: tokio::sync::Notify,
     /// What `Bash` may touch; `None` runs commands unsandboxed.
     sandbox: Mutex<Option<Policy>>,
@@ -886,11 +886,11 @@ impl Context {
     }
 
     /// Compacts the history once the current tool calls are done.
-    pub(crate) fn request_compact(&self, focus: String) {
-        *self.0.compact.lock().unwrap() = Some(focus);
+    pub(crate) fn request_compact(&self, focus: String, verbatim: String) {
+        *self.0.compact.lock().unwrap() = Some((focus, verbatim));
     }
 
-    pub(crate) fn take_compact(&self) -> Option<String> {
+    pub(crate) fn take_compact(&self) -> Option<(String, String)> {
         self.0.compact.lock().unwrap().take()
     }
 

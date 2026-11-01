@@ -190,7 +190,8 @@ ran and its token usage.
 The model can compact too, with the `Compact` tool: only if it is sure it
 does not need the earlier content, or if the user asked. It does nothing
 below 10% context use. The loop compacts after the response's tool calls and
-the run goes on from the summary (ADR 0061).
+the run goes on from the summary (ADR 0061). Text the model puts in its
+`verbatim` field is appended to the summary unchanged.
 
 ## Models by path
 

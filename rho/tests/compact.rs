@@ -47,7 +47,10 @@ async fn compact_after(cache_age: Option<Duration>) -> Run {
         .await
         .unwrap();
     session.last_request = cache_age.map(|age| Instant::now() - age);
-    agent.compact(&mut session, "focus on X").await.unwrap();
+    agent
+        .compact_with(&mut session, "focus on X", " keep /tmp/x ")
+        .await
+        .unwrap();
     Run {
         main,
         cheap,
@@ -92,7 +95,13 @@ async fn warm_cache_compacts_with_the_session_model_and_same_prefix() {
         n + 2,
         "assistant answer + instructions"
     );
-    assert!(only_text(&compact.messages[n + 1].content).contains("Additional focus: focus on X"));
+    let instructions = only_text(&compact.messages[n + 1].content);
+    assert!(instructions.contains("Additional focus: focus on X"));
+    assert!(instructions.contains("<notes>\nkeep /tmp/x\n</notes>"));
+    // The notes follow the summary unchanged.
+    assert!(
+        only_text(&session.history[0].content).contains("warm summary\n\n## Notes\nkeep /tmp/x\n")
+    );
 }
 
 #[tokio::test]
@@ -122,7 +131,8 @@ async fn cold_cache_uses_the_cheap_model_without_tool_outputs() {
         );
         assert!(text.contains("[Assistant]: done"), "{text}");
         assert!(!text.contains("42"), "tool output leaked: {text}");
-        assert!(text.ends_with("Additional focus: focus on X"), "{text}");
+        assert!(text.contains("Additional focus: focus on X"), "{text}");
+        assert!(text.ends_with("<notes>\nkeep /tmp/x\n</notes>"), "{text}");
     }
 }
 

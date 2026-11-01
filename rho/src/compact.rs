@@ -29,6 +29,9 @@ struct CompactInput {
     /// what the summary should keep in detail, optional
     #[serde(default)]
     focus: String,
+    /// text appended unchanged to the summary, optional. Use it to make sure important information (exact paths, commands, values, open questions) stays as is instead of being summarized
+    #[serde(default)]
+    verbatim: String,
 }
 
 /// Lets the model compact the history like `/compact`. The agent loop does
@@ -39,7 +42,7 @@ impl Tool for Compact {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: COMPACT,
-            description: "Replace the conversation so far with a summary, to free up context. Use it only if you are certain you do not need the earlier content anymore, or if the user asked you to compact. Does nothing while less than 10% of the context is used.".into(),
+            description: "Replace the conversation so far with a summary, to free up context. Use it only if you are certain you do not need the earlier content anymore, or if the user asked you to compact. Does nothing while less than 10% of the context is used. A separate summarizer writes the summary; text in `verbatim` is appended to it unchanged, so use it to ensure important information stays as is.".into(),
             input_schema: input_schema::<CompactInput>(),
         }
     }
@@ -51,7 +54,7 @@ impl Tool for Compact {
             let percent = 100 * info.context_used() / info.context_window;
             return Ok(format!("Not compacted: only {percent}% of the context is used.").into());
         }
-        ctx.request_compact(i.focus);
+        ctx.request_compact(i.focus, i.verbatim);
         Ok("The conversation will be compacted after this response's tool calls.".into())
     }
 }
@@ -117,6 +120,17 @@ impl Agent {
     /// optional extra instruction from the user (`/compact <focus>`).
     /// A running card shows it until it is done.
     pub async fn compact(&self, session: &mut Session, focus: &str) -> Result<()> {
+        self.compact_with(session, focus, "").await
+    }
+
+    /// Like `compact`; `verbatim` is appended unchanged to the summary, so
+    /// the summarizer is told to leave its content out.
+    pub async fn compact_with(
+        &self,
+        session: &mut Session,
+        focus: &str,
+        verbatim: &str,
+    ) -> Result<()> {
         if session.history.is_empty() {
             bail!("nothing to compact");
         }
@@ -129,7 +143,9 @@ impl Agent {
             id: &card.id,
             title: "Compacting…",
         });
-        let result = self.replace_with_summary(session, focus, &card.id).await;
+        let result = self
+            .replace_with_summary(session, focus, verbatim.trim(), &card.id)
+            .await;
         if let Err(e) = &result {
             let text = format!("{e:#}");
             let card = Some(card.id.as_str());
@@ -145,6 +161,7 @@ impl Agent {
         &self,
         session: &mut Session,
         focus: &str,
+        verbatim: &str,
         card: &str,
     ) -> Result<()> {
         crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
@@ -153,6 +170,11 @@ impl Agent {
         let mut instructions = INSTRUCTIONS.to_string();
         if !focus.trim().is_empty() {
             instructions += &format!("\n\nAdditional focus: {}", focus.trim());
+        }
+        if !verbatim.is_empty() {
+            instructions += &format!(
+                "\n\nThe following notes will be appended verbatim after your summary. Do not repeat their content in the summary:\n<notes>\n{verbatim}\n</notes>"
+            );
         }
 
         let warm = session
@@ -230,6 +252,9 @@ impl Agent {
         }
 
         let mut summary = summary.trim().to_string();
+        if !verbatim.is_empty() {
+            summary += &format!("\n\n## Notes\n{verbatim}");
+        }
         // The call that set it is gone with the history.
         if let Some(title) = session.ctx.title() {
             summary += &format!("\n\nThe current title of the session is: {title}");

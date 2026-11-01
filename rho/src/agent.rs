@@ -753,10 +753,10 @@ impl Agent {
 
             if !results.is_empty() {
                 // Before the steering messages, so they are not summarized away.
-                if let Some(focus) = ctx.take_compact()
+                if let Some((focus, verbatim)) = ctx.take_compact()
                     && !ctx.is_stopped()
                 {
-                    let note = match self.compact(session, &focus).await {
+                    let note = match self.compact_with(session, &focus, &verbatim).await {
                         Ok(()) => "You compacted the conversation with the Compact tool. Continue the task from the summary.".into(),
                                 // Its card shows the error to the user.
                         Err(e) => format!("Compaction failed, the conversation is unchanged: {e:#}"),

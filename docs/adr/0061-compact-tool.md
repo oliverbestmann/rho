@@ -14,6 +14,9 @@ may ask it to compact in a prompt.
 - A built-in `Compact` tool (`rho/src/compact.rs`) with an optional `focus`.
   Its description tells the model to use it only if it is certain it does not
   need the earlier content anymore, or if the user asked for it.
+- An optional `verbatim` text is shown to the summarizer (which is told to
+  leave its content out) and appended unchanged to the summary under
+  `## Notes`. The model uses it to keep important information exact.
 - Below 10% of the context window (the last request's prompt plus output)
   the tool does nothing and says so. With an unknown window it compacts.
 - The tool only sets a flag on the `Context`. The agent loop compacts after
