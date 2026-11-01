@@ -3,6 +3,7 @@ import {
   effect,
   inject,
   Injectable,
+  Injector,
   signal,
   untracked,
   WritableSignal,
@@ -11,7 +12,8 @@ import * as acp from '@agentclientprotocol/sdk';
 import { MatSnackBar, MatSnackBarRef, TextOnlySnackBar } from '@angular/material/snack-bar';
 import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client';
 import { Server, Settings } from './settings';
-import { SessionState } from './session/session-state';
+import { blockText, SessionState } from './session/session-state';
+import type { Image } from './session/composer';
 
 /** A session loaded over the current connection; its state follows the updates. */
 export interface Opened {
@@ -80,6 +82,7 @@ export class Acp {
   private connection?: acp.ClientConnection;
   private timer?: ReturnType<typeof setTimeout>;
   private seq = 0;
+  private readonly injector = inject(Injector);
 
   constructor() {
     effect(() => {
@@ -163,6 +166,29 @@ export class Acp {
     await this.extRequest('_rho/unqueue', { sessionId, id });
   }
 
+  /**
+   * Takes a queued prompt out, stops the turn and sends the prompt once the
+   * turn ended; rho holds the rest of the queue after a stop.
+   */
+  async sendNow(sessionId: string, id: number, text: string) {
+    const state = this.opened.get(sessionId)?.state;
+    if (!state) return;
+    await this.unqueue(sessionId, id);
+    this.cancel(sessionId);
+    // shortcut: waits forever if the connection drops first, the prompt is then lost.
+    await new Promise<void>((done) => {
+      const ref = effect(
+        () => {
+          if (this.prompting().has(sessionId) || state.running()) return;
+          ref.destroy();
+          done();
+        },
+        { injector: this.injector },
+      );
+    });
+    await this.prompt(sessionId, text);
+  }
+
   private async extRequest(method: string, params: Record<string, unknown>) {
     try {
       await this.agent()?.request(method, params);
@@ -171,8 +197,8 @@ export class Acp {
     }
   }
 
-  /** Sends a prompt to an opened session. */
-  async prompt(sessionId: string, text: string) {
+  /** Sends a prompt, with images after the text, to an opened session. */
+  async prompt(sessionId: string, text: string, images: Image[] = []) {
     const agent = this.agent();
     const opened = this.opened.get(sessionId);
     if (!agent || !opened) return;
@@ -185,12 +211,18 @@ export class Acp {
       });
     // A command shows only as the note it replies with, like rho shows it to other clients.
     const name = text.trim().match(/^\/(\S+)/)?.[1];
-    if (!opened.state.commands().some((c) => c.name === name)) opened.state.addUser(text);
+    const prompt: acp.ContentBlock[] = [
+      ...(text ? [{ type: 'text' as const, text }] : []),
+      ...images.map((i) => ({ type: 'image' as const, ...i })),
+    ];
+    if (!opened.state.commands().some((c) => c.name === name)) {
+      opened.state.addUser(prompt.map(blockText).join(''));
+    }
     prompting(true);
     try {
       const res = await agent.request(acp.methods.agent.session.prompt, {
         sessionId,
-        prompt: [{ type: 'text', text }],
+        prompt,
       });
       if (res.stopReason !== 'end_turn' && res.stopReason !== 'cancelled') {
         this.snackBar.open(`Stopped: ${res.stopReason}`, 'OK', { duration: 5000 });

@@ -27,7 +27,7 @@ import type { Entry } from './session-state';
 import { loadHighlighter } from '../highlight';
 import { dir, listSessions } from '../sessions/list';
 import { AskCard } from './ask-card';
-import { Composer } from './composer';
+import { Composer, Image } from './composer';
 import { ContextUsage } from './context-usage';
 import { ChatMessage } from './message';
 import { OptionSelect } from './option-select';
@@ -73,6 +73,11 @@ export class Session {
 
   /** Kept in localStorage per session, so it survives a reload. */
   protected readonly draft = linkedSignal(() => localStorage.getItem(draftKey(this.id())) ?? '');
+  /** Attached to the draft; not kept over a reload. */
+  protected readonly images = linkedSignal<string, Image[]>({
+    source: this.id,
+    computation: () => [],
+  });
   /** Model, thinking and profile selectors, hidden behind a button. */
   protected readonly showOptions = linkedSignal({ source: this.id, computation: () => false });
 
@@ -225,12 +230,15 @@ export class Session {
   /** Sends the draft, or queues it while a turn runs. */
   protected send() {
     const text = this.draft().trim();
-    if (!this.ready() || !text) return;
+    const images = this.images();
+    // rho queues text only, so images wait for the turn to end.
+    if (!this.ready() || (!text && !images.length) || (images.length && this.running())) return;
     this.draft.set('');
+    this.images.set([]);
     if (this.running()) {
       void this.acp.enqueue(this.id(), text);
     } else {
-      void this.acp.prompt(this.id(), text);
+      void this.acp.prompt(this.id(), text, images);
       this.scrollToEnd();
     }
   }
@@ -238,6 +246,13 @@ export class Session {
   protected unqueue(index: number) {
     const queued = this.opened()?.state.queue()[index];
     if (queued) void this.acp.unqueue(this.id(), queued.id);
+  }
+
+  protected sendNow(index: number) {
+    const queued = this.opened()?.state.queue()[index];
+    if (!queued) return;
+    void this.acp.sendNow(this.id(), queued.id, queued.text);
+    this.scrollToEnd();
   }
 
   protected async setOption(option: acp.SessionConfigOption, change: MatSelectChange<string>) {

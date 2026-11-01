@@ -93,10 +93,11 @@
     </div>
   }
   @if (queued().length) {
-    <app-queued-list [items]="queued()" (remove)="unqueue($event)" />
+    <app-queued-list [items]="queued()" (remove)="unqueue($event)" (sendNow)="sendNow($event)" />
   }
   <app-composer
     [(draft)]="draft"
+    [(images)]="images"
     [(optionsOpen)]="showOptions"
     [commands]="commands()"
     [running]="running()"

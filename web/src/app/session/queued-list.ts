@@ -12,6 +12,13 @@ import { MatIconModule } from '@angular/material/icon';
         <li>
           <mat-icon class="icon">schedule</mat-icon>
           <span class="text">{{ text }}</span>
+          <button
+            matIconButton
+            aria-label="Stop the turn and send now"
+            (click)="sendNow.emit($index)"
+          >
+            <mat-icon>send</mat-icon>
+          </button>
           <button matIconButton aria-label="Remove queued message" (click)="remove.emit($index)">
             <mat-icon>close</mat-icon>
           </button>
@@ -51,4 +58,6 @@ export class QueuedList {
   readonly items = input.required<readonly string[]>();
   /** The index of the message to drop. */
   readonly remove = output<number>();
+  /** The index of the message to send in place of the running turn. */
+  readonly sendNow = output<number>();
 }

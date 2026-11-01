@@ -27,4 +27,30 @@ describe('Composer', () => {
     expect((await render('  ')).sendButton.disabled).toBe(true);
     expect((await render('hello', false)).sendButton.disabled).toBe(true);
   });
+
+  it('attaches a pasted image and sends it without text', async () => {
+    const { el, sendButton } = await render('');
+    // jsdom has no DataTransfer.
+    const paste = Object.assign(new Event('paste', { cancelable: true }), {
+      clipboardData: { files: [new File(['png'], 'a.png', { type: 'image/png' })] },
+    });
+    el.querySelector('textarea')!.dispatchEvent(paste);
+    expect(paste.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(el.querySelectorAll('.images img').length).toBe(1));
+    expect(el.querySelector('img')!.src).toBe('data:image/png;base64,cG5n');
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it('cannot queue images while a turn runs', async () => {
+    const fixture = TestBed.createComponent(Composer);
+    fixture.componentRef.setInput('draft', 'hi');
+    fixture.componentRef.setInput('ready', true);
+    fixture.componentRef.setInput('running', true);
+    fixture.componentRef.setInput('images', [{ mimeType: 'image/png', data: 'AA' }]);
+    await fixture.whenStable();
+    const queue = (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>(
+      'button[aria-label="Queue"]',
+    )!;
+    expect(queue.disabled).toBe(true);
+  });
 });

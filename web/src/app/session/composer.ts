@@ -10,6 +10,25 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 
+/** An image to send, as in an ACP image block. */
+export interface Image {
+  mimeType: string;
+  data: string;
+}
+
+/** A file as base64; rho scales it down. */
+export function readImage(file: File): Promise<Image> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result as string;
+      resolve({ mimeType: file.type, data: url.slice(url.indexOf(',') + 1) });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 /** The message field with slash command suggestions, send and stop. */
 @Component({
   selector: 'app-composer',
@@ -22,6 +41,18 @@ import { MatInputModule } from '@angular/material/input';
     MatInputModule,
   ],
   template: `
+    @if (images().length) {
+      <ul class="images" aria-label="Attached images">
+        @for (img of images(); track $index) {
+          <li>
+            <img [src]="'data:' + img.mimeType + ';base64,' + img.data" alt="Attached image" />
+            <button matIconButton aria-label="Remove image" (click)="removeImage($index)">
+              <mat-icon>close</mat-icon>
+            </button>
+          </li>
+        }
+      </ul>
+    }
     <button
       matIconButton
       aria-label="Session settings"
@@ -42,6 +73,7 @@ import { MatInputModule } from '@angular/material/input';
         [value]="draft()"
         (input)="draft.set($any($event.target).value)"
         (keydown)="onKey($event)"
+        (paste)="onPaste($event)"
       ></textarea>
       <mat-autocomplete #slash autoActiveFirstOption (optionSelected)="pick($event)">
         @for (c of suggestions(); track c.name) {
@@ -54,6 +86,17 @@ import { MatInputModule } from '@angular/material/input';
         }
       </mat-autocomplete>
     </mat-form-field>
+    <input
+      #file
+      type="file"
+      accept="image/*"
+      multiple
+      hidden
+      (change)="attach($any($event.target).files); file.value = ''"
+    />
+    <button matIconButton aria-label="Attach image" (click)="file.click()">
+      <mat-icon>image</mat-icon>
+    </button>
     @if (running()) {
       <button matIconButton aria-label="Stop" (click)="cancel.emit()">
         <mat-icon>stop</mat-icon>
@@ -62,7 +105,7 @@ import { MatInputModule } from '@angular/material/input';
     <button
       matIconButton
       [attr.aria-label]="running() ? 'Queue' : 'Send'"
-      [disabled]="!draft().trim() || !ready()"
+      [disabled]="!canSend()"
       (click)="send.emit()"
     >
       <mat-icon>{{ running() ? 'schedule_send' : 'send' }}</mat-icon>
@@ -71,8 +114,35 @@ import { MatInputModule } from '@angular/material/input';
   styles: `
     :host {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 4px;
+    }
+    .images {
+      flex-basis: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0;
+      padding: 0 0 4px;
+      list-style: none;
+    }
+    .images li {
+      position: relative;
+    }
+    .images img {
+      display: block;
+      height: 64px;
+      max-width: 128px;
+      object-fit: cover;
+      border-radius: var(--mat-sys-corner-small);
+    }
+    .images button {
+      position: absolute;
+      top: -8px;
+      right: -8px;
+      transform: scale(0.75);
+      background: var(--mat-sys-surface-container-high);
     }
     .field {
       flex: 1;
@@ -97,6 +167,8 @@ export class Composer {
   readonly ready = input(false);
   /** The session options, toggled by the settings button. */
   readonly optionsOpen = model(false);
+  /** Images sent with the draft. */
+  readonly images = model<Image[]>([]);
   readonly send = output();
   readonly cancel = output();
 
@@ -109,6 +181,29 @@ export class Composer {
       .filter((c) => c.name.toLowerCase().startsWith(prefix))
       .slice(0, 8);
   });
+
+  /** rho queues text only, so images wait until the turn ended. */
+  protected readonly canSend = computed(
+    () => this.ready() && (this.images().length ? !this.running() : !!this.draft().trim()),
+  );
+
+  protected onPaste(e: ClipboardEvent) {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    void this.attach(files);
+  }
+
+  protected async attach(files: Iterable<File>) {
+    const images = await Promise.all(
+      [...files].filter((f) => f.type.startsWith('image/')).map(readImage),
+    );
+    this.images.update((i) => [...i, ...images]);
+  }
+
+  protected removeImage(index: number) {
+    this.images.update((i) => i.filter((_, j) => j !== index));
+  }
 
   protected onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {

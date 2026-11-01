@@ -215,12 +215,50 @@ describe('Acp prompts', () => {
     ]);
   });
 
+  it('sends images after the text and shows them', async () => {
+    const { a, request, opened } = await setup();
+    void a.prompt('s', 'look', [{ mimeType: 'image/png', data: 'AA' }]);
+    expect(request).toHaveBeenCalledWith(acp.methods.agent.session.prompt, {
+      sessionId: 's',
+      prompt: [
+        { type: 'text', text: 'look' },
+        { type: 'image', mimeType: 'image/png', data: 'AA' },
+      ],
+    });
+    const user = opened.state.entries().at(-1)!;
+    expect(user.kind === 'user' && user.text()).toContain('data:image/png;base64,AA');
+  });
+
   it('queues and unqueues in rho', async () => {
     const { a, request } = await setup();
     await a.enqueue('s', 'two');
     await a.unqueue('s', 7);
     expect(request).toHaveBeenCalledWith('_rho/queue', { sessionId: 's', text: 'two' });
     expect(request).toHaveBeenCalledWith('_rho/unqueue', { sessionId: 's', id: 7 });
+  });
+
+  it('sends a queued prompt now: unqueue, stop, prompt once the turn ended', async () => {
+    const { a, request, opened } = await setup();
+    opened.state.running.set(true);
+    const sent = a.sendNow('s', 7, 'two');
+    await vi.waitFor(() =>
+      expect(a.agent()!.notify).toHaveBeenCalledWith(acp.methods.agent.session.cancel, {
+        sessionId: 's',
+      }),
+    );
+    expect(request).toHaveBeenCalledWith('_rho/unqueue', { sessionId: 's', id: 7 });
+    TestBed.tick();
+    expect(request).not.toHaveBeenCalledWith(acp.methods.agent.session.prompt, expect.anything());
+
+    opened.state.running.set(false);
+    TestBed.tick();
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(acp.methods.agent.session.prompt, {
+        sessionId: 's',
+        prompt: [{ type: 'text', text: 'two' }],
+      }),
+    );
+    void sent;
   });
 });
 
