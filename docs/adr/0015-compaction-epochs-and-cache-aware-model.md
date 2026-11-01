@@ -18,7 +18,8 @@ cheaper model is the better deal.
 - If the last request started less than `CACHE_TTL - 30 s` (5 min - 30 s)
   ago, the cache is assumed warm: the session's model gets the exact same
   prefix (system, tools, thinking, history) plus the instructions, so the
-  history is billed as cache reads.
+  history is billed as cache reads. Since ADR 0071 the extensions'
+  `before_request` hooks run on it too, as on the run's requests.
 - Otherwise `RHO_COMPACT_MODEL` / `Options::compact_model` (at first
   `anthropic/claude-haiku-5-5` by default; since ADR 0040 there is no
   default, and `models.json` can set one per path) gets the conversation

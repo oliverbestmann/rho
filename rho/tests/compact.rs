@@ -202,6 +202,36 @@ async fn the_compact_tool_does_nothing_below_a_tenth_of_the_context() {
     assert!(history.contains("warm summary"), "{history}");
 }
 
+/// Edits every request, like a context pruning extension.
+struct Tag;
+
+impl rho::extension::Extension for Tag {
+    async fn before_request(&self, _ctx: &rho::extension::Context, r: &mut rho::provider::Request) {
+        r.system.push_str(" +tag");
+        r.messages[0].content.insert(0, Content::text("[tag]"));
+    }
+}
+
+#[tokio::test]
+async fn warm_compaction_runs_before_request_like_the_run() {
+    let main = Scripted::new(vec![vec![text("done")], vec![text("## Goal\nwarm")]]);
+    let mut agent = Agent::new(main.clone(), ModelSpec::new("test", "big"));
+    agent.extensions.push(Arc::new(Tag));
+    let cwd = std::env::current_dir().unwrap();
+    let (mut session, _log) = common::session(&agent, &cwd).await;
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+    session.last_request = Some(Instant::now());
+    agent.compact(&mut session, "").await.unwrap();
+
+    let reqs = main.requests.lock().unwrap();
+    let (run, compact) = (&reqs[0], &reqs[1]);
+    assert_eq!(compact.system, run.system);
+    assert_eq!(compact.messages[..run.messages.len()], run.messages[..]);
+}
+
 #[tokio::test]
 async fn compaction_counts_its_usage() {
     let usage = rho::provider::Usage {

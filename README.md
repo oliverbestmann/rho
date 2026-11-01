@@ -63,7 +63,7 @@ Cargo workspace:
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). Its only extensions are the built-in tools (`rho::builtin()`), `GrantCommands` and `FeatureCommands`.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
-  `BackgroundTasks`, `ContextNotice`, `AskUser`, `PlanMode`, `Ponytail`,
+  `BackgroundTasks`, `ContextNotice`, `Discards`, `AskUser`, `PlanMode`, `Ponytail`,
   `Skills`, `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 - `web/` - the Angular web client (ADR 0043, `web/README.md`).
@@ -460,6 +460,11 @@ profiles.
 
 `ContextNotice` tells the user once when a run takes the context past 25% of
 the window.
+
+`Discards` labels every tool result in a request `[output N, size]` and adds
+`Discard`, which drops outputs by number from later requests (ADR 0071). Only
+the requests change; the user still sees the outputs. Discards wait until the
+prompt cache has expired.
 
 `AskUser` adds `AskUserQuestion` (pi's ask-user-question): up to four
 questions in one form, each a pick list with a text field for an answer of

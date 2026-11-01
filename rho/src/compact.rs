@@ -237,7 +237,7 @@ impl Agent {
                 // Must match the last run's request prefix to read the cache.
                 let mut messages = crate::provider::for_model(&session.history);
                 push_user(&mut messages, vec![Content::text(instructions)]);
-                let request = Request {
+                let mut request = Request {
                     model: session.model.id().clone(),
                     system: session.system.clone(),
                     messages,
@@ -245,6 +245,10 @@ impl Agent {
                     max_tokens: self.max_tokens,
                     thinking: session.thinking,
                 };
+                // The run's requests went through these too.
+                for ext in &self.extensions {
+                    ext.before_request(&session.ctx, &mut request).await;
+                }
                 let state = if warm { "cache warm" } else { "cache expired" };
                 (
                     session.provider.clone(),
