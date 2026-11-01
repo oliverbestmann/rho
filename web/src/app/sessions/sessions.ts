@@ -9,7 +9,7 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, errorText } from '../acp';
 import { Working } from '../session/working';
 import { ago } from '../time';
-import { dir, isRunning, listSessions } from './list';
+import { dir, hue, isRunning, listSessions } from './list';
 
 @Component({
   selector: 'app-sessions',
@@ -49,6 +49,7 @@ import { dir, isRunning, listSessions } from './list';
           mat-list-item
           [routerLink]="['/session', s.sessionId]"
           [queryParams]="{ cwd: s.cwd, title: s.title }"
+          [style.--hue]="hue(s.cwd)"
         >
           @if (waiting().has(s.sessionId)) {
             <span matListItemAvatar class="avatar waiting" aria-label="Waiting for an answer">
@@ -99,12 +100,15 @@ import { dir, isRunning, listSessions } from './list';
       display: flex;
       align-items: center;
       justify-content: center;
-      background: var(--mat-sys-primary-container);
-      color: var(--mat-sys-on-primary-container);
+      --mat-list-list-item-leading-avatar-color: light-dark(
+        oklch(90% 0.06 var(--hue)),
+        oklch(38% 0.07 var(--hue))
+      );
+      color: light-dark(oklch(30% 0.08 var(--hue)), oklch(92% 0.04 var(--hue)));
       --mat-progress-spinner-active-indicator-color: currentColor;
     }
     .avatar.waiting {
-      background: var(--mat-sys-tertiary-container);
+      --mat-list-list-item-leading-avatar-color: var(--mat-sys-tertiary-container);
       color: var(--mat-sys-on-tertiary-container);
     }
     .time {
@@ -137,6 +141,7 @@ export class Sessions {
   private readonly router = inject(Router);
   protected readonly ago = ago;
   protected readonly dir = dir;
+  protected readonly hue = hue;
   protected readonly isRunning = isRunning;
   protected readonly errorText = errorText;
 

@@ -18,6 +18,13 @@ export function isRunning(s: acp.SessionInfo) {
   return rhoRunning(s._meta) === true;
 }
 
+/** A hue (0-359) from the working directory, so sessions of one directory share a color. */
+export function hue(cwd: string) {
+  let h = 0;
+  for (const c of cwd) h = (Math.imul(h, 31) + c.charCodeAt(0)) | 0;
+  return (h >>> 0) % 360;
+}
+
 /** The last part of a path, for showing a session's working directory. */
 export function dir(cwd: string) {
   return cwd.split('/').filter(Boolean).at(-1) ?? cwd;
