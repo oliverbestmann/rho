@@ -486,6 +486,7 @@ mod tests {
             content: "ok".into(),
             is_error: false,
             images: vec![],
+            shown: vec![],
         };
         assert_eq!(initiator(&request(result)), "agent");
     }

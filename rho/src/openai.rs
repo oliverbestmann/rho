@@ -259,6 +259,7 @@ mod tests {
                             content: String::new(),
                             is_error: false,
                             images: vec![],
+                            shown: vec![],
                         },
                         Content::text("note"),
                     ],

@@ -353,6 +353,7 @@ mod tests {
                     content: "SECRET OUTPUT".into(),
                     is_error: false,
                     images: vec![],
+                    shown: vec![],
                 }],
             },
         ];

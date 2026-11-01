@@ -357,12 +357,14 @@ fn record_history(
                     content,
                     is_error,
                     images,
+                    shown,
                 } => emit(AgentEvent::ToolEnd {
                     id: tool_use_id,
                     output: content,
                     is_error: *is_error,
                     diff: diffs.get(tool_use_id),
                     images,
+                    shown,
                 }),
                 Content::RedactedThinking { .. } => {}
             }

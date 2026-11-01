@@ -63,7 +63,8 @@ export class SessionState {
         break;
       }
       case 'tool_call_update': {
-        const { sessionUpdate: _, ...fields } = u;
+        // `_meta` stays from `tool_call` (the tool name); terminal output is read below.
+        const { sessionUpdate: _, _meta: __, ...fields } = u;
         // Only the fields that are set change.
         const set = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null));
         const tool = this.tool(u.toolCallId);
@@ -150,6 +151,12 @@ export interface Queued {
 function rhoMeta(meta: Meta) {
   const rho = meta?.['rho'];
   return typeof rho === 'object' && rho ? (rho as { [key: string]: unknown }) : undefined;
+}
+
+/** `_meta.rho.tool`, the name of the tool a call runs; undefined if not sent. */
+export function rhoTool(call: acp.ToolCall) {
+  const tool = rhoMeta(call._meta)?.['tool'];
+  return typeof tool === 'string' ? tool : undefined;
 }
 
 /** `_meta.rho.running`, where rho says whether a turn runs; undefined if not sent. */

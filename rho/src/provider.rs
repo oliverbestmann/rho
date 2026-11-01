@@ -44,6 +44,10 @@ pub enum Content {
         /// translate results with images (see `anthropic::build_body`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageSource>,
+        /// Shown to the user after `images`, kept for the replay; `for_model`
+        /// drops them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        shown: Vec<ImageSource>,
     },
     /// Must be sent back unchanged (with signature) in later requests.
     Thinking {
@@ -200,6 +204,19 @@ pub fn for_model(history: &[Message]) -> Vec<Message> {
                 .filter_map(|c| match c {
                     Content::SystemNote { text } => Some(Content::text(text.clone())),
                     Content::UserNote { .. } => None,
+                    Content::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        images,
+                        shown: _,
+                    } => Some(Content::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                        is_error: *is_error,
+                        images: images.clone(),
+                        shown: vec![],
+                    }),
                     c => Some(c.clone()),
                 })
                 .collect();
@@ -589,6 +606,26 @@ mod tests {
         let json = serde_json::to_string(&note).unwrap();
         assert_eq!(json, r#"{"type":"user_note","kind":"info","title":"Turn"}"#);
         assert_eq!(serde_json::from_str::<Content>(&json).unwrap(), note);
+    }
+
+    #[test]
+    fn for_model_drops_images_shown_only_to_the_user() {
+        let png = |data: &str| ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: data.into(),
+        };
+        let result = |shown| Content::ToolResult {
+            tool_use_id: ToolCallId::new("t"),
+            content: "shown".into(),
+            is_error: false,
+            images: vec![png("model")],
+            shown,
+        };
+        let history = [Message {
+            role: Role::User,
+            content: vec![result(vec![png("user")])],
+        }];
+        assert_eq!(for_model(&history)[0].content, [result(vec![])]);
     }
 
     fn price(input: f64) -> Price {

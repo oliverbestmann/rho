@@ -386,30 +386,40 @@ pub(super) fn to_update(
             ..
         } => {
             let title = || title(name, input, titled);
+            // The tool name, for clients that show some tools differently.
+            let mut m = serde_json::json!({ "rho": { "tool": name } });
             let call = match shown {
-                Some(Shown::Terminal { cwd, command, .. }) => ToolCall::new(
-                    id.to_string(),
-                    call_description(input, titled).map_or(command.clone(), |_| title()),
-                )
-                .content(vec![ToolCallContent::Terminal(Terminal::new(
-                    id.to_string(),
-                ))])
-                .meta(meta(serde_json::json!({
-                    "terminal_info": {"terminal_id": id, "cwd": cwd},
-                }))),
+                Some(Shown::Terminal { cwd, command, .. }) => {
+                    m["terminal_info"] = serde_json::json!({"terminal_id": id, "cwd": cwd});
+                    ToolCall::new(
+                        id.to_string(),
+                        call_description(input, titled).map_or(command.clone(), |_| title()),
+                    )
+                    .content(vec![ToolCallContent::Terminal(Terminal::new(
+                        id.to_string(),
+                    ))])
+                }
                 Some(Shown::Text(text)) => {
                     ToolCall::new(id.to_string(), title()).content(vec![text.as_str().into()])
                 }
                 None => ToolCall::new(id.to_string(), title()),
             };
             // Lets the client follow along to the file.
-            let file = [tools::READ, tools::READ_IMAGE, tools::WRITE, EDIT].contains(name);
+            let file = [
+                tools::READ,
+                tools::READ_IMAGE,
+                tools::SHOW_IMAGE,
+                tools::WRITE,
+                EDIT,
+            ]
+            .contains(name);
             let locations = match input.get("path").and_then(|p| p.as_str()) {
                 Some(path) if file => vec![ToolCallLocation::new(tools::resolve(cwd, path))],
                 _ => vec![],
             };
             SessionUpdate::ToolCall(
-                call.kind(tool_kind(kind))
+                call.meta(meta(m))
+                    .kind(tool_kind(kind))
                     .status(ToolCallStatus::InProgress)
                     .locations(locations)
                     .raw_input(input.clone()),
@@ -423,6 +433,7 @@ pub(super) fn to_update(
             is_error,
             diff,
             images,
+            shown: shown_images,
         } => {
             let fields = ToolCallUpdateFields::new().status(status(is_error));
             if let Some(Shown::Terminal { streamed, .. }) = shown {
@@ -454,7 +465,12 @@ pub(super) fn to_update(
                 content.push(Diff::new(&d.path, &d.new).old_text(d.old.clone()).into());
             }
             content.push(output.into());
-            content.extend(images.iter().map(|i| image_block(i).into()));
+            content.extend(
+                images
+                    .iter()
+                    .chain(shown_images)
+                    .map(|i| image_block(i).into()),
+            );
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 id.to_string(),
                 fields.content(content),
@@ -527,6 +543,7 @@ mod tests {
                 is_error: false,
                 diff: Some(&diff),
                 images: &[],
+                shown: &[],
             },
             None,
         );
@@ -549,13 +566,13 @@ mod tests {
                 is_error: false,
                 diff: None,
                 images: &images,
+                shown: &images,
             },
             None,
         );
-        assert_eq!(
-            wire["content"][1],
-            json!({"type": "content", "content": {"type": "image", "mimeType": "image/png", "data": "AAAA"}})
-        );
+        let image = json!({"type": "content", "content": {"type": "image", "mimeType": "image/png", "data": "AAAA"}});
+        assert_eq!(wire["content"][1], image);
+        assert_eq!(wire["content"][2], image, "then the ones for the user");
     }
     #[test]
     fn file_tools_have_a_location() {
@@ -607,6 +624,7 @@ mod tests {
             is_error: false,
             diff: None,
             images: &[],
+            shown: &[],
         };
         let wire = update(end, Some(&shown));
         assert_eq!(wire["content"][0]["content"]["text"], "```sh\nls\n```");
@@ -663,7 +681,10 @@ mod tests {
         );
         assert_eq!(
             wire["_meta"],
-            json!({"terminal_info": {"terminal_id": "t1", "cwd": "/w"}})
+            json!({
+                "rho": {"tool": "Bash"},
+                "terminal_info": {"terminal_id": "t1", "cwd": "/w"},
+            })
         );
 
         let end = AgentEvent::ToolEnd {
@@ -672,6 +693,7 @@ mod tests {
             is_error: true,
             diff: None,
             images: &[],
+            shown: &[],
         };
         let wire = update(end, Some(&shown));
         assert_eq!(wire["status"], "failed");
@@ -697,6 +719,7 @@ mod tests {
             is_error: true,
             diff: None,
             images: &[],
+            shown: &[],
         };
         assert_eq!(
             update(end, Some(&streamed))["_meta"]["terminal_output"]["data"],

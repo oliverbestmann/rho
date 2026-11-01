@@ -263,6 +263,7 @@ impl<'a> From<&'a Content> for WireBlock<'a> {
                 content,
                 is_error,
                 images,
+                ..
             } if !images.is_empty() => {
                 // Text blocks must not be empty.
                 let text = (!content.is_empty()).then(|| ResultPart::Text { text: content });
@@ -725,6 +726,7 @@ mod tests {
                         content: "ok".into(),
                         is_error: false,
                         images: vec![],
+                        shown: vec![],
                     }],
                 },
             ],

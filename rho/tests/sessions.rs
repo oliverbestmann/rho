@@ -840,6 +840,7 @@ fn result(id: &str, content: &str, is_error: bool) -> Content {
         content: content.into(),
         is_error,
         images: vec![],
+        shown: vec![],
     }
 }
 

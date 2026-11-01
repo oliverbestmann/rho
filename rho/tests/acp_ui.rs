@@ -409,7 +409,12 @@ async fn bash_is_a_highlighted_command_block_otherwise() {
         "```sh\necho hi\nsleep 0.1\necho oops >&2\n```"
     );
     // Nothing streams to it: the output comes with the end.
-    assert!(wire.iter().all(|v| v.get("_meta").is_none()), "{wire:?}");
+    assert!(
+        wire.iter()
+            .all(|v| v["_meta"].get("terminal_output").is_none()
+                && v["_meta"].get("terminal_info").is_none()),
+        "{wire:?}"
+    );
     assert_eq!(wire[1]["content"][1]["content"]["text"], "hi\noops\n");
 }
 

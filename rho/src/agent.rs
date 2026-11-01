@@ -75,6 +75,8 @@ pub enum AgentEvent<'a> {
         diff: Option<&'a Diff>,
         /// Images the tool returned, see `ToolOutput::images`.
         images: &'a [crate::provider::ImageSource],
+        /// Images only for the user, see `ToolOutput::shown`.
+        shown: &'a [crate::provider::ImageSource],
     },
     /// Shown to the user, not sent to the model (from `Context::notify`).
     Notice {
@@ -820,6 +822,7 @@ impl Agent {
                 content: out.output,
                 is_error: out.is_error,
                 images: out.images,
+                shown: out.shown,
             };
             push_user(&mut session.history, vec![result.clone()]);
             session.save().await;
@@ -860,6 +863,7 @@ impl Agent {
             is_error: out.is_error,
             diff: out.diff.as_ref(),
             images: &out.images,
+            shown: &out.shown,
         });
         (out, shown)
     }
@@ -937,7 +941,8 @@ impl Agent {
             );
         }
         // An image the API rejects would fail every later request.
-        if let Some(e) = out.images.iter_mut().find_map(|i| i.fit().err()) {
+        let mut images = out.images.iter_mut().chain(&mut out.shown);
+        if let Some(e) = images.find_map(|i| i.fit().err()) {
             out = ToolOutput {
                 output: format!("{e:#}"),
                 is_error: true,
@@ -996,6 +1001,7 @@ impl Drop for Pending<'_> {
             is_error: true,
             diff: None,
             images: &[],
+            shown: &[],
         });
     }
 }
@@ -1068,6 +1074,7 @@ pub(crate) fn close_open_calls(history: &mut Vec<Message>, output: &str) -> Vec<
             content: output.into(),
             is_error: true,
             images: vec![],
+            shown: vec![],
         }));
     open
 }
@@ -1102,6 +1109,7 @@ mod tests {
             content: content.into(),
             is_error: true,
             images: vec![],
+            shown: vec![],
         }
     }
 

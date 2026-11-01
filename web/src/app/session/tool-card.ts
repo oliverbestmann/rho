@@ -6,6 +6,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
 import { TerminalView } from './terminal';
+import { rhoTool } from './session-state';
 import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
 
 /** A tool call: status and title, its output when expanded. */
@@ -27,6 +28,7 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
       class="tool"
       hideToggle
       [disabled]="!t && !hasBody(c)"
+      [expanded]="opened(c)"
       [class.failed]="c.status === 'failed'"
     >
       <mat-expansion-panel-header>
@@ -64,4 +66,9 @@ export class ToolCard {
   protected readonly icon = toolIcon;
   protected readonly logo = toolLogo;
   protected readonly hasBody = hasBody;
+
+  /** ShowImage is there to be seen: open once it has the image. */
+  protected opened(c: acp.ToolCall) {
+    return rhoTool(c) === 'ShowImage' && c.status === 'completed';
+  }
 }

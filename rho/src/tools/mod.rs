@@ -25,7 +25,7 @@ use crate::provider::ToolSpec;
 pub use bash::{BASH, Bash};
 pub use edit::{EDIT, Edit};
 pub use read::{READ, Read};
-pub use read_image::{READ_IMAGE, ReadImage};
+pub use read_image::{READ_IMAGE, ReadImage, SHOW_IMAGE, ShowImage};
 pub use request_access::{REQUEST_ACCESS, RequestAccess};
 pub use write::{WRITE, Write};
 
@@ -143,6 +143,7 @@ pub fn builtin() -> Vec<Arc<dyn DynExtension>> {
     vec![
         Arc::new(ToolExtension::from(Read)),
         Arc::new(ToolExtension::from(ReadImage)),
+        Arc::new(ToolExtension::from(ShowImage)),
         Arc::new(ToolExtension::from(Write)),
         Arc::new(ToolExtension::from(Edit)),
         Arc::new(ToolExtension::from(Bash)),

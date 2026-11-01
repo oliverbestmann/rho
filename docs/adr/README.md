@@ -76,3 +76,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0066](0066-config-from-config-d-merged.md) | Config from config.d, merged | Accepted |
 | [0067](0067-built-in-tools-are-extensions.md) | Built-in tools are extensions | Accepted |
 | [0068](0068-openai-compatible-api-on-the-daemon.md) | OpenAI-compatible API on the daemon | Accepted |
+| [0069](0069-images-shown-only-to-the-user.md) | Images shown only to the user | Accepted |

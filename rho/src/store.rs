@@ -1239,6 +1239,7 @@ mod tests {
                 content: "s3cr\"et".into(),
                 is_error: false,
                 images: vec![],
+                shown: vec![],
             }],
         };
         let history = vec![msg(Role::User, "x s3cr\"et y"), assistant, result];

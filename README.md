@@ -10,7 +10,7 @@ A small ACP-native coding agent in Rust. Prototype.
 - The `models` config limits the models a session may use, by path.
 - A web client in `web/` for following, answering and starting sessions
   from a phone, through the daemon.
-- Built-in tools: `Read`, `ReadImage`, `Write`, `Edit` (exact replacements),
+- Built-in tools: `Read`, `ReadImage`, `ShowImage`, `Write`, `Edit` (exact replacements),
   `Bash`, `RequestAccess`, `Compact`.
 - Deny-by-default Landlock sandbox per session. The user approves more
   access.
@@ -75,7 +75,7 @@ Cargo workspace:
 - `rho/src/models.rs` - `"models"` config: allowed, default and compaction models by path
 - `rho/src/openai_api.rs` - OpenAI-compatible `/v1/chat/completions` and `/v1/models` on the daemon (`"api"` config)
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
-- `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
+- `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage` and `ShowImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
 - `rho/src/tools/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat); saving in `agent/persist.rs`, slash commands in `agent/commands.rs`, usage reports in `agent/usage.rs`
 - `rho/src/compact.rs` - `/compact` and the `Compact` tool
@@ -289,7 +289,7 @@ Extensions read the database through `ctx.store()` (`session`, `list`,
 
 ## Sandbox
 
-`Bash`, `Read`, `ReadImage`, `Write` and `Edit` run under Landlock (via the `nono` crate, Linux
+`Bash`, `Read`, `ReadImage`, `ShowImage`, `Write` and `Edit` run under Landlock (via the `nono` crate, Linux
 only), deny by default. A session starts with system directories (`/nix/store`,
 `/etc`, `/usr`, ...) read-only, a few `/dev` files read-write, and its
 workspace directories read-write: the cwd plus ACP `additionalDirectories`.
@@ -581,6 +581,11 @@ sandboxed like `Read`, detects the type from the file's bytes, and applies the
 same type and 5 MB limits. The image goes back in the `tool_result` (as
 `[text, image]` content blocks) and is shown in the client's tool call card.
 Tools can return images too: set `ToolOutput::images`.
+
+The `ShowImage` tool shows the user an image file, like a chart the model
+made, without sending it to the model: it goes in `ToolOutput::shown`, saved
+in the result's `shown` field for the replay, and `provider::for_model` drops
+it from every request.
 
 ## Zed
 

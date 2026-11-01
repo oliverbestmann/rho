@@ -1,4 +1,4 @@
-import { blockText, SessionState } from './session-state';
+import { blockText, rhoTool, SessionState } from './session-state';
 
 describe('SessionState', () => {
   it('merges chunks of the same kind and tool call updates', () => {
@@ -46,6 +46,23 @@ describe('SessionState', () => {
     s.apply({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Bash', status: 'in_progress' });
     s.apply({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Bash', status: 'in_progress' });
     expect(s.entries().length).toBe(1);
+  });
+
+  it('keeps the tool name from the tool call over updates', () => {
+    const s = new SessionState();
+    s.apply({
+      sessionUpdate: 'tool_call',
+      toolCallId: 't1',
+      title: 'chart',
+      _meta: { rho: { tool: 'ShowImage' } },
+    });
+    s.apply({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 't1',
+      status: 'completed',
+      _meta: { other: 1 },
+    });
+    expect(rhoTool(s.call('t1')!)).toBe('ShowImage');
   });
 
   it('collects terminal output from meta', () => {

@@ -455,7 +455,7 @@ fn to_output(result: &Value) -> ToolOutput {
         output,
         is_error: result["isError"].as_bool().unwrap_or(false),
         images,
-        diff: None,
+        ..Default::default()
     }
 }
 

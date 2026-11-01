@@ -324,6 +324,8 @@ pub struct ToolOutput {
     pub is_error: bool,
     /// Images for the model, sent with `output`, and shown to the user.
     pub images: Vec<crate::provider::ImageSource>,
+    /// Images only for the user, never sent to the model.
+    pub shown: Vec<crate::provider::ImageSource>,
     /// A file change to show the user (ACP diff); not sent to the model.
     pub diff: Option<Diff>,
 }

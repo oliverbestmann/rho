@@ -1,4 +1,5 @@
-//! `ReadImage`: an image file for the model to look at.
+//! `ReadImage`: an image file for the model to look at; `ShowImage`: one
+//! for the user only.
 
 use anyhow::{Context as _, Result, bail};
 use schemars::JsonSchema;
@@ -12,6 +13,7 @@ use super::{Tool, ToolKind, input_schema, parse, resolve};
 use crate::provider::ImageSource;
 
 pub const READ_IMAGE: ToolName = ToolName::from_static("ReadImage");
+pub const SHOW_IMAGE: ToolName = ToolName::from_static("ShowImage");
 
 #[derive(Deserialize, JsonSchema)]
 struct ReadImageInput {
@@ -45,41 +47,76 @@ impl Tool for ReadImage {
     }
 
     async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
-        use base64::Engine;
         let i: ReadImageInput = parse(input)?;
-        let path = resolve(ctx.cwd(), &i.path);
-        // The size first, so a huge file is not read for nothing.
-        let bytes = ctx
-            .run_sandboxed(move || {
-                let len = std::fs::metadata(&path)?.len();
-                if len > ImageSource::MAX_BYTES as u64 {
-                    return Err(std::io::Error::other(format!(
-                        "{:.1} MB is too large, the limit is {} MB; make a smaller copy first",
-                        len as f64 / (1024.0 * 1024.0),
-                        ImageSource::MAX_BYTES / (1024 * 1024)
-                    )));
-                }
-                std::fs::read(&path)
-            })
-            .await?
-            .with_context(|| format!("reading {}", i.path))?;
-        let Some(media_type) = image_type(&bytes) else {
-            bail!("{} is not a PNG, JPEG, GIF or WebP image", i.path);
-        };
-        let source = ImageSource::Base64 {
-            media_type: media_type.into(),
-            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        };
+        let (image, info) = load(ctx, &i.path).await?;
         Ok(ToolOutput {
-            output: format!(
-                "{} ({media_type}, {} KB)",
-                i.path,
-                bytes.len().div_ceil(1024)
-            ),
-            images: vec![source],
+            output: info,
+            images: vec![image],
             ..Default::default()
         })
     }
+}
+
+pub struct ShowImage;
+
+impl Tool for ShowImage {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+
+    fn titled(&self) -> bool {
+        true
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: SHOW_IMAGE,
+            description:
+                "Show the user an image file (PNG, JPEG, GIF or WebP, at most 5 MB), for example a chart or screenshot you made. You do not see the image; use ReadImage to look at it yourself. Sandboxed like Read."
+                    .into(),
+            input_schema: input_schema::<ReadImageInput>(),
+        }
+    }
+
+    async fn run(&self, input: Value, ctx: &Context) -> Result<ToolOutput> {
+        let i: ReadImageInput = parse(input)?;
+        let (image, info) = load(ctx, &i.path).await?;
+        Ok(ToolOutput {
+            output: format!("shown to the user: {info}"),
+            shown: vec![image],
+            ..Default::default()
+        })
+    }
+}
+
+/// Reads the image at `path` and describes it as "path (type, size)".
+async fn load(ctx: &Context, path: &str) -> Result<(ImageSource, String)> {
+    use base64::Engine;
+    let resolved = resolve(ctx.cwd(), path);
+    // The size first, so a huge file is not read for nothing.
+    let bytes = ctx
+        .run_sandboxed(move || {
+            let len = std::fs::metadata(&resolved)?.len();
+            if len > ImageSource::MAX_BYTES as u64 {
+                return Err(std::io::Error::other(format!(
+                    "{:.1} MB is too large, the limit is {} MB; make a smaller copy first",
+                    len as f64 / (1024.0 * 1024.0),
+                    ImageSource::MAX_BYTES / (1024 * 1024)
+                )));
+            }
+            std::fs::read(&resolved)
+        })
+        .await?
+        .with_context(|| format!("reading {path}"))?;
+    let Some(media_type) = image_type(&bytes) else {
+        bail!("{path} is not a PNG, JPEG, GIF or WebP image");
+    };
+    let info = format!("{path} ({media_type}, {} KB)", bytes.len().div_ceil(1024));
+    let source = ImageSource::Base64 {
+        media_type: media_type.into(),
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    };
+    Ok((source, info))
 }
 
 /// The media type from the file's magic bytes; extensions can lie.
@@ -155,6 +192,23 @@ mod tests {
         let big = std::fs::File::create(dir.path().join("big.png")).unwrap();
         big.set_len(ImageSource::MAX_BYTES as u64 + 1).unwrap();
         assert!(err("big.png").await.contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn show_image_is_only_for_the_user() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(PNG)
+            .unwrap();
+        std::fs::write(dir.path().join("chart.png"), &png).unwrap();
+        let out = ShowImage
+            .run(json!({"path": "chart.png"}), &ctx(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(out.output, "shown to the user: chart.png (image/png, 1 KB)");
+        assert!(out.images.is_empty(), "the model gets no pixels");
+        assert_eq!(out.shown.len(), 1);
     }
 
     #[tokio::test]
