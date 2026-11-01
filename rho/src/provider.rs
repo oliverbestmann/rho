@@ -121,10 +121,12 @@ impl ImageSource {
     pub const MEDIA_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
     /// Largest image the Anthropic API accepts, in decoded bytes.
     pub const MAX_BYTES: usize = 5 * 1024 * 1024;
-    /// Longest side the Anthropic API accepts in requests with many images.
-    pub const MAX_SIDE: u32 = 2000;
+    /// Longest side Anthropic keeps; it scales larger images down to this
+    /// itself, so bigger ones only cost upload on every request.
+    pub const MAX_SIDE: u32 = 1568;
 
-    /// Scales the image down to `MAX_SIDE`, then fails if a provider would
+    /// Scales the image down to `MAX_SIDE` (as JPEG, like images over
+    /// `REENCODE_BYTES`; see `shrink`), then fails if a provider would
     /// still reject it. A rejected image in the history fails every later
     /// request of the session, so images are fitted before they are added.
     pub fn fit(&mut self) -> Result<()> {
@@ -155,7 +157,9 @@ impl ImageSource {
 }
 
 /// `bytes` scaled down to fit `ImageSource::MAX_SIDE`, as (media type,
-/// bytes); `None` if it fits already.
+/// bytes); `None` if it fits and is at most `REENCODE_BYTES`, or nothing
+/// smaller comes out. JPEG, except GIFs and images with transparent pixels,
+/// which JPEG cannot hold: those become PNG, and only when scaled.
 fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
     use image::ImageReader;
     let reader = || ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format();
@@ -163,27 +167,34 @@ fn shrink(bytes: &[u8]) -> Result<Option<(&'static str, Vec<u8>)>> {
         .into_dimensions()
         .context("cannot read the image")?;
     let max = ImageSource::MAX_SIDE;
-    if width.max(height) <= max {
+    let resize = width.max(height) > max;
+    let gif = reader()?.format() == Some(image::ImageFormat::Gif);
+    if !resize && (gif || bytes.len() <= REENCODE_BYTES) {
         return Ok(None);
     }
-    let jpeg = reader()?.format() == Some(image::ImageFormat::Jpeg);
-    let img = reader()?.decode().context("cannot read the image")?.resize(
-        max,
-        max,
-        image::imageops::FilterType::Triangle,
-    );
+    let mut img = reader()?.decode().context("cannot read the image")?;
+    let transparent = img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p.0[3] < 255);
+    if !resize && transparent {
+        return Ok(None);
+    }
+    if resize {
+        img = img.resize(max, max, image::imageops::FilterType::Triangle);
+    }
     let mut out = vec![];
-    // `image` writes only lossless WebP, so all but JPEG become PNG.
-    if jpeg {
-        img.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+    if gif || transparent {
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+        return Ok(Some(("image/png", out)));
+    }
+    img.to_rgb8()
+        .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
             &mut out, 85,
         ))?;
-        Ok(Some(("image/jpeg", out)))
-    } else {
-        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
-        Ok(Some(("image/png", out)))
-    }
+    Ok((resize || out.len() < bytes.len()).then_some(("image/jpeg", out)))
 }
+
+/// Images above this are sent as JPEG even when they fit `MAX_SIDE`,
+/// unless `shrink` keeps them.
+const REENCODE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -719,9 +730,9 @@ mod tests {
         assert!(err(source("image/tiff", "AAAA")).contains("unsupported image type"));
         assert!(err(source("image/png", "not base64!")).contains("base64"));
         assert!(err(source("image/png", "AAAA")).contains("cannot read"));
-        // Noise does not compress: 2000x1000 RGB is about 6 MB.
+        // Noise does not compress: 1000x1000 RGB is about 3 MB, within MAX_SIDE.
         let mut seed = 1u32;
-        let noise = image::RgbImage::from_fn(2000, 1000, |_, _| {
+        let noise = image::RgbImage::from_fn(1000, 1000, |_, _| {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             image::Rgb(seed.to_le_bytes()[..3].try_into().unwrap())
         });
@@ -729,7 +740,43 @@ mod tests {
         noise
             .write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png)
             .unwrap();
-        assert!(err(source("image/png", &b64.encode(big))).contains("limit is 5 MB"));
+        assert!(big.len() > REENCODE_BYTES);
+        let mut s = source("image/png", &b64.encode(&big));
+        s.fit().unwrap();
+        let ImageSource::Base64 { media_type, data } = &s;
+        assert_eq!(media_type, "image/jpeg", "over 2 MB becomes JPEG");
+        let img = image::load_from_memory(&b64.decode(data).unwrap()).unwrap();
+        assert_eq!((img.width(), img.height()), (1000, 1000));
+    }
+
+    #[test]
+    fn transparent_images_and_gifs_stay_png() {
+        use base64::Engine;
+        let b64 = &base64::engine::general_purpose::STANDARD;
+        let encode = |img: image::DynamicImage, format| {
+            let mut out = vec![];
+            img.write_to(&mut std::io::Cursor::new(&mut out), format)
+                .unwrap();
+            out
+        };
+        let mut clear = image::RgbaImage::new(2000, 10);
+        clear.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        for (img, format, from) in [
+            (clear.into(), image::ImageFormat::Png, "image/png"),
+            (
+                image::RgbaImage::from_pixel(2000, 10, image::Rgba([9, 9, 9, 255])).into(),
+                image::ImageFormat::Gif,
+                "image/gif",
+            ),
+        ] {
+            let mut s = ImageSource::Base64 {
+                media_type: from.into(),
+                data: b64.encode(encode(img, format)),
+            };
+            s.fit().unwrap();
+            let ImageSource::Base64 { media_type, .. } = &s;
+            assert_eq!(media_type, "image/png", "{from}");
+        }
     }
 
     #[test]
@@ -745,8 +792,8 @@ mod tests {
         };
         for (format, from, to) in [
             (image::ImageFormat::Jpeg, "image/jpeg", "image/jpeg"),
-            (image::ImageFormat::Png, "image/png", "image/png"),
-            (image::ImageFormat::WebP, "image/webp", "image/png"),
+            (image::ImageFormat::Png, "image/png", "image/jpeg"),
+            (image::ImageFormat::WebP, "image/webp", "image/jpeg"),
         ] {
             let mut s = ImageSource::Base64 {
                 media_type: from.into(),
@@ -756,7 +803,7 @@ mod tests {
             let ImageSource::Base64 { media_type, data } = &s;
             assert_eq!(media_type, to);
             let img = image::load_from_memory(&b64.decode(data).unwrap()).unwrap();
-            assert_eq!((img.width(), img.height()), (333, 2000), "{from}");
+            assert_eq!((img.width(), img.height()), (261, 1568), "{from}");
         }
     }
 

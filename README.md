@@ -573,6 +573,10 @@ rho advertises `promptCapabilities.image`, so ACP clients can attach images
 the model as Anthropic base64 image blocks. JPEG, PNG, GIF and WebP up to 5 MB
 are accepted. Anything else fails the prompt before it reaches the history,
 because a rejected image in the history would fail every later request.
+The whole history, images included, goes up with every request, so images
+longer than 1568 px (Anthropic scales them down to that anyway) or over 2 MB
+are re-encoded as JPEG (quality 85). GIFs and images with transparent pixels
+stay as they are, or become PNG when they have to be scaled down.
 Images are saved with the session and replayed by `session/load`; compaction
 and search see them as `[image]`.
 
