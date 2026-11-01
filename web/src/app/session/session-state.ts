@@ -165,12 +165,36 @@ export function rhoRunning(meta: Meta) {
   return typeof running === 'boolean' ? running : undefined;
 }
 
+/** An image rho sent without data, to fetch with `Acp.image`. */
+function isImageRef(b: acp.ContentBlock) {
+  return b.type === 'image' && !b.data && !!b.uri?.startsWith('rho-image:');
+}
+
+/** A tool call image to fetch; the size, if rho could read it, is for the placeholder. */
+export interface ImageRef {
+  uri: string;
+  width?: number;
+  height?: number;
+}
+
+/** The images of a tool call that rho sent as `rho-image:` uris, with `_meta.rho` sizes. */
+export function imageRefs(call: acp.ToolCall): ImageRef[] {
+  return (call.content ?? []).flatMap((c) => {
+    if (c.type !== 'content' || c.content.type !== 'image' || !isImageRef(c.content)) return [];
+    const { width, height } = rhoMeta(c.content._meta) ?? {};
+    const sized = typeof width === 'number' && typeof height === 'number' && width && height;
+    return [{ uri: c.content.uri!, ...(sized && { width, height }) }];
+  });
+}
+
 /** A content block as markdown. */
 export function blockText(b: acp.ContentBlock): string {
   switch (b.type) {
     case 'text':
       return b.text;
     case 'image':
+      // Fetched when shown, see `imageRefs`.
+      if (isImageRef(b)) return '';
       // Own paragraph, so it does not glue onto surrounding text.
       return `\n\n![image](data:${b.mimeType};base64,${b.data})\n\n`;
     case 'resource_link':

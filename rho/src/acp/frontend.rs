@@ -6,16 +6,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol::schema::v1::{
-    ContentChunk, CreateElicitationRequest, ElicitationAction, ElicitationFormMode,
-    ElicitationSessionScope, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, SessionConfigOption, SessionId, SessionInfoUpdate,
-    SessionNotification, SessionUpdate, ToolCallUpdate, ToolCallUpdateFields,
+    Content, ContentBlock, ContentChunk, CreateElicitationRequest, ElicitationAction,
+    ElicitationFormMode, ElicitationSessionScope, ImageContent, PermissionOption,
+    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
+    SessionId, SessionInfoUpdate, SessionNotification, SessionUpdate, ToolCallContent,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{Client, ConnectionTo, JsonRpcRequest};
 use futures::StreamExt;
 use futures::future::{AbortHandle, Abortable};
 use futures::stream::FuturesUnordered;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentEvent;
@@ -49,6 +51,8 @@ pub(super) struct Viewer {
     pub(super) forms: bool,
     /// The client shows `Bash` calls as terminals.
     pub(super) terminal: bool,
+    /// The client fetches tool call images with `_rho/image`, see `image_refs`.
+    pub(super) image_refs: bool,
     /// The client knows the session: it gets confirmations and forms.
     pub(super) ready: bool,
     /// Updates held while the session starts, until `ready`: a client does
@@ -341,6 +345,22 @@ impl AcpFrontend {
         }
     }
 
+    /// The tool call image that `uri` stands for (see `image_refs`), while
+    /// the transcript has it.
+    pub(super) fn image(&self, uri: &str) -> Option<ImageContent> {
+        let transcript = self.transcript.lock().unwrap();
+        transcript.entries.iter().find_map(|e| match e {
+            Entry::Update { plain, .. } => tool_content(plain).iter().find_map(|c| match c {
+                ToolCallContent::Content(Content {
+                    content: ContentBlock::Image(i),
+                    ..
+                }) if image_ref(&i.data) == uri => Some(i.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
     /// Adds `update` to the transcript, for every viewer.
     pub(super) fn record(&self, update: SessionUpdate) -> Pos {
         self.transcript.lock().unwrap().push(Entry::Update {
@@ -605,7 +625,10 @@ impl AcpFrontend {
 
     /// Sends `update` to `v`, or holds it while the session starts. `pos`:
     /// where it ends in the transcript, sent as `_meta.rho.cursor`.
-    fn deliver(&self, v: &mut Viewer, update: SessionUpdate, to: To, pos: Option<Pos>) {
+    fn deliver(&self, v: &mut Viewer, mut update: SessionUpdate, to: To, pos: Option<Pos>) {
+        if v.image_refs {
+            image_refs(&mut update);
+        }
         let mut notification = SessionNotification::new(v.sid.clone(), update);
         if let Some(pos) = pos {
             let cursor = Cursor {
@@ -621,6 +644,63 @@ impl AcpFrontend {
             _ => {
                 let _ = v.cx.send_notification(notification);
             }
+        }
+    }
+}
+
+/// Starts the `uri` that stands for an image's data, see `image_refs`.
+const IMAGE_REF: &str = "rho-image:";
+
+fn image_ref(data: &str) -> String {
+    let hash = Sha256::digest(data.as_bytes());
+    let hex: String = hash[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{IMAGE_REF}{hex}")
+}
+
+/// A tool call's content, empty for other updates.
+fn tool_content(update: &SessionUpdate) -> &[ToolCallContent] {
+    match update {
+        SessionUpdate::ToolCall(c) => &c.content,
+        SessionUpdate::ToolCallUpdate(u) => u.fields.content.as_deref().unwrap_or_default(),
+        _ => &[],
+    }
+}
+
+/// Width and height from the image's header, `None` if it cannot be read.
+fn dimensions(data: &str) -> Option<(u32, u32)> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// Tool call images get a `uri` to fetch them with `_rho/image` instead of
+/// their data, so replays stay small and a client loads only the images it
+/// shows. `_meta.rho.width`/`height` let it keep the space meanwhile.
+fn image_refs(update: &mut SessionUpdate) {
+    let content = match update {
+        SessionUpdate::ToolCall(c) => Some(&mut c.content),
+        SessionUpdate::ToolCallUpdate(u) => u.fields.content.as_mut(),
+        _ => None,
+    };
+    for c in content.into_iter().flatten() {
+        if let ToolCallContent::Content(Content {
+            content: ContentBlock::Image(i),
+            ..
+        }) = c
+        {
+            i.uri = Some(image_ref(&i.data));
+            if let Some((width, height)) = dimensions(&i.data) {
+                i.meta = Some(meta(
+                    serde_json::json!({ "rho": { "width": width, "height": height } }),
+                ));
+            }
+            i.data.clear();
         }
     }
 }
@@ -745,6 +825,44 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn tool_images_are_sent_as_refs_and_found_again() {
+        let mut png = vec![];
+        image::RgbImage::new(3, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(png);
+        let image = ImageContent::new(data, "image/png");
+        let content = ToolCallContent::Content(Content::new(ContentBlock::Image(image.clone())));
+        let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "t1",
+            ToolCallUpdateFields::new().content(vec![content]),
+        ));
+        let frontend = AcpFrontend::new(Path::new("/w"));
+        frontend.record(update.clone());
+
+        let mut sent = update;
+        image_refs(&mut sent);
+        let ToolCallContent::Content(Content {
+            content: ContentBlock::Image(sent),
+            ..
+        }) = &tool_content(&sent)[0]
+        else {
+            panic!("not an image");
+        };
+        assert_eq!(sent.data, "");
+        let size = &sent.meta.as_ref().unwrap()["rho"];
+        assert_eq!(
+            (size["width"].as_u64(), size["height"].as_u64()),
+            (Some(3), Some(2))
+        );
+        let uri = sent.uri.as_deref().unwrap();
+        assert!(uri.starts_with(IMAGE_REF));
+        assert_eq!(frontend.image(uri), Some(image));
+        assert_eq!(frontend.image("rho-image:00"), None);
     }
 
     #[test]

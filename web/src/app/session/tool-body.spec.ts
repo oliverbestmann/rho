@@ -1,5 +1,6 @@
 import * as acp from '@agentclientprotocol/sdk';
 import { siRust } from 'simple-icons';
+import { imageRefs } from './session-state';
 import { hasBody, toolBody, toolIcon, toolLogo } from './tool-body';
 
 const text = (t: string) => ({
@@ -47,6 +48,24 @@ describe('toolBody', () => {
     expect(toolBody({ toolCallId: 'n', title: 'Note', content: [] })).toBe('');
     expect(toolBody({ toolCallId: 'n', title: 'Note' })).toBe('');
     expect(hasBody({ toolCallId: 'n', title: 'Note', content: [text('')] })).toBe(false);
+  });
+
+  it('leaves image refs out of the markdown but can still open', () => {
+    const ref = {
+      type: 'image' as const,
+      data: '',
+      mimeType: 'image/png',
+      uri: 'rho-image:ab',
+      _meta: { rho: { width: 4, height: 3 } },
+    };
+    const call: acp.ToolCall = {
+      toolCallId: 'i',
+      title: 'ShowImage',
+      content: [{ type: 'content', content: ref }],
+    };
+    expect(toolBody(call)).toBe('');
+    expect(hasBody(call)).toBe(true);
+    expect(imageRefs(call)).toEqual([{ uri: 'rho-image:ab', width: 4, height: 3 }]);
   });
 
   it('shows an edit as diff hunks with context', () => {

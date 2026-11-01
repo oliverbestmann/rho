@@ -78,6 +78,8 @@ export class Acp {
   private readonly opened = new Map<string, Opened>();
   /** Sessions of lost connections to the same server; loading one again sends only what it missed. */
   private readonly kept = new Map<string, SessionState>();
+  /** Tool call images by their `rho-image:` uri, fetched once. */
+  private readonly images = new Map<string, Promise<Image>>();
   private url?: string;
   private connection?: acp.ClientConnection;
   private timer?: ReturnType<typeof setTimeout>;
@@ -187,6 +189,20 @@ export class Acp {
       );
     });
     await this.prompt(sessionId, text);
+  }
+
+  /** The data of a tool call image that rho sent as a `rho-image:` uri. */
+  image(sessionId: string, uri: string): Promise<Image> {
+    let image = this.images.get(uri);
+    if (!image) {
+      const agent = this.agent();
+      if (!agent) return Promise.reject(new Error('Not connected'));
+      image = agent.request('_rho/image', { sessionId, uri }) as Promise<Image>;
+      // A failed fetch is tried again the next time.
+      image.catch(() => this.images.delete(uri));
+      this.images.set(uri, image);
+    }
+    return image;
   }
 
   private async extRequest(method: string, params: Record<string, unknown>) {
@@ -315,7 +331,11 @@ export class Acp {
       await conn.agent.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
         // `terminal_output`: Bash output streams in as Zed's terminal `_meta`.
-        clientCapabilities: { elicitation: { form: {} }, _meta: { terminal_output: true } },
+        // `rho.imageRefs`: tool call images come as `rho-image:` uris, see `image`.
+        clientCapabilities: {
+          elicitation: { form: {} },
+          _meta: { terminal_output: true, rho: { imageRefs: true } },
+        },
         clientInfo: { name: 'rho-web', version: '0.1.0' },
       });
     } catch (e) {

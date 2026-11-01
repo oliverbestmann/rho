@@ -28,6 +28,7 @@ mod config;
 mod dirs;
 mod frontend;
 mod hub;
+mod images;
 mod join;
 mod load;
 mod queue;
@@ -55,6 +56,8 @@ struct ClientCaps {
     forms: AtomicBool,
     /// Understands Zed's `_meta` terminal output for tool calls.
     terminal_output: AtomicBool,
+    /// Fetches tool call images with `_rho/image`: `_meta.rho.imageRefs`.
+    image_refs: AtomicBool,
 }
 
 /// One connection's view: the agent, the shared hub and what this client
@@ -79,6 +82,7 @@ impl State {
             cx: cx.clone(),
             forms: self.caps.forms.load(Ordering::Relaxed),
             terminal: self.caps.terminal_output.load(Ordering::Relaxed),
+            image_refs: self.caps.image_refs.load(Ordering::Relaxed),
             ready: false,
             held: starts.then(Vec::new),
         }
@@ -118,7 +122,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
         state.clone(),
     );
     let (load_state, resume_state, list_state) = (state.clone(), state.clone(), state.clone());
-    let (queue_state, unqueue_state) = (state.clone(), state.clone());
+    let (queue_state, unqueue_state, image_state) = (state.clone(), state.clone(), state.clone());
     let close_state = state;
 
     agent_client_protocol::Agent
@@ -136,6 +140,13 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         .as_ref()
                         .and_then(|m| m.get("terminal_output"))
                         .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    Ordering::Relaxed,
+                );
+                init_state.caps.image_refs.store(
+                    caps.meta
+                        .as_ref()
+                        .and_then(|m| m.get("rho")?.get("imageRefs")?.as_bool())
                         .unwrap_or(false),
                     Ordering::Relaxed,
                 );
@@ -426,6 +437,26 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         .respond_with_error(Error::invalid_params().data("unknown session"));
                 }
                 responder.respond(queue::QueueResponse {})
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: images::ImageRequest,
+                        responder: Responder<images::ImageResponse>,
+                        _cx| {
+                let image = image_state
+                    .hub
+                    .session(&req.session_id, image_state.conn)
+                    .and_then(|(_, _, frontend)| frontend.image(&req.uri));
+                match image {
+                    Some(i) => responder.respond(images::ImageResponse {
+                        mime_type: i.mime_type,
+                        data: i.data,
+                    }),
+                    None => {
+                        responder.respond_with_error(Error::invalid_params().data("unknown image"))
+                    }
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )

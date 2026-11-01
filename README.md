@@ -591,6 +591,11 @@ made, without sending it to the model: it goes in `ToolOutput::shown`, saved
 in the result's `shown` field for the replay, and `provider::for_model` drops
 it from every request.
 
+The web client sets `clientCapabilities._meta.rho.imageRefs`. It then gets
+tool call images without data, with a `rho-image:<hash>` uri, and fetches each
+one with `_rho/image {sessionId, uri}` when its card opens (ADR 0070). Other
+clients get the data inline.
+
 ## Zed
 
 ```json

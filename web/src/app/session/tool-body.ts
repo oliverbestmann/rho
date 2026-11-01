@@ -16,7 +16,7 @@ import {
   siTypescript,
   type SimpleIcon,
 } from 'simple-icons';
-import { blockText } from './session-state';
+import { blockText, imageRefs } from './session-state';
 
 const KIND_ICONS: Record<string, string> = {
   read: 'description',
@@ -131,8 +131,11 @@ export class ToolBodyPipe implements PipeTransform {
 
 /** Whether a tool card has anything to show; cheap, unlike `toolBody` with its diffs. */
 export function hasBody(call: acp.ToolCall) {
-  return (call.content ?? []).some(
-    (c) => c.type === 'diff' || (c.type === 'content' && !!blockText(c.content)),
+  return (
+    imageRefs(call).length > 0 ||
+    (call.content ?? []).some(
+      (c) => c.type === 'diff' || (c.type === 'content' && !!blockText(c.content)),
+    )
   );
 }
 

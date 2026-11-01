@@ -6,7 +6,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
 import { TerminalView } from './terminal';
-import { rhoTool } from './session-state';
+import { LazyImage } from './lazy-image';
+import { imageRefs, rhoTool } from './session-state';
 import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
 
 /** A tool call: status and title, its output when expanded. */
@@ -14,6 +15,7 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
   selector: 'app-tool-card',
   imports: [
     HighlightCode,
+    LazyImage,
     MarkdownPipe,
     ToolBodyPipe,
     MatExpansionModule,
@@ -53,6 +55,9 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
         } @else {
           @let html = c | toolBody | markdown;
           <div class="markdown" [innerHTML]="html" [appHighlight]="html"></div>
+          @for (ref of imageRefs(c); track ref.uri) {
+            <app-lazy-image [sessionId]="sessionId()" [image]="ref" />
+          }
         }
       </ng-template>
     </mat-expansion-panel>
@@ -61,11 +66,14 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
 })
 export class ToolCard {
   readonly call = input.required<acp.ToolCall>();
+  /** For fetching the call's images. */
+  readonly sessionId = input.required<string>();
   /** Output for a terminal card, shown with xterm.js instead of markdown. */
   readonly terminal = input<string>();
   protected readonly icon = toolIcon;
   protected readonly logo = toolLogo;
   protected readonly hasBody = hasBody;
+  protected readonly imageRefs = imageRefs;
 
   /** ShowImage is there to be seen: open once it has the image. */
   protected opened(c: acp.ToolCall) {
