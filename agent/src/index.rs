@@ -29,7 +29,8 @@ pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>> {
             .with_show_download_progress(false);
         *model = Some(TextEmbedding::try_new(options).context("loading the embedding model")?);
     }
-    Ok(model.as_mut().unwrap().embed(texts, None)?)
+    // onnxruntime keeps the largest batch's memory: 256 chunks kept 1.1 GB, 16 keep ~100 MB.
+    Ok(model.as_mut().unwrap().embed(texts, Some(16))?)
 }
 
 /// Runs `f` with deleted bytes zeroed, then truncates the WAL, so nothing
