@@ -25,6 +25,7 @@ sha2 = "0.11.1"
 serde_norway = "0.9.42"
 # Not on crates.io.
 gitleaks-rs = { git = "https://github.com/TeamCadenceAI/gitleaks-rs", rev = "b05165c8de20c97f6b2d62e748f772c6e3bfac4e" }
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }

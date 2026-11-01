@@ -23,6 +23,11 @@ mod skills;
 
 use std::sync::Arc;
 
+// glibc malloc tends to keep memory freed after large allocations (whole
+// histories as JSON) spread over many threads; mimalloc returns it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let secrets = secrets::Secrets::new();
