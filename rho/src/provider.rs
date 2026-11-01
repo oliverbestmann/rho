@@ -95,7 +95,7 @@ impl Content {
     }
 
     /// A base64 image; see `ImageSource::check` for what models accept.
-    pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+    pub fn image(media_type: impl Into<String>, data: impl Into<std::sync::Arc<str>>) -> Self {
         Content::Image {
             source: ImageSource::Base64 {
                 media_type: media_type.into(),
@@ -113,7 +113,11 @@ crate::id_type! {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
-    Base64 { media_type: String, data: String },
+    /// `data` is shared: every request clones the history.
+    Base64 {
+        media_type: String,
+        data: std::sync::Arc<str>,
+    },
 }
 
 impl ImageSource {
@@ -139,10 +143,12 @@ impl ImageSource {
                 Self::MEDIA_TYPES.join(", ")
             );
         }
-        let mut bytes = base64.decode(&*data).context("image is not valid base64")?;
+        let mut bytes = base64
+            .decode(&**data)
+            .context("image is not valid base64")?;
         if let Some((smaller_type, smaller)) = shrink(&bytes)? {
             *media_type = smaller_type.into();
-            *data = base64.encode(&smaller);
+            *data = base64.encode(&smaller).into();
             bytes = smaller;
         }
         if bytes.len() > Self::MAX_BYTES {
@@ -784,7 +790,7 @@ mod tests {
         s.fit().unwrap();
         let ImageSource::Base64 { media_type, data } = &s;
         assert_eq!(media_type, "image/jpeg", "over 2 MB becomes JPEG");
-        let img = image::load_from_memory(&b64.decode(data).unwrap()).unwrap();
+        let img = image::load_from_memory(&b64.decode(&**data).unwrap()).unwrap();
         assert_eq!((img.width(), img.height()), (1000, 1000));
     }
 
@@ -810,7 +816,7 @@ mod tests {
         ] {
             let mut s = ImageSource::Base64 {
                 media_type: from.into(),
-                data: b64.encode(encode(img, format)),
+                data: b64.encode(encode(img, format)).into(),
             };
             s.fit().unwrap();
             let ImageSource::Base64 { media_type, .. } = &s;
@@ -836,12 +842,12 @@ mod tests {
         ] {
             let mut s = ImageSource::Base64 {
                 media_type: from.into(),
-                data: encode(format),
+                data: encode(format).into(),
             };
             s.fit().unwrap();
             let ImageSource::Base64 { media_type, data } = &s;
             assert_eq!(media_type, to);
-            let img = image::load_from_memory(&b64.decode(data).unwrap()).unwrap();
+            let img = image::load_from_memory(&b64.decode(&**data).unwrap()).unwrap();
             assert_eq!((img.width(), img.height()), (261, 1568), "{from}");
         }
     }

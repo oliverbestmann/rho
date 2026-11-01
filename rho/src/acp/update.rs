@@ -187,7 +187,7 @@ pub(super) fn usage_update(last: &LastUsage, size: u64) -> SessionUpdate {
 
 pub(super) fn image_block(source: &ImageSource) -> ContentBlock {
     let ImageSource::Base64 { media_type, data } = source;
-    ContentBlock::Image(ImageContent::new(data.clone(), media_type.clone()))
+    ContentBlock::Image(ImageContent::new(data.to_string(), media_type.clone()))
 }
 
 /// How a tool call is shown besides its title.

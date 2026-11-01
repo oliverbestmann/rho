@@ -765,7 +765,10 @@ fn slash_command(prompt: &[ContentBlock]) -> Option<(&str, String)> {
 /// it never gets into the history.
 fn to_content(blocks: Vec<ContentBlock>) -> anyhow::Result<Vec<Content>> {
     let image = |media_type: String, data: String| -> anyhow::Result<Content> {
-        let mut source = ImageSource::Base64 { media_type, data };
+        let mut source = ImageSource::Base64 {
+            media_type,
+            data: data.into(),
+        };
         source.fit()?;
         Ok(Content::Image { source })
     };

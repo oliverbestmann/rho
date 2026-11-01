@@ -114,7 +114,9 @@ async fn load(ctx: &Context, path: &str) -> Result<(ImageSource, String)> {
     let info = format!("{path} ({media_type}, {} KB)", bytes.len().div_ceil(1024));
     let source = ImageSource::Base64 {
         media_type: media_type.into(),
-        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        data: base64::engine::general_purpose::STANDARD
+            .encode(&bytes)
+            .into(),
     };
     Ok((source, info))
 }
