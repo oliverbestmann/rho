@@ -103,6 +103,7 @@ rho -t low "..."                           # thinking: off|low|medium|high|xhigh
 rho acp                                    # ACP on stdio
 rho acp --daemon                           # ACP on stdio, through the shared daemon
 rho daemon --listen 127.0.0.1:8788         # the daemon, also on ws://127.0.0.1:8788/
+rho proxy --listen 127.0.0.1:8789          # only the model API, see below
 ```
 
 `RHO_MODEL` and `RHO_THINKING` set the defaults for `-m` and `-t`.
@@ -681,6 +682,10 @@ providers (ADR 0068). `models` takes the same patterns as `models.allow`
 (`*`, `anthropic/*`, `*/claude-*`); it is empty by default, which offers
 nothing. Model ids are `provider/model`. On `--listen` the API key is
 `api.token` if set, else the ACP token; the socket needs none.
+
+`rho proxy --listen ADDR` serves only these endpoints on `http://ADDR/`,
+with the same models and token: no ACP, no web client, no daemon socket.
+It does not need `api.enabled`.
 
 ```sh
 curl http://ADDR/v1/chat/completions -H "Authorization: Bearer $API_TOKEN" \

@@ -84,15 +84,7 @@ where
 {
     let mut app = Router::new().route("/", get(upgrade));
     if agent.api.enabled {
-        let mut api = crate::api::router(agent.clone());
-        if let Some(token) = &token {
-            let token = agent.api.token.as_ref().unwrap_or(token);
-            api = api.layer(middleware::from_fn_with_state(
-                Arc::<str>::from(token.as_str()),
-                require_token,
-            ));
-        }
-        app = app.merge(api);
+        app = app.merge(api_router(agent.clone(), token.as_deref()));
     }
     if let Some(dir) = &web {
         // The client's routes (`/session/...`) are its page too, but a missing
@@ -116,6 +108,24 @@ where
         web,
     }));
     axum::serve(listener, app).await.context("acp websocket")
+}
+
+/// The model API routes (`crate::api`). With `token`, requests need
+/// `api.token` if set, else `token`.
+pub fn api_router<S: Clone + Send + Sync + 'static>(
+    agent: Arc<Agent>,
+    token: Option<&str>,
+) -> Router<S> {
+    let api_token = agent.api.token.clone();
+    let api = crate::api::router(agent);
+    let Some(token) = token else {
+        return api;
+    };
+    let token = api_token.as_deref().unwrap_or(token);
+    api.layer(middleware::from_fn_with_state(
+        Arc::<str>::from(token),
+        require_token,
+    ))
 }
 
 /// The daemon's socket: listening, plus the lock that keeps it the only

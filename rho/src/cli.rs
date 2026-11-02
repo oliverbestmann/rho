@@ -9,21 +9,9 @@ use crate::extension::{DynExtension, Frontend};
 use crate::openai_chat::{self, OpenAiChat};
 use crate::provider::{Content, ModelSpec, ProviderName, Registry, Thinking, Usage};
 use anyhow::{Context, Result, bail};
+use clap::{CommandFactory as _, Parser, Subcommand};
 
-const USAGE: &str = "\
-usage:
-  rho [options] <prompt...>   one-shot: run the prompt, print the answer
-  rho acp [options]           serve the Agent Client Protocol on stdio
-  rho acp --daemon            ... through a running daemon
-  rho daemon [options]        serve ACP for `acp --daemon` on ~/.config/rho/daemon/acp.sock
-  rho daemon --listen ADDR    ... and on ws://ADDR/, with a bearer token
-  rho login [anthropic]       sign in with a Claude Pro/Max subscription
-  rho login github-copilot    sign in with GitHub Copilot (Claude and GPT models)
-
-options:
-  -m, --model provider/model                    env RHO_MODEL
-  -t, --thinking off|low|medium|high|xhigh|max  env RHO_THINKING, default high
-
+const ENV_HELP: &str = "\
 env:
   RHO_AUTH_FILE      credential file
   RHO_COMPACT_MODEL  model for /compact when the cache expired
@@ -40,6 +28,51 @@ files in ~/.config/rho/config.d, each kind in file name order:
   *APPEND_SYSTEM.md     joined, added to the system prompt
 files in ~/.config/rho: AGENTS.md, project_context.json (approved project AGENTS.md dirs);
 empty files are ignored";
+
+#[derive(Parser)]
+#[command(name = "rho", args_conflicts_with_subcommands = true, after_help = ENV_HELP)]
+struct Args {
+    /// provider/model
+    #[arg(short, long, global = true, env = "RHO_MODEL")]
+    model: Option<ModelSpec>,
+    /// off|low|medium|high|xhigh|max
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "RHO_THINKING",
+        default_value = "high"
+    )]
+    thinking: Thinking,
+    #[command(subcommand)]
+    command: Option<Command>,
+    /// One-shot: run the prompt, print the answer
+    #[arg(trailing_var_arg = true)]
+    prompt: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Serve the Agent Client Protocol on stdio
+    Acp {
+        /// Through a running daemon
+        #[arg(long)]
+        daemon: bool,
+    },
+    /// Serve ACP for `acp --daemon` on ~/.config/rho/daemon/acp.sock
+    Daemon {
+        /// Also serve on ws://ADDR/, with a bearer token
+        #[arg(short, long, value_name = "ADDR")]
+        listen: Option<String>,
+    },
+    /// Sign in: anthropic (Claude Pro/Max, default) or github-copilot
+    Login { provider: Option<String> },
+    /// Serve only the model API (OpenAI /v1, Ollama /api) on http://ADDR/, with a bearer token
+    Proxy {
+        #[arg(short, long, value_name = "ADDR")]
+        listen: String,
+    },
+}
 
 /// What a `rho` binary is made of. Start from the defaults and change what
 /// you need:
@@ -98,32 +131,29 @@ impl Default for Options {
 
 /// The `rho` command line (one-shot, `acp`, `login`).
 pub async fn run(options: Options) -> Result<()> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let model_flag = take_flag(&mut args, "-m", "--model")?;
-    let thinking_flag = take_flag(&mut args, "-t", "--thinking")?;
-    let model: Option<ModelSpec> = model_flag
-        .or_else(|| std::env::var("RHO_MODEL").ok())
-        .map(|m| m.parse())
-        .transpose()?;
-    let thinking: Thinking = thinking_flag
-        .or_else(|| std::env::var("RHO_THINKING").ok())
-        .map(|t| t.parse())
-        .transpose()?
-        .unwrap_or_default();
+    let Args {
+        model,
+        thinking,
+        command,
+        prompt,
+    } = Args::parse();
 
-    match args.first().map(String::as_str) {
-        None | Some("-h" | "--help") => {
-            eprintln!("{USAGE}");
-            Ok(())
+    let Some(command) = command else {
+        if prompt.is_empty() {
+            Args::command().print_help()?;
+            return Ok(());
         }
-        Some("login") => match args.get(1).map(ProviderName::new) {
+        return one_shot(make_agent(options, model, thinking)?, prompt.join(" ")).await;
+    };
+    match command {
+        Command::Login { provider } => match provider.map(ProviderName::new) {
             None => login().await,
             Some(p) if p == anthropic::NAME => login().await,
             Some(p) if p == copilot::KEY => login_copilot().await,
-            Some(other) => bail!("unknown provider {:?}\n{USAGE}", other.as_str()),
+            Some(other) => bail!("unknown provider {:?}", other.as_str()),
         },
-        Some("acp") => {
-            if args.iter().any(|a| a == "--daemon") {
+        Command::Acp { daemon } => {
+            if daemon {
                 let dir = crate::config_dir().join(crate::acp_ws::DAEMON_DIR);
                 let result = crate::acp_ws::connect_stdio(&dir).await;
                 // Tokio's stdin reader blocks in a thread that cannot be
@@ -141,8 +171,7 @@ pub async fn run(options: Options) -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("acp: {e}"))
         }
-        Some("daemon") => {
-            let listen = take_flag(&mut args, "-l", "--listen")?;
+        Command::Daemon { listen } => {
             let config_dir = crate::config_dir();
             let dir = config_dir.join(crate::acp_ws::DAEMON_DIR);
             let Some((_lock, socket)) = crate::acp_ws::bind_daemon(&dir)? else {
@@ -174,20 +203,25 @@ pub async fn run(options: Options) -> Result<()> {
             let tcp = crate::acp_ws::serve(agent, hub, listener, Some(token), web);
             tokio::try_join!(unix, tcp).map(|_| ())
         }
-        Some(_) => one_shot(make_agent(options, model, thinking)?, args.join(" ")).await,
+        Command::Proxy { listen } => {
+            let config_dir = crate::config_dir();
+            let token = crate::acp_ws::token(&config_dir)?;
+            let agent = Arc::new(acp_agent(options, model, thinking)?);
+            if agent.api.models.is_empty() {
+                eprintln!("rho proxy: no models offered, set api.models in the config");
+            }
+            let listener = tokio::net::TcpListener::bind(&listen)
+                .await
+                .with_context(|| format!("listening on {listen}"))?;
+            eprintln!(
+                "rho proxy: http://{}/ (token from api.token, RHO_ACP_TOKEN or {})",
+                listener.local_addr()?,
+                config_dir.join(crate::acp_ws::TOKEN_FILE).display()
+            );
+            let app: axum::Router = crate::acp_ws::api_router(agent, Some(&token));
+            axum::serve(listener, app).await.context("proxy")
+        }
     }
-}
-
-/// Removes `short value` / `long value` from `args`.
-fn take_flag(args: &mut Vec<String>, short: &str, long: &str) -> Result<Option<String>> {
-    let Some(i) = args.iter().position(|a| a == short || a == long) else {
-        return Ok(None);
-    };
-    args.remove(i);
-    if i >= args.len() {
-        bail!("{long} needs a value\n{USAGE}");
-    }
-    Ok(Some(args.remove(i)))
 }
 
 /// An agent that saves sessions, for ACP.
