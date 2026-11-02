@@ -11,7 +11,12 @@
   };
 
   outputs =
-    { nixpkgs, zvec-grep, ... }:
+    {
+      self,
+      nixpkgs,
+      zvec-grep,
+      ...
+    }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "x86_64-linux"
@@ -21,6 +26,12 @@
       ];
     in
     {
+      overlays.default = final: prev: {
+        rho = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+
+      nixosModules.default = import ./nix/module.nix self;
+
       packages = forAllSystems (
         system:
         let
