@@ -73,7 +73,7 @@ Cargo workspace:
 - `rho/src/copilot.rs` - GitHub Copilot: login, token exchange, Claude via `anthropic`, GPT via `openai.rs` (Responses API)
 - `rho/src/config.rs` - `config.d`: merged JSON config and prompt files
 - `rho/src/models.rs` - `"models"` config: allowed, default and compaction models by path
-- `rho/src/openai_api.rs` - OpenAI-compatible `/v1/chat/completions` and `/v1/models` on the daemon (`"api"` config)
+- `rho/src/api/` - OpenAI-compatible `/v1/chat/completions` and `/v1/models` on the daemon (`"api"` config)
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
 - `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage` and `ShowImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
 - `rho/src/tools/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff

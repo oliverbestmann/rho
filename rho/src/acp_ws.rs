@@ -84,7 +84,7 @@ where
 {
     let mut app = Router::new().route("/", get(upgrade));
     if agent.api.enabled {
-        let mut api = crate::openai_api::router(agent.clone());
+        let mut api = crate::api::router(agent.clone());
         if let Some(token) = &token {
             let token = agent.api.token.as_ref().unwrap_or(token);
             api = api.layer(middleware::from_fn_with_state(

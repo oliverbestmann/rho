@@ -212,7 +212,7 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     agent.sandbox = crate::config::section(&config, "sandbox")?;
     agent.features = crate::feature::load(&config)?;
     agent.models = crate::config::section(&config, crate::models::Config::KEY)?;
-    agent.api = crate::config::section(&config, crate::openai_api::Config::KEY)?;
+    agent.api = crate::config::section(&config, crate::api::Config::KEY)?;
     agent.config_dir = Some(config_dir);
     let compact = match std::env::var("RHO_COMPACT_MODEL") {
         Ok(m) => {

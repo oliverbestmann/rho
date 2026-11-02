@@ -1,22 +1,12 @@
-//! OpenAI-compatible endpoints on the daemon's listeners, so other clients
-//! can use rho's providers: `GET /v1/models` and `POST /v1/chat/completions`
-//! (streaming or not), text and image (`data:` URL) input only. Off unless
-//! the config enables it:
-//!
-//! ```json
-//! { "api": { "enabled": true, "models": ["anthropic/*"] } }
-//! ```
-//!
-//! Requests go straight to the provider: no session, no tools, no extension
-//! hooks. The TCP listener needs `token` as API key, else the acp-token
-//! (see `acp_ws`).
+//! OpenAI's `GET /v1/models` and `POST /v1/chat/completions` (streaming or
+//! not), text and image (`data:` URL) input only.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,44 +15,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::models::Pattern;
 use crate::provider::{
-    Content, Event, ImageSource, Message, ModelSpec, Provider, Request, Role, StopReason, Thinking,
-    Usage,
+    Content, Event, Message, Provider, Request, Role, StopReason, Thinking, Usage,
 };
 
-/// `"api"` in the config.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    #[serde(default)]
-    pub enabled: bool,
-    /// Models the endpoints offer; none if empty.
-    #[serde(default)]
-    pub models: Vec<Pattern>,
-    /// API key on the TCP listener instead of the ACP token.
-    #[serde(default)]
-    pub token: Option<String>,
-}
-
-impl Config {
-    pub const KEY: &str = "api";
-
-    pub fn allows(&self, spec: &ModelSpec) -> bool {
-        self.models.iter().any(|p| p.matches(spec))
-    }
-}
-
-/// Requests carry images as base64; axum's default limit is 2 MB.
-const BODY_LIMIT: usize = 64 * 1024 * 1024;
-
-/// The `/v1` routes, for any router state.
-pub fn router<S: Clone + Send + Sync + 'static>(agent: Arc<Agent>) -> Router<S> {
+pub(super) fn router() -> Router<Arc<Agent>> {
     Router::new()
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT))
-        .with_state(agent)
 }
 
 /// An error in OpenAI's shape.
@@ -173,11 +133,7 @@ fn build(agent: &Agent, req: &ChatRequest) -> Result<(Arc<dyn Provider>, Request
             format!("model {:?} is not offered here", req.model),
         )
     };
-    let spec: ModelSpec = req.model.parse().map_err(|_| not_found())?;
-    if !agent.api.allows(&spec) {
-        return Err(not_found());
-    }
-    let provider = agent.registry.resolve(&spec).map_err(|_| not_found())?;
+    let (spec, provider) = super::resolve(agent, &req.model).ok_or_else(not_found)?;
     if req.tools.as_ref().is_some_and(|t| !t.is_empty()) {
         return Err(ApiError::invalid("tools are not supported"));
     }
@@ -261,14 +217,7 @@ fn image(url: &str) -> Result<Content, ApiError> {
         .strip_prefix("data:")
         .and_then(|u| u.split_once(";base64,"))
         .ok_or_else(|| ApiError::invalid("images must be base64 data: URLs"))?;
-    let mut source = ImageSource::Base64 {
-        media_type: media_type.into(),
-        data: data.into(),
-    };
-    source
-        .fit()
-        .map_err(|e| ApiError::invalid(format!("{e:#}")))?;
-    Ok(Content::Image { source })
+    super::image(media_type, data).map_err(|e| ApiError::invalid(format!("{e:#}")))
 }
 
 async fn chat(State(agent): State<Arc<Agent>>, body: Bytes) -> Response {
@@ -456,7 +405,7 @@ mod tests {
                 futures::stream::empty().boxed()
             }
         }
-        let mut agent = Agent::new(Arc::new(Nothing), ModelSpec::new("p", "m"));
+        let mut agent = Agent::new(Arc::new(Nothing), crate::provider::ModelSpec::new("p", "m"));
         agent
             .registry
             .register(crate::provider::ProviderName::new("p"), Arc::new(Nothing));
@@ -475,15 +424,6 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         base64::engine::general_purpose::STANDARD.encode(out)
-    }
-
-    #[test]
-    fn config_is_off_and_empty_by_default() {
-        let config: Config = serde_json::from_value(json!({})).unwrap();
-        assert!(!config.enabled);
-        assert!(!config.allows(&ModelSpec::new("p", "m")));
-        assert_eq!(config.token, None);
-        assert!(serde_json::from_value::<Config>(json!({"enable": true})).is_err());
     }
 
     #[test]

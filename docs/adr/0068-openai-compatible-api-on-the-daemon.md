@@ -12,7 +12,7 @@ Copilot, so the daemon can act as a proxy for those tools.
 ## Decision
 
 - The daemon serves `GET /v1/models` and `POST /v1/chat/completions`
-  (`rho/src/openai_api.rs`) on both of its listeners. It speaks only
+  (`rho/src/api/openai.rs`) on both of its listeners. It speaks only
   OpenAI's format, not Ollama's native `/api/*`. Ollama offers the OpenAI
   format too.
 - The endpoints are off by default. The `"api"` config key turns them on and

@@ -135,7 +135,7 @@ pub struct Agent {
     /// Features each session starts with, from the `features` config.
     pub features: Vec<Feature>,
     /// The OpenAI-compatible endpoints, from the `api` config.
-    pub api: crate::openai_api::Config,
+    pub api: crate::api::Config,
     /// Where sessions are saved, by cwd. Each session opens its own
     /// connection. `None`: sessions are not saved and cannot be resumed.
     pub sessions_db: Option<SessionsDb>,
