@@ -376,7 +376,7 @@ impl Agent {
     }
 
     /// The store for sessions in `cwd`, `None` if sessions are not saved.
-    async fn open_store(&self, cwd: &Path) -> Result<Option<Store>> {
+    pub(crate) async fn open_store(&self, cwd: &Path) -> Result<Option<Store>> {
         let Some(db) = &self.sessions_db else {
             return Ok(None);
         };

@@ -138,6 +138,18 @@ CREATE INDEX items_with_display ON items (created_at) WHERE display IS NOT NULL;
 -- that one. Always a session that is no alias itself.
 ALTER TABLE sessions ADD COLUMN alias_of TEXT REFERENCES sessions (id) ON DELETE SET NULL;
 "#,
+    r#"
+-- Thinking blocks of API responses with tool calls, for clients that do not
+-- send them back (ADR 0072). Keyed by a hash of the response's tool calls.
+CREATE TABLE api_thinking (
+    key TEXT PRIMARY KEY,
+    -- The blocks, a JSON array of Content.
+    blocks TEXT NOT NULL CHECK (json_valid(blocks) AND json_type(blocks) = 'array'),
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX api_thinking_by_age ON api_thinking (created_at);
+"#,
 ];
 
 /// Edit diffs and streamed outputs older than this are deleted; the call
@@ -976,6 +988,45 @@ impl Store {
             let info = tx.query_row(&sql, [&target], read_info)??;
             tx.commit()?;
             Ok(info)
+        })
+        .await
+    }
+
+    /// Saves the thinking blocks of an API response under `key`.
+    pub(crate) async fn save_api_thinking(&self, key: String, blocks: Vec<Content>) -> Result<()> {
+        let blocks = serde_json::to_string(&blocks)?;
+        self.call(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO api_thinking (key, blocks, created_at) VALUES (?1, ?2, ?3)",
+                params![key, blocks, now_ms()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The saved thinking blocks for each of `keys`.
+    pub(crate) async fn api_thinking(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<Option<Vec<Content>>>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare_cached("SELECT blocks FROM api_thinking WHERE key = ?1")?;
+            let mut out = vec![];
+            for key in keys {
+                let blocks: Option<String> = stmt.query_row([&key], |r| r.get(0)).optional()?;
+                out.push(blocks.map(|b| serde_json::from_str(&b)).transpose()?);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Deletes saved API thinking blocks older than `days`; returns how many.
+    pub(crate) async fn prune_api_thinking(&self, days: i64) -> Result<usize> {
+        let before = now_ms() - days * 24 * 60 * 60 * 1000;
+        self.call(move |c| {
+            Ok(c.execute("DELETE FROM api_thinking WHERE created_at < ?1", [before])?)
         })
         .await
     }

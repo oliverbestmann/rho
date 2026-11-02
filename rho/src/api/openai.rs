@@ -23,7 +23,7 @@ use crate::provider::{
     ToolName, ToolSpec, Usage,
 };
 
-pub(super) fn router() -> Router<Arc<Agent>> {
+pub(super) fn router() -> Router<Arc<super::Api>> {
     Router::new()
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
@@ -62,7 +62,8 @@ fn json_response(status: StatusCode, body: &Value) -> Response {
         .into_response()
 }
 
-async fn models(State(agent): State<Arc<Agent>>) -> Response {
+async fn models(State(api): State<Arc<super::Api>>) -> Response {
+    let agent = &api.agent;
     let data: Vec<Value> = agent
         .registry
         .models()
@@ -350,12 +351,12 @@ fn image(url: &str) -> Result<Content, ApiError> {
     super::image(media_type, data).map_err(|e| ApiError::invalid(format!("{e:#}")))
 }
 
-async fn chat(State(agent): State<Arc<Agent>>, body: Bytes) -> Response {
+async fn chat(State(api): State<Arc<super::Api>>, body: Bytes) -> Response {
     let req: ChatRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(e) => return ApiError::invalid(e.to_string()).into_response(),
     };
-    let (provider, request) = match build(&agent, &req) {
+    let (provider, mut request) = match build(&api.agent, &req) {
         Ok(built) => built,
         Err(e) => return e.into_response(),
     };
@@ -366,12 +367,13 @@ async fn chat(State(agent): State<Arc<Agent>>, body: Bytes) -> Response {
             .map_or(0, |d| d.as_secs()),
         model: req.model,
     };
+    api.restore_thinking(&mut request).await;
     let events = provider.stream(request, &|_| {});
     if req.stream {
         let usage = req.stream_options.is_some_and(|o| o.include_usage);
-        return stream(events, meta, usage);
+        return stream(api, events, meta, usage);
     }
-    complete(events, meta).await
+    complete(&api, events, meta).await
 }
 
 struct Meta {
@@ -415,6 +417,7 @@ fn usage_json(u: &Usage) -> Value {
 }
 
 async fn complete(
+    api: &super::Api,
     mut events: futures::stream::BoxStream<'static, anyhow::Result<Event>>,
     meta: Meta,
 ) -> Response {
@@ -428,6 +431,7 @@ async fn complete(
             }
         }
     }
+    api.save_thinking(&reply).await;
     let calls: Vec<Value> = reply
         .blocks
         .iter()
@@ -469,6 +473,7 @@ async fn complete(
 /// Server-sent `chat.completion.chunk`s, then `[DONE]`. A dropped client
 /// drops the provider stream, which cancels the request.
 fn stream(
+    api: Arc<super::Api>,
     mut events: futures::stream::BoxStream<'static, anyhow::Result<Event>>,
     meta: Meta,
     include_usage: bool,
@@ -532,6 +537,7 @@ fn stream(
                 return;
             }
         }
+        api.save_thinking(&reply).await;
         let mut tail = vec![chunk(json!({}), Some(finish_reason(reply.stop)), None)];
         if include_usage {
             tail.push(chunk(Value::Null, None, Some(usage_json(&reply.usage))));

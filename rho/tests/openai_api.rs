@@ -56,6 +56,8 @@ async fn server(api: Value, responses: Vec<Vec<Event>>) -> (String, Arc<common::
     let mut agent = Agent::new(provider.clone(), ModelSpec::new("test", "m"));
     agent.registry.register(ProviderName::new("test"), provider);
     agent.api = serde_json::from_value(api).unwrap();
+    let db = tempfile::tempdir().unwrap().keep().join("sessions.db");
+    agent.sessions_db = Some(Arc::new(move |_| db.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(rho::acp_ws::serve(
@@ -271,4 +273,56 @@ async fn streams_reasoning_and_tool_calls() {
     assert_eq!(message["reasoning_details"][0]["signature"], "sig");
     assert_eq!(message["tool_calls"][1]["id"], "c2");
     assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+}
+
+#[tokio::test]
+async fn restores_thinking_for_clients_that_drop_it() {
+    let thinking = rho::provider::Content::Thinking {
+        thinking: "hm".into(),
+        signature: "sig".into(),
+    };
+    let call = rho::provider::Content::ToolUse {
+        id: rho::provider::ToolCallId::new("c1"),
+        name: rho::provider::ToolName::new("f"),
+        input: json!({"a": 1, "b": 2}),
+    };
+    let first = vec![
+        Event::Block(thinking.clone()),
+        Event::Block(call.clone()),
+        Event::Done(StopReason::ToolUse),
+    ];
+    let (url, scripted) = server(enabled(), vec![first, reply("ok"), reply("ok")]).await;
+    let http = reqwest::Client::new();
+    let post = |body: Value| {
+        http.post(format!("{url}/chat/completions"))
+            .bearer_auth("secret")
+            .json(&body)
+            .send()
+    };
+    let user = json!({"role": "user", "content": "go"});
+    post(json!({"model": "test/m", "messages": [user]}))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // A standard client: no reasoning_details, argument keys reordered.
+    let follow_up = |args: &str| {
+        json!({"model": "test/m", "messages": [
+            user,
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": args}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "done"},
+        ]})
+    };
+    let status = post(follow_up(r#"{"b":2,"a":1}"#)).await.unwrap().status();
+    assert_eq!(status, 200);
+    let request = scripted.requests.lock().unwrap().pop().unwrap();
+    assert_eq!(request.messages[1].content, [thinking, call]);
+
+    // An unknown turn is sent as it is.
+    let status = post(follow_up(r#"{"a":3}"#)).await.unwrap().status();
+    assert_eq!(status, 200);
+    let request = scripted.requests.lock().unwrap().pop().unwrap();
+    assert_eq!(request.messages[1].content.len(), 1);
 }
