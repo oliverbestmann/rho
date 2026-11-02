@@ -213,7 +213,8 @@ model it starts with and the compaction model, by the session's cwd
 }
 ```
 
-- `allow`: `*`, `provider/*` or `provider/model`. Without a matching rule
+- `allow`: model names `provider/model` where `*` matches anything, `/`
+  included: `*`, `anthropic/*`, `*/claude-*`. Without a matching rule
   every model is allowed.
 - `allow`, `default` and `compact` are inherited separately: for each, the
   longest rule path containing the cwd that sets it wins.
@@ -675,7 +676,7 @@ With `"api": {"enabled": true, "models": ["anthropic/*"]}` in the config,
 the daemon also serves `GET /v1/models` and `POST /v1/chat/completions`
 (streaming or not) on both listeners, so other clients can use rho's
 providers (ADR 0068). `models` takes the same patterns as `models.allow`
-(`*`, `provider/*`, `provider/model`); it is empty by default, which offers
+(`*`, `anthropic/*`, `*/claude-*`); it is empty by default, which offers
 nothing. Model ids are `provider/model`. On `--listen` the API key is
 `api.token` if set, else the ACP token; the socket needs none.
 

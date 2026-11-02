@@ -21,7 +21,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use crate::provider::{ModelSpec, ProviderName};
+use crate::provider::ModelSpec;
 
 /// Config id of the model option for paths without a rule.
 pub const MODEL_KEY: &str = "model";
@@ -70,34 +70,42 @@ impl TryFrom<BTreeMap<String, RawRule>> for Config {
     }
 }
 
-/// `*`, `provider/*` or `provider/model`.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+/// A `provider/model` name where `*` matches anything, `/` included:
+/// `*`, `anthropic/*`, `home/anthropic/*`, `*/claude-*`.
+#[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "String")]
-pub enum Pattern {
-    Any,
-    Provider(ProviderName),
-    Model(ModelSpec),
+pub struct Pattern {
+    source: String,
+    regex: regex::Regex,
+}
+
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
 }
 
 impl TryFrom<String> for Pattern {
     type Error = anyhow::Error;
 
     fn try_from(s: String) -> Result<Self> {
-        Ok(match s.strip_suffix("/*") {
-            _ if s == "*" => Self::Any,
-            Some(p) if !p.is_empty() && !p.contains('/') => Self::Provider(ProviderName::new(p)),
-            _ => Self::Model(s.parse()?),
+        let named = s
+            .split_once('/')
+            .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty());
+        if s != "*" && !named {
+            bail!("model pattern must be `*` or `provider/model`, got {s:?}");
+        }
+        let regex = format!("^{}$", regex::escape(&s).replace(r"\*", ".*"));
+        Ok(Self {
+            regex: regex::Regex::new(&regex)?,
+            source: s,
         })
     }
 }
 
 impl Pattern {
     pub fn matches(&self, spec: &ModelSpec) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Provider(p) => spec.provider() == p,
-            Self::Model(m) => m == spec,
-        }
+        self.regex.is_match(&spec.to_string())
     }
 }
 
@@ -237,8 +245,16 @@ mod tests {
     #[test]
     fn patterns() {
         let p = |s: &str| Pattern::try_from(s.to_string());
-        assert_eq!(p("*").unwrap(), Pattern::Any);
+        assert!(p("*").unwrap().matches(&spec("a/m")));
         assert!(p("a/*").unwrap().matches(&spec("a/m")));
+        assert!(!p("a/*").unwrap().matches(&spec("ab/m")));
+        assert!(p("h/a/*").unwrap().matches(&spec("h/a/m")));
+        assert!(!p("h/a/*").unwrap().matches(&spec("h/b/m")));
+        assert!(p("*/claude-*").unwrap().matches(&spec("h/a/claude-x")));
+        // Only `*` is special.
+        assert!(p("a/m-1.5").unwrap().matches(&spec("a/m-1.5")));
+        assert!(!p("a/m-1.5").unwrap().matches(&spec("a/m-1x5")));
+        assert!(p("a/").is_err() && p("/m").is_err());
         assert!(!p("a/*").unwrap().matches(&spec("b/m")));
         assert!(p("a/m").unwrap().matches(&spec("a/m")));
         assert!(!p("a/m").unwrap().matches(&spec("a/n")));

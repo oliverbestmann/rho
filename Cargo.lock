@@ -2836,6 +2836,7 @@ dependencies = [
  "image",
  "libc",
  "nono",
+ "regex",
  "reqwest 0.13.5",
  "rusqlite",
  "schemars 1.2.3",
