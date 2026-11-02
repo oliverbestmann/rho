@@ -1,5 +1,6 @@
 //! Model APIs on the daemon's listeners, so other clients can use rho's
-//! providers: OpenAI's `/v1` (`openai`). Off unless the config enables it:
+//! providers: OpenAI's `/v1` (`openai`) and Ollama's `/api` (`ollama`). Off
+//! unless the config enables it:
 //!
 //! ```json
 //! { "api": { "enabled": true, "models": ["anthropic/*"] } }
@@ -28,6 +29,7 @@ use crate::provider::{
 };
 use crate::store::Store;
 
+mod ollama;
 mod openai;
 
 /// `"api"` in the config.
@@ -58,6 +60,7 @@ const BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// The API routes, for any router state.
 pub fn router<S: Clone + Send + Sync + 'static>(agent: Arc<Agent>) -> Router<S> {
     openai::router()
+        .merge(ollama::router())
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(Arc::new(Api {
             agent,
@@ -198,6 +201,13 @@ fn sorted(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
         v => v.clone(),
     }
+}
+
+/// The models the API offers.
+fn offered(agent: &Agent) -> Vec<(ModelSpec, crate::provider::ModelInfo)> {
+    let mut models = agent.registry.models();
+    models.retain(|(spec, _)| agent.api.allows(spec));
+    models
 }
 
 /// The offered model `name` and its provider; `None` if not offered.

@@ -465,3 +465,116 @@ async fn remote_rho_round_trip() {
         )
     );
 }
+
+#[tokio::test]
+async fn ollama_api() {
+    use rho::provider::{Content, ToolCallId, ToolName};
+    let thinking = Content::Thinking {
+        thinking: "hm".into(),
+        signature: "sig".into(),
+    };
+    let call = Content::ToolUse {
+        id: ToolCallId::new("c1"),
+        name: ToolName::new("f"),
+        input: json!({"a": 1}),
+    };
+    let first = vec![
+        Event::ThinkingDelta("hm".into()),
+        Event::Block(thinking.clone()),
+        Event::Block(call.clone()),
+        Event::Done(StopReason::ToolUse),
+    ];
+    let (url, scripted) = server(enabled(), vec![first, reply("ok")]).await;
+    let base = url.strip_suffix("/v1").unwrap();
+    let http = reqwest::Client::new();
+    let get = |path: &str| {
+        http.get(format!("{base}{path}"))
+            .bearer_auth("secret")
+            .send()
+    };
+    let post = |path: &str, body: Value| {
+        http.post(format!("{base}{path}"))
+            .bearer_auth("secret")
+            .json(&body)
+            .send()
+    };
+    let version: Value = get("/api/version").await.unwrap().json().await.unwrap();
+    assert!(version["version"].is_string());
+    let tags: Value = get("/api/tags").await.unwrap().json().await.unwrap();
+    assert_eq!(tags["models"][0]["name"], "test/m");
+    assert_eq!(tags["models"].as_array().unwrap().len(), 1);
+    let show: Value = post("/api/show", json!({"model": "test/m:latest"}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(show["model_info"]["rho.context_length"], 1000);
+    let missing = post("/api/show", json!({"model": "test/n"})).await.unwrap();
+    assert_eq!(missing.status(), 404);
+
+    // Streams NDJSON by default; thinking blocks stay on the server.
+    let user = json!({"role": "user", "content": "go"});
+    let text = post(
+        "/api/chat",
+        json!({"model": "test/m", "think": true, "messages": [user]}),
+    )
+    .await
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines[0]["message"]["thinking"], "hm");
+    assert_eq!(
+        lines[1]["message"]["tool_calls"],
+        json!([{"id": "c1", "function": {"index": 0, "name": "f", "arguments": {"a": 1}}}])
+    );
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[2]["done"], true);
+    assert_eq!(lines[2]["done_reason"], "stop");
+
+    // A client without ids gets its thinking back from the store.
+    let body: Value = post(
+        "/api/chat",
+        json!({"model": "test/m", "stream": false, "think": true, "messages": [
+            user,
+            {"role": "assistant", "content": "", "thinking": "hm",
+                "tool_calls": [{"function": {"name": "f", "arguments": {"a": 1}}}]},
+            {"role": "tool", "tool_name": "f", "content": "done"},
+        ]}),
+    )
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(body["message"]["content"], "ok!");
+    assert_eq!(body["done"], true);
+    assert_eq!(body["prompt_eval_count"], 9);
+    let request = scripted.requests.lock().unwrap().pop().unwrap();
+    let Content::ToolUse { id, .. } = &request.messages[1].content[1] else {
+        panic!("{:?}", request.messages[1]);
+    };
+    assert_eq!(request.messages[1].content[0], thinking);
+    assert!(matches!(
+        &request.messages[2].content[0],
+        Content::ToolResult { tool_use_id, .. } if tool_use_id == id
+    ));
+
+    let load: Value = post("/api/generate", json!({"model": "test/m"}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(load["done_reason"], "load");
+    let raw = post(
+        "/api/generate",
+        json!({"model": "test/m", "prompt": "x", "raw": true}),
+    );
+    assert_eq!(raw.await.unwrap().status(), 400);
+}

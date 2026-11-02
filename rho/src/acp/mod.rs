@@ -590,7 +590,7 @@ async fn list_sessions(
 }
 
 /// Unix milliseconds as an RFC 3339 UTC timestamp.
-fn rfc3339(ms: i64) -> String {
+pub(crate) fn rfc3339(ms: i64) -> String {
     let (secs, ms) = (ms.div_euclid(1000), ms.rem_euclid(1000));
     let (days, t) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Howard Hinnant's civil_from_days.

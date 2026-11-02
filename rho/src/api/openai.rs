@@ -63,12 +63,8 @@ fn json_response(status: StatusCode, body: &Value) -> Response {
 }
 
 async fn models(State(api): State<Arc<super::Api>>) -> Response {
-    let agent = &api.agent;
-    let data: Vec<Value> = agent
-        .registry
-        .models()
+    let data: Vec<Value> = super::offered(&api.agent)
         .into_iter()
-        .filter(|(spec, _)| agent.api.allows(spec))
         .map(|(spec, info)| {
             let price = |p: &Price| {
                 json!({
