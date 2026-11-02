@@ -326,3 +326,142 @@ async fn restores_thinking_for_clients_that_drop_it() {
     let request = scripted.requests.lock().unwrap().pop().unwrap();
     assert_eq!(request.messages[1].content.len(), 1);
 }
+
+/// rho as provider of another rho: requests and events arrive unchanged.
+#[tokio::test]
+async fn remote_rho_round_trip() {
+    use base64::Engine;
+    use futures::StreamExt;
+    use rho::openai_chat::{OpenAiChat, Remote};
+    use rho::provider::{Content, ImageSource, Message, Role, Thinking, ToolCallId, ToolName};
+
+    let mut png = vec![];
+    image::RgbImage::new(4, 4)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let png = ImageSource::Base64 {
+        media_type: "image/png".into(),
+        data: base64::engine::general_purpose::STANDARD.encode(png).into(),
+    };
+    let thinking = Content::Thinking {
+        thinking: "hm".into(),
+        signature: "sig".into(),
+    };
+    let call = |id: &str| Content::ToolUse {
+        id: ToolCallId::new(id),
+        name: ToolName::new("f"),
+        input: json!({"b": 2, "a": [1]}),
+    };
+    let usage = Usage {
+        input: 3,
+        output: 2,
+        cache_read: 1,
+        cache_write: 5,
+    };
+    let (url, scripted) = server(
+        enabled(),
+        vec![vec![
+            Event::ThinkingDelta("hm".into()),
+            Event::Block(thinking.clone()),
+            Event::Block(Content::RedactedThinking { data: "x".into() }),
+            common::text("ok"),
+            Event::Block(call("c2")),
+            Event::Usage(usage),
+            Event::Done(StopReason::ToolUse),
+        ]],
+    )
+    .await;
+    let remote = OpenAiChat::new(
+        reqwest::Client::new(),
+        Remote {
+            url,
+            token: Some("secret".into()),
+        },
+    );
+    remote.refresh().await.unwrap();
+    let models = remote.models();
+    assert_eq!(
+        (models[0].id.as_str(), models[0].context_window),
+        ("test/m", 1000)
+    );
+
+    let request = Request {
+        model: ModelId::new("test/m"),
+        system: "sys".into(),
+        messages: vec![
+            Message {
+                role: Role::User,
+                content: vec![
+                    Content::text("look"),
+                    Content::Image {
+                        source: png.clone(),
+                    },
+                ],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    thinking.clone(),
+                    Content::text("a"),
+                    Content::text("b"),
+                    call("c1"),
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    Content::ToolResult {
+                        tool_use_id: ToolCallId::new("c1"),
+                        content: "out".into(),
+                        is_error: true,
+                        images: vec![png],
+                        shown: vec![],
+                    },
+                    Content::text("next"),
+                ],
+            },
+        ],
+        tools: vec![rho::provider::ToolSpec {
+            name: ToolName::new("f"),
+            description: "d".into(),
+            input_schema: json!({"type": "object"}),
+        }],
+        max_tokens: 123,
+        thinking: Thinking::XHigh,
+    };
+    let events: Vec<Event> = remote
+        .stream(request.clone(), &|_| {})
+        .map(Result::unwrap)
+        .collect()
+        .await;
+    assert_eq!(
+        events,
+        [
+            Event::ThinkingDelta("hm".into()),
+            Event::Block(thinking),
+            Event::Block(Content::RedactedThinking { data: "x".into() }),
+            common::text("ok"),
+            Event::Block(call("c2")),
+            Event::Done(StopReason::ToolUse),
+            Event::Usage(usage),
+        ]
+    );
+    let got = scripted.requests.lock().unwrap().pop().unwrap();
+    assert_eq!(got.model.as_str(), "m");
+    assert_eq!(
+        (
+            &got.system,
+            &got.messages,
+            &got.tools,
+            got.max_tokens,
+            got.thinking
+        ),
+        (
+            &request.system,
+            &request.messages,
+            &request.tools,
+            request.max_tokens,
+            request.thinking
+        )
+    );
+}

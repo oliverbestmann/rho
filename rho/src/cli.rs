@@ -6,6 +6,7 @@ use crate::anthropic::{self, Anthropic};
 use crate::auth::{self, AuthStore, Pkce};
 use crate::copilot::{self, Copilot};
 use crate::extension::{DynExtension, Frontend};
+use crate::openai_chat::{self, OpenAiChat};
 use crate::provider::{Content, ModelSpec, ProviderName, Registry, Thinking, Usage};
 use anyhow::{Context, Result, bail};
 
@@ -32,7 +33,8 @@ env:
 files in ~/.config/rho/config.d, each kind in file name order:
   *.json                merged (objects merge, later values win, null deletes) into
                         sandbox, features, models (by path), mcps (MCP servers over HTTP)
-                        and api (OpenAI-compatible /v1 on the daemon's listeners)
+                        api (OpenAI-compatible /v1 on the daemon's listeners)
+                        and remotes (other rho daemons' /v1 as providers)
   *PREAMBLE_SYSTEM.md   joined, replace the preamble (00-rho.PREAMBLE_SYSTEM.md is
                         written on startup without one)
   *APPEND_SYSTEM.md     joined, added to the system prompt
@@ -197,7 +199,27 @@ fn acp_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) -> 
 }
 
 /// `model`: from `-m` / `RHO_MODEL`, it wins over the `models` config defaults.
-fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) -> Result<Agent> {
+/// Must run inside the tokio runtime: remotes load their models in the
+/// background.
+fn make_agent(mut options: Options, model: Option<ModelSpec>, thinking: Thinking) -> Result<Agent> {
+    let config_dir = crate::config_dir();
+    crate::config::check_old(&config_dir)?;
+    crate::prompt::ensure_files(&config_dir);
+    let config = crate::config::load(&config_dir)?;
+    let remotes: openai_chat::Config = crate::config::section(&config, openai_chat::KEY)?;
+    let http = reqwest::Client::new();
+    for (name, remote) in remotes {
+        let provider = Arc::new(OpenAiChat::new(http.clone(), remote));
+        let (loading, label) = (provider.clone(), name.clone());
+        tokio::spawn(async move {
+            if let Err(e) = loading.refresh().await {
+                eprintln!("rho: models of remote {label}: {e:#}");
+            }
+        });
+        options
+            .providers
+            .register(ProviderName::new(name), provider);
+    }
     let model_pinned = model.is_some();
     let model = model.unwrap_or(options.model);
     let provider = options.providers.resolve(&model)?;
@@ -205,10 +227,6 @@ fn make_agent(options: Options, model: Option<ModelSpec>, thinking: Thinking) ->
     agent.thinking = thinking;
     agent.model_pinned = model_pinned;
     agent.registry = options.providers;
-    let config_dir = crate::config_dir();
-    crate::config::check_old(&config_dir)?;
-    crate::prompt::ensure_files(&config_dir);
-    let config = crate::config::load(&config_dir)?;
     agent.sandbox = crate::config::section(&config, "sandbox")?;
     agent.features = crate::feature::load(&config)?;
     agent.models = crate::config::section(&config, crate::models::Config::KEY)?;
