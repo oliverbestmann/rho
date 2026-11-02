@@ -5,8 +5,8 @@
 //! { "api": { "enabled": true, "models": ["anthropic/*"] } }
 //! ```
 //!
-//! Requests go straight to the provider: no session, no tools, no extension
-//! hooks. The TCP listener needs `token` as API key, else the acp-token
+//! Requests go straight to the provider: no session, no rho tools or system
+//! prompt, no extension hooks; the client brings its own tools. The TCP listener needs `token` as API key, else the acp-token
 //! (see `acp_ws`).
 
 use std::sync::Arc;
@@ -17,7 +17,9 @@ use serde::Deserialize;
 
 use crate::agent::Agent;
 use crate::models::Pattern;
-use crate::provider::{Content, ImageSource, ModelSpec, Provider};
+use crate::provider::{
+    Content, Event, ImageSource, Message, ModelSpec, Provider, Role, StopReason, ToolCallId, Usage,
+};
 
 mod openai;
 
@@ -61,6 +63,62 @@ fn resolve(agent: &Agent, name: &str) -> Option<(ModelSpec, Arc<dyn Provider>)> 
     }
     let provider = agent.registry.resolve(&spec).ok()?;
     Some((spec, provider))
+}
+
+/// Appends `content` as a `role` message; Anthropic wants alternating roles,
+/// so it joins the last message if that has the same role.
+fn push(messages: &mut Vec<Message>, role: Role, content: Vec<Content>) {
+    if content.is_empty() {
+        return;
+    }
+    match messages.last_mut() {
+        Some(last) if last.role == role => last.content.extend(content),
+        _ => messages.push(Message { role, content }),
+    }
+}
+
+/// A tool result from text and image parts.
+fn tool_result(id: &str, content: Vec<Content>, is_error: bool) -> Content {
+    let (mut text, mut images) = (vec![], vec![]);
+    for c in content {
+        match c {
+            Content::Text { text: t } => text.push(t),
+            Content::Image { source } => images.push(source),
+            _ => {}
+        }
+    }
+    Content::ToolResult {
+        tool_use_id: ToolCallId::new(id),
+        content: text.join("\n"),
+        is_error,
+        images,
+        shown: vec![],
+    }
+}
+
+/// A response collected from the provider's events.
+#[derive(Default)]
+struct Reply {
+    text: String,
+    /// Reasoning text, for display.
+    thinking: String,
+    /// Thinking blocks and tool calls, in order.
+    blocks: Vec<Content>,
+    /// The last report; each replaces the one before.
+    usage: Usage,
+    stop: Option<StopReason>,
+}
+
+impl Reply {
+    fn add(&mut self, event: Event) {
+        match event {
+            Event::TextDelta(t) => self.text.push_str(&t),
+            Event::ThinkingDelta(t) => self.thinking.push_str(&t),
+            Event::Block(c) => self.blocks.push(c),
+            Event::Usage(u) => self.usage = u,
+            Event::Done(stop) => self.stop = Some(stop),
+        }
+    }
 }
 
 /// A base64 image, fit for the models.

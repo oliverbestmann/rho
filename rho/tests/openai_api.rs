@@ -100,6 +100,12 @@ async fn off_by_default_and_needs_the_token() {
         .map(|m| m["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["test/m"], "only allowed models");
+    let m = &list["data"][0];
+    assert_eq!(
+        (&m["name"], &m["context_window"]),
+        (&json!("m"), &json!(1000))
+    );
+    assert_eq!(m["pricing"], Value::Null);
 }
 
 #[tokio::test]
@@ -203,4 +209,66 @@ async fn streamed_chat_completion() {
             .iter()
             .all(|c| c["object"] == "chat.completion.chunk")
     );
+}
+
+#[tokio::test]
+async fn streams_reasoning_and_tool_calls() {
+    let thinking = rho::provider::Content::Thinking {
+        thinking: "hm".into(),
+        signature: "sig".into(),
+    };
+    let call = |id: &str| {
+        Event::Block(rho::provider::Content::ToolUse {
+            id: rho::provider::ToolCallId::new(id),
+            name: rho::provider::ToolName::new("f"),
+            input: json!({"a": 1}),
+        })
+    };
+    let events = vec![
+        Event::ThinkingDelta("hm".into()),
+        Event::Block(thinking),
+        call("c1"),
+        call("c2"),
+        Event::Done(StopReason::ToolUse),
+    ];
+    let (url, _) = server(enabled(), vec![events.clone(), events]).await;
+    let http = reqwest::Client::new();
+    let post = |stream: bool| {
+        http.post(format!("{url}/chat/completions"))
+            .bearer_auth("secret")
+            .json(&json!({"model": "test/m", "stream": stream,
+                "messages": [{"role": "user", "content": "go"}]}))
+            .send()
+    };
+    let text = post(true).await.unwrap().text().await.unwrap();
+    let chunks: Vec<Value> = text
+        .split("\n\n")
+        .filter_map(|e| serde_json::from_str(e.strip_prefix("data: ")?).ok())
+        .collect();
+    let deltas: Vec<&Value> = chunks.iter().map(|c| &c["choices"][0]["delta"]).collect();
+    let tool_call = |i: usize, id: &str| {
+        json!({"tool_calls": [{"index": i, "id": id, "type": "function",
+            "function": {"name": "f", "arguments": "{\"a\":1}"}}]})
+    };
+    assert_eq!(
+        deltas[1..4],
+        [
+            &json!({"reasoning": "hm"}),
+            &json!({"reasoning_details": [{"type": "reasoning.text", "text": "hm", "signature": "sig"}]}),
+            &tool_call(0, "c1"),
+        ]
+    );
+    assert_eq!(deltas[4], &tool_call(1, "c2"));
+    assert_eq!(
+        chunks.last().unwrap()["choices"][0]["finish_reason"],
+        "tool_calls"
+    );
+
+    let body: Value = post(false).await.unwrap().json().await.unwrap();
+    let message = &body["choices"][0]["message"];
+    assert_eq!(message["content"], Value::Null);
+    assert_eq!(message["reasoning"], "hm");
+    assert_eq!(message["reasoning_details"][0]["signature"], "sig");
+    assert_eq!(message["tool_calls"][1]["id"], "c2");
+    assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
 }

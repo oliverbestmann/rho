@@ -1,5 +1,8 @@
 //! OpenAI's `GET /v1/models` and `POST /v1/chat/completions` (streaming or
-//! not), text and image (`data:` URL) input only.
+//! not): text, `data:` URL images, tool calls. Non-standard, so rho can use
+//! another rho as provider: `reasoning_details` on assistant messages
+//! (OpenRouter's shape) carries thinking blocks with their signatures,
+//! `is_error` on tool messages, and model info in `/v1/models`.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,7 +19,8 @@ use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::provider::{
-    Content, Event, Message, Provider, Request, Role, StopReason, Thinking, Usage,
+    Content, Event, Message, Price, Provider, Request, Role, StopReason, Thinking, ToolCallId,
+    ToolName, ToolSpec, Usage,
 };
 
 pub(super) fn router() -> Router<Arc<Agent>> {
@@ -64,12 +68,26 @@ async fn models(State(agent): State<Arc<Agent>>) -> Response {
         .models()
         .into_iter()
         .filter(|(spec, _)| agent.api.allows(spec))
-        .map(|(spec, _)| {
+        .map(|(spec, info)| {
+            let price = |p: &Price| {
+                json!({
+                    "input": p.input,
+                    "output": p.output,
+                    "cache_read": p.cache_read,
+                    "cache_write": p.cache_write,
+                })
+            };
             json!({
                 "id": spec.to_string(),
                 "object": "model",
                 "created": 0,
                 "owned_by": spec.provider().as_str(),
+                "name": info.name,
+                "context_window": info.context_window,
+                "pricing": info.price.as_ref().map(price),
+                "pricing_above": info.price_above.as_ref().map(|(tokens, p)| {
+                    json!({"tokens": tokens, "pricing": price(p)})
+                }),
             })
         })
         .collect();
@@ -88,8 +106,22 @@ struct ChatRequest {
     max_completion_tokens: Option<u32>,
     reasoning_effort: Option<String>,
     #[serde(default)]
-    tools: Option<Vec<Value>>,
+    tools: Vec<Tool>,
+    tool_choice: Option<Value>,
     n: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct Tool {
+    function: FunctionDef,
+}
+
+#[derive(Deserialize)]
+struct FunctionDef {
+    name: String,
+    #[serde(default)]
+    description: String,
+    parameters: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +135,56 @@ struct ChatMessage {
     role: String,
     #[serde(default)]
     content: Option<MessageContent>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    reasoning_details: Vec<Reasoning>,
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    is_error: bool,
+}
+
+#[derive(Deserialize)]
+struct ToolCall {
+    id: String,
+    function: FunctionCall,
+}
+
+#[derive(Deserialize)]
+struct FunctionCall {
+    name: String,
+    arguments: String,
+}
+
+/// A thinking block in OpenRouter's `reasoning_details` shape.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum Reasoning {
+    #[serde(rename = "reasoning.text")]
+    Text {
+        #[serde(default)]
+        text: String,
+        signature: Option<String>,
+    },
+    #[serde(rename = "reasoning.encrypted")]
+    Encrypted { data: String },
+    /// Summaries and other kinds cannot be sent back.
+    #[serde(other)]
+    Other,
+}
+
+/// A thinking block as `reasoning_details` entry; `None` for other blocks.
+fn reasoning_json(c: &Content) -> Option<Value> {
+    match c {
+        Content::Thinking {
+            thinking,
+            signature,
+        } => Some(json!({"type": "reasoning.text", "text": thinking, "signature": signature})),
+        Content::RedactedThinking { data } => {
+            Some(json!({"type": "reasoning.encrypted", "data": data}))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -134,8 +216,8 @@ fn build(agent: &Agent, req: &ChatRequest) -> Result<(Arc<dyn Provider>, Request
         )
     };
     let (spec, provider) = super::resolve(agent, &req.model).ok_or_else(not_found)?;
-    if req.tools.as_ref().is_some_and(|t| !t.is_empty()) {
-        return Err(ApiError::invalid("tools are not supported"));
+    if req.tool_choice.as_ref().is_some_and(|c| c != "auto") {
+        return Err(ApiError::invalid("tool_choice must be \"auto\""));
     }
     if req.n.is_some_and(|n| n != 1) {
         return Err(ApiError::invalid("n must be 1"));
@@ -151,7 +233,7 @@ fn build(agent: &Agent, req: &ChatRequest) -> Result<(Arc<dyn Provider>, Request
     let mut messages: Vec<Message> = vec![];
     for m in &req.messages {
         let content = contents(m.content.as_ref())?;
-        let role = match m.role.as_str() {
+        match m.role.as_str() {
             "system" | "developer" => {
                 for c in content {
                     let Content::Text { text } = c else {
@@ -161,21 +243,57 @@ fn build(agent: &Agent, req: &ChatRequest) -> Result<(Arc<dyn Provider>, Request
                 }
                 continue;
             }
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
+            "user" => {
+                super::push(&mut messages, Role::User, content);
+                continue;
+            }
+            "tool" => {
+                let id = m
+                    .tool_call_id
+                    .as_deref()
+                    .ok_or_else(|| ApiError::invalid("tool messages need tool_call_id"))?;
+                let result = super::tool_result(id, content, m.is_error);
+                super::push(&mut messages, Role::User, vec![result]);
+                continue;
+            }
+            "assistant" => {}
             role => return Err(ApiError::invalid(format!("unsupported role {role:?}"))),
-        };
-        if role == Role::Assistant && content.iter().any(|c| matches!(c, Content::Image { .. })) {
+        }
+        if content.iter().any(|c| matches!(c, Content::Image { .. })) {
             return Err(ApiError::invalid("assistant messages take text only"));
         }
-        if content.is_empty() {
-            continue;
+        let mut blocks: Vec<Content> = m
+            .reasoning_details
+            .iter()
+            .filter_map(|r| match r {
+                Reasoning::Text {
+                    text,
+                    signature: Some(signature),
+                } => Some(Content::Thinking {
+                    thinking: text.clone(),
+                    signature: signature.clone(),
+                }),
+                Reasoning::Encrypted { data } => {
+                    Some(Content::RedactedThinking { data: data.clone() })
+                }
+                _ => None,
+            })
+            .collect();
+        blocks.extend(content);
+        for call in &m.tool_calls {
+            let input = match call.function.arguments.trim() {
+                "" => json!({}),
+                args => serde_json::from_str(args).map_err(|e| {
+                    ApiError::invalid(format!("tool call {:?}: arguments: {e}", call.id))
+                })?,
+            };
+            blocks.push(Content::ToolUse {
+                id: ToolCallId::new(&call.id),
+                name: ToolName::new(&call.function.name),
+                input,
+            });
         }
-        // Anthropic wants alternating roles.
-        match messages.last_mut() {
-            Some(last) if last.role == role => last.content.extend(content),
-            _ => messages.push(Message { role, content }),
-        }
+        super::push(&mut messages, Role::Assistant, blocks);
     }
     if messages.is_empty() {
         return Err(ApiError::invalid("no user or assistant messages"));
@@ -186,7 +304,19 @@ fn build(agent: &Agent, req: &ChatRequest) -> Result<(Arc<dyn Provider>, Request
             model: spec.id().clone(),
             system: system.join("\n\n"),
             messages,
-            tools: vec![],
+            tools: req
+                .tools
+                .iter()
+                .map(|t| ToolSpec {
+                    name: ToolName::new(&t.function.name),
+                    description: t.function.description.clone(),
+                    input_schema: t
+                        .function
+                        .parameters
+                        .clone()
+                        .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                })
+                .collect(),
             max_tokens: req
                 .max_completion_tokens
                 .or(req.max_tokens)
@@ -254,8 +384,21 @@ fn finish_reason(stop: Option<StopReason>) -> &'static str {
     match stop {
         Some(StopReason::MaxTokens) => "length",
         Some(StopReason::Refusal) => "content_filter",
+        Some(StopReason::ToolUse) => "tool_calls",
         _ => "stop",
     }
+}
+
+fn tool_call_json(index: usize, c: &Content) -> Option<Value> {
+    let Content::ToolUse { id, name, input } = c else {
+        return None;
+    };
+    Some(json!({
+        "index": index,
+        "id": id,
+        "type": "function",
+        "function": {"name": name, "arguments": input.to_string()},
+    }))
 }
 
 fn usage_json(u: &Usage) -> Value {
@@ -275,19 +418,36 @@ async fn complete(
     mut events: futures::stream::BoxStream<'static, anyhow::Result<Event>>,
     meta: Meta,
 ) -> Response {
-    let (mut text, mut usage, mut stop) = (String::new(), Usage::default(), None);
+    let mut reply = super::Reply::default();
     while let Some(event) = events.next().await {
         match event {
-            Ok(Event::TextDelta(t)) => text.push_str(&t),
-            // Each report replaces the last.
-            Ok(Event::Usage(u)) => usage = u,
-            Ok(Event::Done(reason)) => stop = Some(reason),
-            Ok(_) => {}
+            Ok(event) => reply.add(event),
             Err(e) => {
                 return ApiError(StatusCode::BAD_GATEWAY, "api_error", format!("{e:#}"))
                     .into_response();
             }
         }
+    }
+    let calls: Vec<Value> = reply
+        .blocks
+        .iter()
+        .filter(|c| matches!(c, Content::ToolUse { .. }))
+        .enumerate()
+        .filter_map(|(i, c)| tool_call_json(i, c))
+        .collect();
+    let mut message = json!({
+        "role": "assistant",
+        "content": if reply.text.is_empty() && !calls.is_empty() { Value::Null } else { json!(reply.text) },
+    });
+    if !calls.is_empty() {
+        message["tool_calls"] = json!(calls);
+    }
+    if !reply.thinking.is_empty() {
+        message["reasoning"] = json!(reply.thinking);
+    }
+    let details: Vec<Value> = reply.blocks.iter().filter_map(reasoning_json).collect();
+    if !details.is_empty() {
+        message["reasoning_details"] = json!(details);
     }
     json_response(
         StatusCode::OK,
@@ -298,10 +458,10 @@ async fn complete(
             "model": meta.model,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": finish_reason(stop),
+                "message": message,
+                "finish_reason": finish_reason(reply.stop),
             }],
-            "usage": usage_json(&usage),
+            "usage": usage_json(&reply.usage),
         }),
     )
 }
@@ -343,19 +503,21 @@ fn stream(
         {
             return;
         }
-        let (mut usage, mut stop) = (Usage::default(), None);
+        let mut reply = super::Reply::default();
+        let mut calls = 0;
         while let Some(event) = events.next().await {
-            let line = match event {
-                Ok(Event::TextDelta(t)) => chunk(json!({"content": t}), None, None),
-                Ok(Event::Usage(u)) => {
-                    usage = u;
-                    continue;
+            let delta = match &event {
+                Ok(Event::TextDelta(t)) => Some(json!({"content": t})),
+                Ok(Event::ThinkingDelta(t)) => Some(json!({"reasoning": t})),
+                Ok(Event::Block(c)) => {
+                    if let Some(call) = tool_call_json(calls, c) {
+                        calls += 1;
+                        Some(json!({"tool_calls": [call]}))
+                    } else {
+                        reasoning_json(c).map(|r| json!({"reasoning_details": [r]}))
+                    }
                 }
-                Ok(Event::Done(reason)) => {
-                    stop = Some(reason);
-                    continue;
-                }
-                Ok(_) => continue,
+                Ok(_) => None,
                 Err(e) => {
                     let error =
                         json!({"error": {"message": format!("{e:#}"), "type": "api_error"}});
@@ -363,13 +525,16 @@ fn stream(
                     return;
                 }
             };
-            if send(line).await.is_err() {
+            reply.add(event.expect("errors returned above"));
+            if let Some(delta) = delta
+                && send(chunk(delta, None, None)).await.is_err()
+            {
                 return;
             }
         }
-        let mut tail = vec![chunk(json!({}), Some(finish_reason(stop)), None)];
+        let mut tail = vec![chunk(json!({}), Some(finish_reason(reply.stop)), None)];
         if include_usage {
-            tail.push(chunk(Value::Null, None, Some(usage_json(&usage))));
+            tail.push(chunk(Value::Null, None, Some(usage_json(&reply.usage))));
         }
         tail.push("data: [DONE]\n\n".into());
         for line in tail {
@@ -473,6 +638,87 @@ mod tests {
     }
 
     #[test]
+    fn maps_tools_calls_results_and_reasoning() {
+        let png = png();
+        let req = request(json!({
+            "model": "p/m",
+            "tool_choice": "auto",
+            "tools": [
+                {"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "g"}},
+            ],
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": "sure",
+                 "reasoning_details": [
+                    {"type": "reasoning.text", "text": "hm", "signature": "sig"},
+                    {"type": "reasoning.text", "text": "unsigned"},
+                    {"type": "reasoning.encrypted", "data": "enc"},
+                    {"type": "reasoning.summary", "summary": "s"},
+                 ],
+                 "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{\"a\":1}"}},
+                    {"id": "c2", "type": "function", "function": {"name": "g", "arguments": ""}},
+                 ]},
+                {"role": "tool", "tool_call_id": "c1", "content": "one"},
+                {"role": "tool", "tool_call_id": "c2", "is_error": true, "content": [
+                    {"type": "text", "text": "two"},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{png}")}},
+                ]},
+                {"role": "user", "content": "next"},
+            ],
+        }));
+        let (_, r) = build(&agent(&["p/*"]), &req).unwrap();
+        assert_eq!(r.tools.len(), 2);
+        assert_eq!(r.tools[0].input_schema, json!({"type": "object"}));
+        assert_eq!(r.tools[1].input_schema["type"], "object");
+        let result = |id: &str, text: &str, is_error, images| Content::ToolResult {
+            tool_use_id: ToolCallId::new(id),
+            content: text.into(),
+            is_error,
+            images,
+            shown: vec![],
+        };
+        let Content::Image { source } = Content::image("image/png", png) else {
+            unreachable!()
+        };
+        assert_eq!(
+            r.messages[1..],
+            [
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        Content::Thinking {
+                            thinking: "hm".into(),
+                            signature: "sig".into()
+                        },
+                        Content::RedactedThinking { data: "enc".into() },
+                        Content::text("sure"),
+                        Content::ToolUse {
+                            id: ToolCallId::new("c1"),
+                            name: ToolName::new("f"),
+                            input: json!({"a": 1})
+                        },
+                        Content::ToolUse {
+                            id: ToolCallId::new("c2"),
+                            name: ToolName::new("g"),
+                            input: json!({})
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        result("c1", "one", false, vec![]),
+                        result("c2", "two", true, vec![source]),
+                        Content::text("next"),
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_what_it_cannot_do() {
         let user = json!({"role": "user", "content": "hi"});
         let err = |models: &[&str], body: Value| {
@@ -493,13 +739,22 @@ mod tests {
         let all = &["*"][..];
         for (body, want) in [
             (
-                json!({"messages": [user], "tools": [{"type": "function"}]}),
-                "tools",
+                json!({"messages": [user], "tool_choice": "required"}),
+                "tool_choice",
             ),
             (json!({"messages": [user], "n": 2}), "n must be 1"),
             (
                 json!({"messages": [{"role": "tool", "content": "x"}]}),
+                "tool_call_id",
+            ),
+            (
+                json!({"messages": [{"role": "function", "content": "x"}]}),
                 "unsupported role",
+            ),
+            (
+                json!({"messages": [user, {"role": "assistant", "tool_calls": [
+                    {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{"}}]}]}),
+                "arguments",
             ),
             (
                 json!({"messages": [{"role": "user", "content": [
