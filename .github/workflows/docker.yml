@@ -1,0 +1,44 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/rho
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#docker
+      - name: push
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker load < result
+          docker tag rho:latest "$IMAGE:${{ github.sha }}-${{ matrix.arch }}"
+          docker push "$IMAGE:${{ github.sha }}-${{ matrix.arch }}"
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - name: push multi-arch tags
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:${{ github.sha }}" \
+            "$IMAGE:${{ github.sha }}-amd64" "$IMAGE:${{ github.sha }}-arm64"

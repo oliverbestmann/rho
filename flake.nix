@@ -126,6 +126,32 @@
             postInstall = "wrapProgram $out/bin/rho --prefix PATH : ${zg}/bin";
           };
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # `docker load < result`; config and sessions live in the /data volume.
+          docker = pkgs.dockerTools.buildLayeredImage {
+            name = "rho";
+            tag = "latest";
+            contents = with pkgs; [
+              self.packages.${system}.default
+              # the shell and basic tools for the agent's Bash tool
+              bashInteractive
+              coreutils
+              cacert
+              dockerTools.fakeNss
+            ];
+            extraCommands = "mkdir -p data && mkdir -m 1777 tmp";
+            config = {
+              Entrypoint = [ "/bin/rho" ];
+              Cmd = [ "--help" ];
+              WorkingDir = "/data";
+              Volumes."/data" = { };
+              Env = [
+                "HOME=/data"
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              ];
+            };
+          };
+        }
       );
 
       devShells = forAllSystems (
