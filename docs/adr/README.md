@@ -79,3 +79,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0069](0069-images-shown-only-to-the-user.md) | Images shown only to the user | Accepted |
 | [0070](0070-tool-images-load-on-demand.md) | Tool images load on demand | Accepted |
 | [0071](0071-discard-tool-outputs.md) | The model can discard old tool outputs | Accepted |
+| [0072](0072-remote-rho-ollama-api-thinking-store.md) | Remote rho as provider, Ollama API, thinking store | Accepted |

@@ -1,6 +1,7 @@
 # 68. OpenAI-compatible API on the daemon
 
-- Status: Accepted
+- Status: Accepted, extended by ADR 0072 (tools, thinking, Ollama `/api`,
+  remote rho as provider)
 - Date: 2026-10-28
 
 ## Context

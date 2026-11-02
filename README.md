@@ -73,7 +73,8 @@ Cargo workspace:
 - `rho/src/copilot.rs` - GitHub Copilot: login, token exchange, Claude via `anthropic`, GPT via `openai.rs` (Responses API)
 - `rho/src/config.rs` - `config.d`: merged JSON config and prompt files
 - `rho/src/models.rs` - `"models"` config: allowed, default and compaction models by path
-- `rho/src/api/` - OpenAI-compatible `/v1/chat/completions` and `/v1/models` on the daemon (`"api"` config)
+- `rho/src/api/` - OpenAI-compatible `/v1` and Ollama's `/api` on the daemon (`"api"` config), thinking store for API clients
+- `rho/src/openai_chat.rs` - Chat Completions client: another rho's `/v1` as provider (`"remotes"` config)
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
 - `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage` and `ShowImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
 - `rho/src/tools/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
@@ -144,7 +145,8 @@ The result has one key per subsystem:
   "features": { "ssh": { "paths": { "~/.ssh": "read" } } },
   "models":   { "~/github": { "allow": ["github-copilot/*"] } },
   "mcps":     { "github": { "type": "http", "url": "https://..." } },
-  "api":      { "enabled": true, "models": ["anthropic/*"], "token": "..." }
+  "api":      { "enabled": true, "models": ["anthropic/*"], "token": "..." },
+  "remotes":  { "home": { "url": "http://host:8080/v1", "token": "..." } }
 }
 ```
 
@@ -686,12 +688,29 @@ curl http://ADDR/v1/chat/completions -H "Authorization: Bearer $API_TOKEN" \
   -d '{"model": "anthropic/claude-opus-5-5", "messages": [{"role": "user", "content": "hi"}]}'
 ```
 
-Input is text and images as base64 `data:` URLs; `tools`, `tool` messages
-and remote image URLs are rejected. `reasoning_effort` maps to rho's thinking
-levels (default off). `usage` includes `prompt_tokens_details.cached_tokens`
-(cache reads) and `cache_write_tokens` (cache writes, named as OpenRouter
-does). Requests go straight to the provider: no session, no
-system prompt of rho's, no extensions, nothing saved.
+Input is text, images as base64 `data:` URLs (remote URLs are rejected),
+tools, tool calls and `tool` messages. `reasoning_effort` maps to rho's
+thinking levels (default off). `usage` includes
+`prompt_tokens_details.cached_tokens` (cache reads) and `cache_write_tokens`
+(cache writes, named as OpenRouter does). Thinking blocks go out as
+`reasoning_details` with their signatures. Clients that do not send them
+back get them restored from a store in `sessions.db`, keyed by the tool
+calls, kept 90 days (ADR 0072). Requests go straight to the provider: no
+session, no system prompt of rho's, no extensions.
+
+The same listeners serve Ollama's `/api/tags`, `/api/show`, `/api/chat`
+(NDJSON stream by default, tools, `think`, images) and basic
+`/api/generate`, with the same models and token. Point an Ollama client at
+`http://ADDR` with the token as bearer.
+
+### Remote rho as provider
+
+`"remotes": {"home": {"url": "http://host:8080/v1", "token": "..."}}`
+makes another daemon's API a provider: its models show up as
+`home/anthropic/claude-sonnet-5-5` and so on, with tools, thinking, images,
+cache usage and prices intact. Put the token in its own `config.d` file
+that stays on the machine. Any OpenAI-compatible server works for the
+standard parts.
 
 ## Notes on subscription auth
 
