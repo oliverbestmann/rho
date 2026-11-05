@@ -2,6 +2,7 @@
 
 mod ask_user;
 mod background_task;
+mod clear;
 mod context_notice;
 mod discard;
 mod fetch_url;
@@ -49,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(background_task::BackgroundTasks),
                 Arc::new(context_notice::ContextNotice),
                 Arc::new(discard::Discards),
+                Arc::new(clear::Clear),
                 Arc::new(ask_user::AskUser),
                 Arc::new(plan_mode::PlanMode),
                 Arc::new(ponytail::Ponytail),

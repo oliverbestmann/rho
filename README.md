@@ -267,6 +267,10 @@ stores its text and tool calls as plain text, ready for full-text search.
 The older `messages` table is no longer read; sessions saved before ADR
 0060 are not listed.
 
+`/clear` (an agent extension) starts a new epoch with no messages, so the
+model only has the system prompt. An extension's command asks for this
+with `Context::request_clear`; the old messages stay for search.
+
 `/fork` saves the session and copies it under a new id: all epochs, diffs,
 streamed outputs, model, usage, profile, features and extension state. Only
 the title changes, to "fork of <title>". The fork shows up in the session

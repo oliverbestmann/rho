@@ -78,10 +78,14 @@ impl Agent {
         Some(result)
     }
 
-    /// Runs an extension's slash command and shows its reply.
-    async fn command(&self, session: &Session, name: &CommandName, args: &str) {
+    /// Runs an extension's slash command and shows its reply, after the
+    /// clear it may have requested, so the reply starts the new epoch.
+    async fn command(&self, session: &mut Session, name: &CommandName, args: &str) {
         for ext in &self.extensions {
             if let Some(text) = ext.command(&session.ctx, name, args).await {
+                if session.ctx.take_clear() {
+                    self.clear(session).await;
+                }
                 let title = format!("/{name} {args}");
                 reply(session, title.trim_end(), &text);
                 return;

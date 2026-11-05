@@ -1055,6 +1055,73 @@ async fn a_read_cut_off_by_a_restart_runs_again() {
     assert_eq!(resumed.history[n - 2].content, [Content::text("Seen.")]);
 }
 
+/// Clears on `/clear`, like the agent crate's extension.
+struct ClearCommand;
+
+impl rho::extension::Extension for ClearCommand {
+    async fn session_start(&self, session: &mut rho::extension::SessionSetup) {
+        session.commands.push(rho::extension::SlashCommand {
+            name: rho::extension::CommandName::from_static("clear"),
+            description: "clear".into(),
+            hint: None,
+        });
+    }
+
+    async fn command(
+        &self,
+        ctx: &rho::extension::Context,
+        _name: &rho::extension::CommandName,
+        _args: &str,
+    ) -> Option<String> {
+        ctx.request_clear();
+        Some("Cleared.".into())
+    }
+}
+
+#[tokio::test]
+async fn clear_starts_an_empty_epoch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());
+    let provider = Scripted::new(vec![vec![text("One.")], vec![text("Two.")]]);
+    let mut agent = agent(provider.clone(), &db);
+    agent.extensions.push(Arc::new(ClearCommand));
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("first")])
+        .await
+        .unwrap();
+    agent
+        .slash_command(&mut session, "clear", "")
+        .await
+        .unwrap()
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("second")])
+        .await
+        .unwrap();
+
+    let sent = format!("{:?}", provider.requests.lock().unwrap()[1].messages);
+    assert!(sent.contains("second") && !sent.contains("first"), "{sent}");
+    // The first exchange stays in the store, in the old epoch.
+    let stored = session
+        .ctx
+        .store()
+        .unwrap()
+        .messages(&SessionId::new("s"))
+        .await
+        .unwrap();
+    let epoch_of = |t: &str| {
+        stored
+            .iter()
+            .find(|m| format!("{:?}", m.message.content).contains(t))
+            .map(|m| m.epoch)
+    };
+    assert_eq!((epoch_of("first"), epoch_of("second")), (Some(0), Some(1)));
+}
+
 #[tokio::test]
 async fn fork_copies_the_session_with_a_new_title() {
     let dir = tempfile::tempdir().unwrap();

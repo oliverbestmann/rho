@@ -692,6 +692,7 @@ impl Agent {
         // compaction left over from a stopped one.
         ctx.take_stop();
         ctx.take_compact();
+        ctx.take_clear();
         let mut tools_called = Vec::new();
         // A restart stopped the run in a call that can run again: it goes
         // on from there.

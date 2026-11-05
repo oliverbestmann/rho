@@ -7,7 +7,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
@@ -440,6 +440,8 @@ struct Inner {
     stop: Mutex<Option<String>>,
     /// Set by the `Compact` tool (its focus and verbatim text), read by the agent loop.
     compact: Mutex<Option<(String, String)>>,
+    /// Set by `Context::request_clear`, read after an extension's command.
+    clear: AtomicBool,
     wake: tokio::sync::Notify,
     /// What `Bash` may touch; `None` runs commands unsandboxed.
     sandbox: Mutex<Option<Policy>>,
@@ -496,6 +498,7 @@ impl Context {
             inbox: Mutex::default(),
             stop: Mutex::default(),
             compact: Mutex::default(),
+            clear: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             store: OnceLock::new(),
             title: Mutex::default(),
@@ -892,6 +895,17 @@ impl Context {
 
     pub(crate) fn take_compact(&self) -> Option<(String, String)> {
         self.0.compact.lock().unwrap().take()
+    }
+
+    /// Clears the history once the extension's slash command returns: a new
+    /// epoch starts with no messages, only the system prompt stays. Only
+    /// `Extension::command` may call this.
+    pub fn request_clear(&self) {
+        self.0.clear.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_clear(&self) -> bool {
+        self.0.clear.swap(false, Ordering::Relaxed)
     }
 
     pub async fn confirm(&self, tool_call_id: Option<&ToolCallId>, title: &str) -> bool {

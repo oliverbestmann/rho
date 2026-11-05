@@ -296,21 +296,15 @@ impl Agent {
         if let Some(title) = session.ctx.title() {
             summary += &format!("\n\nThe current title of the session is: {title}");
         }
-        session.history = vec![Message {
-            role: Role::User,
-            content: vec![Content::text(format!(
-                "{SUMMARY_START}{summary}{SUMMARY_END}"
-            ))],
-        }];
-        session.ctx.compacted();
-        // The new prefix is not cached yet.
-        session.last_request = None;
-        // The context in use is unknown until the next request, not the old one.
-        session.last_usage = Usage::default();
-        session.publish_info();
-        session.emit_usage();
-        // The profile and feature notes went with the history: tell the model again.
-        session.seen = None;
+        new_epoch(
+            session,
+            vec![Message {
+                role: Role::User,
+                content: vec![Content::text(format!(
+                    "{SUMMARY_START}{summary}{SUMMARY_END}"
+                ))],
+            }],
+        );
         // Saved with the summary, in the new epoch.
         session.ctx.notify_card(
             Some(card),
@@ -328,6 +322,33 @@ impl Agent {
         session.save_compacted().await;
         Ok(())
     }
+}
+
+impl Agent {
+    /// Drops the history (`Context::request_clear`): a new epoch starts with
+    /// no messages, the old ones stay in the store.
+    pub(crate) async fn clear(&self, session: &mut Session) {
+        crate::agent::close_open_calls(&mut session.history, crate::agent::CANCELLED);
+        // Earlier notices belong to the old epoch.
+        session.save().await;
+        new_epoch(session, vec![]);
+        session.save_compacted().await;
+    }
+}
+
+/// Replaces the history with `history`, the start of a new epoch. The
+/// caller saves it with `Session::save_compacted`.
+fn new_epoch(session: &mut Session, history: Vec<Message>) {
+    session.history = history;
+    session.ctx.compacted();
+    // The new prefix is not cached yet.
+    session.last_request = None;
+    // The context in use is unknown until the next request, not the old one.
+    session.last_usage = Usage::default();
+    session.publish_info();
+    session.emit_usage();
+    // The profile and feature notes went with the history: tell the model again.
+    session.seen = None;
 }
 
 /// The running compaction card; marked as stopped if the compaction is
