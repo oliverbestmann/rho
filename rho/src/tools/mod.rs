@@ -9,6 +9,7 @@ mod edit;
 mod read;
 mod read_image;
 mod request_access;
+pub mod share_file;
 mod write;
 
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ pub use edit::{EDIT, Edit};
 pub use read::{READ, Read};
 pub use read_image::{READ_IMAGE, ReadImage, SHOW_IMAGE, ShowImage};
 pub use request_access::{REQUEST_ACCESS, RequestAccess};
+pub use share_file::{SHARE_FILE, ShareFile};
 pub use write::{WRITE, Write};
 
 /// Output larger than this is cut off so it does not flood the context.
@@ -144,6 +146,7 @@ pub fn builtin() -> Vec<Arc<dyn DynExtension>> {
         Arc::new(ToolExtension::from(Read)),
         Arc::new(ToolExtension::from(ReadImage)),
         Arc::new(ToolExtension::from(ShowImage)),
+        Arc::new(ToolExtension::from(ShareFile)),
         Arc::new(ToolExtension::from(Write)),
         Arc::new(ToolExtension::from(Edit)),
         Arc::new(ToolExtension::from(Bash)),

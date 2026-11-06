@@ -53,6 +53,9 @@ pub(super) struct Viewer {
     pub(super) terminal: bool,
     /// The client fetches tool call images with `_rho/image`, see `image_refs`.
     pub(super) image_refs: bool,
+    /// A browser: shared files get `/share/...` links signed with this key,
+    /// see `web_links`.
+    pub(super) share_key: Option<[u8; 32]>,
     /// The client knows the session: it gets confirmations and forms.
     pub(super) ready: bool,
     /// Updates held while the session starts, until `ready`: a client does
@@ -629,6 +632,9 @@ impl AcpFrontend {
         if v.image_refs {
             image_refs(&mut update);
         }
+        if let Some(key) = &v.share_key {
+            web_links(&mut update, key, &v.sid.0);
+        }
         let mut notification = SessionNotification::new(v.sid.clone(), update);
         if let Some(pos) = pos {
             let cursor = Cursor {
@@ -701,6 +707,26 @@ fn image_refs(update: &mut SessionUpdate) {
                 ));
             }
             i.data.clear();
+        }
+    }
+}
+
+/// `file://` links of shared files become links the daemon serves, see
+/// `tools::share_file::web_link`.
+fn web_links(update: &mut SessionUpdate, key: &[u8; 32], sid: &str) {
+    let content = match update {
+        SessionUpdate::ToolCall(c) => Some(&mut c.content),
+        SessionUpdate::ToolCallUpdate(u) => u.fields.content.as_mut(),
+        _ => None,
+    };
+    for c in content.into_iter().flatten() {
+        if let ToolCallContent::Content(Content {
+            content: ContentBlock::ResourceLink(link),
+            ..
+        }) = c
+            && let Some(web) = crate::tools::share_file::web_link(key, sid, &link.uri)
+        {
+            link.uri = web;
         }
     }
 }

@@ -2944,6 +2944,7 @@ dependencies = [
  "getrandom 0.4.3",
  "image",
  "libc",
+ "mime_guess",
  "nono",
  "regex",
  "reqwest 0.13.5",
@@ -2955,6 +2956,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tokio-util",
  "tower-http 0.7.1",
 ]
 

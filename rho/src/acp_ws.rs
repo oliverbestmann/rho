@@ -13,6 +13,10 @@
 //! The listener also serves the web client (`web/`) if `web_dir` has it:
 //! `/` without a WebSocket upgrade is its page. The files are public, only
 //! the WebSocket needs the token.
+//!
+//! `/share/<session>/<mac>/<path>` serves a file shared with `ShareFile`:
+//! the mac stands in for the token, and the file is opened under the open
+//! session's sandbox.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,7 +27,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{Path as UrlPath, Request, State};
 use axum::handler::HandlerWithoutStateExt;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
@@ -82,7 +86,9 @@ where
     L: Listener,
     L::Addr: std::fmt::Debug,
 {
-    let mut app = Router::new().route("/", get(upgrade));
+    let mut app = Router::new()
+        .route("/", get(upgrade))
+        .route("/share/{sid}/{mac}/{*path}", get(shared_file));
     if agent.api.enabled {
         app = app.merge(api_router(agent.clone(), token.as_deref()));
     }
@@ -299,6 +305,48 @@ async fn upgrade(
                 Err(e) => eprintln!("rho acp: connection ended: {e}"),
             }
         })
+        .into_response()
+}
+
+/// A file from `ShareFile`, see `tools::share_file::web_link`. Shown in
+/// the browser, but sandboxed by CSP: a shared HTML page must not run
+/// scripts with the web client's origin, which holds the token.
+async fn shared_file(
+    State(server): State<Arc<Server>>,
+    UrlPath((sid, mac, path)): UrlPath<(String, String, String)>,
+) -> Response {
+    use crate::tools::share_file;
+    let path = PathBuf::from(format!("/{path}"));
+    let Some(key) = server.hub.share_key() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !share_file::verify(key, &sid, &mac, &path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(ctx) = server.hub.context(&sid) else {
+        let msg = "the session is not open in rho, open it and follow the link again";
+        return (StatusCode::NOT_FOUND, msg).into_response();
+    };
+    let file = match share_file::open(&ctx, path.clone()).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::FORBIDDEN, format!("{e:#}")).into_response(),
+    };
+    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+    let mime = match mime.type_() {
+        mime_guess::mime::TEXT => format!("{}; charset=utf-8", mime.essence_str()),
+        _ => mime.essence_str().to_string(),
+    };
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
+        tokio::fs::File::from_std(file),
+    ));
+    (
+        [
+            (header::CONTENT_TYPE, mime.as_str()),
+            (header::CONTENT_SECURITY_POLICY, "sandbox"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body,
+    )
         .into_response()
 }
 

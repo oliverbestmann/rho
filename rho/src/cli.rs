@@ -92,7 +92,7 @@ pub struct Options {
     /// and `github-copilot` (auth from `RHO_AUTH_FILE` / `~/.config/rho/auth.json`).
     pub providers: Registry,
     /// Default: `rho::builtin()`, the built-in tools (`Read`, `ReadImage`,
-    /// `ShowImage`, `Write`, `Edit`, `Bash`, `RequestAccess`, `Compact`). Keep them first
+    /// `ShowImage`, `ShareFile`, `Write`, `Edit`, `Bash`, `RequestAccess`, `Compact`). Keep them first
     /// when adding your own.
     pub extensions: Vec<Arc<dyn DynExtension>>,
     /// Unless `-m` or `RHO_MODEL` is set.
@@ -180,13 +180,20 @@ pub async fn run(options: Options) -> Result<()> {
             };
             eprintln!("rho daemon: {}", crate::acp_ws::socket_path(&dir).display());
             let agent = Arc::new(acp_agent(options, model, thinking)?);
+            let token = match &listen {
+                Some(_) => Some(crate::acp_ws::token(&config_dir)?),
+                None => None,
+            };
             // One hub: editors and acp-ui see the same sessions.
-            let hub = Arc::new(crate::acp::Hub::default());
+            let mut hub = crate::acp::Hub::default();
+            if let Some(token) = &token {
+                hub = hub.with_share_key(token);
+            }
+            let hub = Arc::new(hub);
             let unix = crate::acp_ws::serve(agent.clone(), hub.clone(), socket, None, None);
-            let Some(addr) = listen else {
+            let (Some(addr), Some(token)) = (listen, token) else {
                 return unix.await;
             };
-            let token = crate::acp_ws::token(&config_dir)?;
             let listener = tokio::net::TcpListener::bind(&addr)
                 .await
                 .with_context(|| format!("listening on {addr}"))?;

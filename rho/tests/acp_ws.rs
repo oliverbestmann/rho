@@ -208,3 +208,91 @@ async fn session_start_notices_follow_the_new_session_response() {
         .await
         .expect("no notice");
 }
+
+#[tokio::test]
+async fn shared_files_get_signed_links_for_the_browser() {
+    use rho::provider::{Content, Event, StopReason, ToolCallId, ToolName};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.html"), "<p>hi</p>").unwrap();
+    let share = vec![
+        Event::Block(Content::ToolUse {
+            id: ToolCallId::new("t1"),
+            name: ToolName::new("ShareFile"),
+            input: json!({"path": "report.html", "description": "Share it"}),
+        }),
+        Event::Done(StopReason::ToolUse),
+    ];
+    let done = vec![common::text("done"), Event::Done(StopReason::EndTurn)];
+    let agent = Agent {
+        extensions: rho::builtin(),
+        ..Agent::new(
+            common::Scripted::new(vec![share, done]),
+            ModelSpec::new("test", "m"),
+        )
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hub = Arc::new(rho::acp::Hub::default().with_share_key("secret"));
+    tokio::spawn(rho::acp_ws::serve(
+        Arc::new(agent),
+        hub,
+        listener,
+        Some("secret".into()),
+        None,
+    ));
+    let mut request = format!("ws://{addr}/").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", "Bearer secret".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    ws.send(Message::text(initialize(1))).await.unwrap();
+    ws.next().await.unwrap().unwrap();
+    let new = json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": dir.path(), "mcpServers": []}});
+    ws.send(Message::text(new.to_string())).await.unwrap();
+    let link = async {
+        loop {
+            let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+                continue;
+            };
+            let msg: Value = serde_json::from_str(&text).unwrap();
+            if msg["id"] == 2 {
+                let sid = &msg["result"]["sessionId"];
+                let prompt = json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                    "params": {"sessionId": sid, "prompt": [{"type": "text", "text": "go"}]}});
+                ws.send(Message::text(prompt.to_string())).await.unwrap();
+            }
+            let content = &msg["params"]["update"]["content"];
+            if let Some(link) = content.as_array().into_iter().flatten().find_map(|c| {
+                (c["content"]["type"] == "resource_link").then(|| c["content"].clone())
+            }) {
+                return link;
+            }
+        }
+    };
+    let link = tokio::time::timeout(std::time::Duration::from_secs(10), link)
+        .await
+        .expect("no link");
+    assert_eq!(link["name"], "report.html");
+    let uri = link["uri"].as_str().unwrap();
+    assert!(
+        uri.starts_with("/share/") && uri.ends_with("/report.html"),
+        "{uri}"
+    );
+
+    let r = reqwest::get(format!("http://{addr}{uri}")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
+    assert_eq!(r.headers()["content-security-policy"], "sandbox");
+    assert_eq!(r.text().await.unwrap(), "<p>hi</p>");
+
+    // The mac is for this file in this session only.
+    for bad in [
+        uri.replace("report.html", "other.html"),
+        uri.replacen("/share/", "/share/x", 1),
+    ] {
+        let r = reqwest::get(format!("http://{addr}{bad}")).await.unwrap();
+        assert_eq!(r.status(), 404, "{bad}");
+    }
+}

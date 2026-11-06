@@ -70,6 +70,8 @@ pub struct Hub {
     /// lock per session if session starts get slow.
     pub(super) opening: tokio::sync::Mutex<()>,
     idle_timeout: Duration,
+    /// Signs `ShareFile` links for the web client, see `with_share_key`.
+    pub(super) share_key: Option<[u8; 32]>,
 }
 
 impl Default for Hub {
@@ -81,6 +83,7 @@ impl Default for Hub {
             next_queued: AtomicU64::default(),
             opening: tokio::sync::Mutex::default(),
             idle_timeout: Duration::from_secs(30 * 60),
+            share_key: None,
         }
     }
 }
@@ -92,6 +95,26 @@ impl Hub {
             idle_timeout,
             ..self
         }
+    }
+
+    /// Web connections get `ShareFile` links signed with a key from `token`,
+    /// which `share_key` returns to check them.
+    pub fn with_share_key(self, token: &str) -> Self {
+        Self {
+            share_key: Some(crate::tools::share_file::share_key(token)),
+            ..self
+        }
+    }
+
+    pub fn share_key(&self) -> Option<&[u8; 32]> {
+        self.share_key.as_ref()
+    }
+
+    /// The open session `sid`'s context, e.g. for its sandbox.
+    pub fn context(&self, sid: &str) -> Option<Context> {
+        let sid = &self.resolve(&SessionId::new(sid));
+        let sessions = self.sessions.lock().unwrap();
+        sessions.get(sid).map(|e| e.ctx.clone())
     }
 
     /// The session `sid` stands for: the one it joined, or itself.

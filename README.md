@@ -10,7 +10,7 @@ A small ACP-native coding agent in Rust. Prototype.
 - The `models` config limits the models a session may use, by path.
 - A web client in `web/` for following, answering and starting sessions
   from a phone, through the daemon.
-- Built-in tools: `Read`, `ReadImage`, `ShowImage`, `Write`, `Edit` (exact replacements),
+- Built-in tools: `Read`, `ReadImage`, `ShowImage`, `ShareFile`, `Write`, `Edit` (exact replacements),
   `Bash`, `RequestAccess`, `Compact`.
 - Deny-by-default Landlock sandbox per session. The user approves more
   access.
@@ -76,7 +76,7 @@ Cargo workspace:
 - `rho/src/api/` - OpenAI-compatible `/v1` and Ollama's `/api` on the daemon (`"api"` config), thinking store for API clients
 - `rho/src/openai_chat.rs` - Chat Completions client: another rho's `/v1` as provider (`"remotes"` config)
 - `rho/src/auth.rs` - OAuth PKCE login (copy-code flow), refresh, credential file
-- `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage` and `ShowImage`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
+- `rho/src/tools/` - `Tool` trait and `builtin()` in `mod.rs`; one file per built-in tool (`Read`, `ReadImage` and `ShowImage`, `ShareFile`, `Write`, `Edit`, `Bash`, `RequestAccess`); `ToolExtension::from(tool)` makes a tool an extension (ADR 0067)
 - `rho/src/tools/edit.rs` - `Edit`: exact text replacements (pi's edit tool without fuzzy matching); the change goes to ACP clients as a diff
 - `rho/src/agent.rs` - sessions and the agent loop (stream, run tools, repeat); saving in `agent/persist.rs`, slash commands in `agent/commands.rs`, usage reports in `agent/usage.rs`
 - `rho/src/compact.rs` - `/compact` and the `Compact` tool
@@ -301,7 +301,7 @@ Extensions read the database through `ctx.store()` (`session`, `list`,
 
 ## Sandbox
 
-`Bash`, `Read`, `ReadImage`, `ShowImage`, `Write` and `Edit` run under Landlock (via the `nono` crate, Linux
+`Bash`, `Read`, `ReadImage`, `ShowImage`, `ShareFile`, `Write` and `Edit` run under Landlock (via the `nono` crate, Linux
 only), deny by default. A session starts with system directories (`/nix/store`,
 `/etc`, `/usr`, ...) read-only, a few `/dev` files read-write, and its
 workspace directories read-write: the cwd plus ACP `additionalDirectories`.
@@ -608,6 +608,12 @@ The `ShowImage` tool shows the user an image file, like a chart the model
 made, without sending it to the model: it goes in `ToolOutput::shown`, saved
 in the result's `shown` field for the replay, and `provider::for_model` drops
 it from every request.
+
+The `ShareFile` tool gives the user a link to a file. ACP clients like Zed
+get a `resource_link` to the local `file://` path. The web client gets a
+`/share/<session>/<mac>/<path>` link instead; the daemon checks the mac (keyed
+with the token) and serves the file under the open session's sandbox, with
+`Content-Security-Policy: sandbox` (ADR 0073).
 
 The web client sets `clientCapabilities._meta.rho.imageRefs`. It then gets
 tool call images without data, with a `rho-image:<hash>` uri, and fetches each

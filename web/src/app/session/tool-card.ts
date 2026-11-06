@@ -75,8 +75,9 @@ export class ToolCard {
   protected readonly hasBody = hasBody;
   protected readonly imageRefs = imageRefs;
 
-  /** ShowImage is there to be seen: open once it has the image. */
+  /** ShowImage and ShareFile are there to be seen: open once they have the image or link. */
   protected opened(c: acp.ToolCall) {
-    return rhoTool(c) === 'ShowImage' && c.status === 'completed';
+    const tool = rhoTool(c);
+    return (tool === 'ShowImage' || tool === 'ShareFile') && c.status === 'completed';
   }
 }

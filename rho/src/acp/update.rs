@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::v1::{
     ConfigOptionUpdate, ContentBlock, ContentChunk, Cost, Diff, ElicitationContentValue,
-    ElicitationSchema, EnumOption, ImageContent, Meta, MultiSelectPropertySchema,
+    ElicitationSchema, EnumOption, ImageContent, Meta, MultiSelectPropertySchema, ResourceLink,
     SessionConfigKind, SessionInfoUpdate, SessionUpdate, StopReason, StringPropertySchema,
     Terminal, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, Usage as AcpUsage, UsageUpdate,
@@ -203,6 +203,8 @@ pub(super) enum Shown {
         command: String,
         streamed: bool,
     },
+    /// A `ShareFile` call: the file, linked once the call succeeded.
+    Link(PathBuf),
 }
 
 impl Shown {
@@ -210,13 +212,18 @@ impl Shown {
         name: &ToolName,
         input: &serde_json::Value,
         description: Option<&str>,
-        terminal_cwd: Option<&Path>,
+        cwd: Option<&Path>,
     ) -> Option<Self> {
+        if *name == tools::SHARE_FILE
+            && let (Some(cwd), Some(path)) = (cwd, input["path"].as_str())
+        {
+            return Some(Self::Link(tools::share_file::shared_path(cwd, path)));
+        }
         if let Some(text) = description {
             return Some(Self::Text(text.into()));
         }
         let command = input["command"].as_str()?;
-        Some(match terminal_cwd {
+        Some(match cwd {
             Some(cwd) if *name == tools::BASH => Self::Terminal {
                 cwd: input["cwd"].as_str().map_or(cwd.into(), |d| cwd.join(d)),
                 command: command.into(),
@@ -410,7 +417,7 @@ pub(super) fn to_update(
                 Some(Shown::Text(text)) => {
                     ToolCall::new(id.to_string(), title()).content(vec![text.as_str().into()])
                 }
-                None => ToolCall::new(id.to_string(), title()),
+                Some(Shown::Link(_)) | None => ToolCall::new(id.to_string(), title()),
             };
             // Lets the client follow along to the file.
             let file = [
@@ -466,8 +473,10 @@ pub(super) fn to_update(
                 );
             }
             let mut content = vec![];
-            if let Some(Shown::Text(text)) = shown {
-                content.push(text.as_str().into());
+            match shown {
+                Some(Shown::Text(text)) => content.push(text.as_str().into()),
+                Some(Shown::Link(path)) if !is_error => content.push(link_block(path).into()),
+                _ => {}
             }
             if let Some(d) = diff {
                 content.push(Diff::new(&d.path, &d.new).old_text(d.old.clone()).into());
@@ -485,6 +494,16 @@ pub(super) fn to_update(
             ))
         }
     }
+}
+
+/// A link to a shared file: its `file://` uri, which `web_links` turns into
+/// one for the browser.
+fn link_block(path: &Path) -> ContentBlock {
+    let name = path.file_name().unwrap_or(path.as_os_str());
+    ContentBlock::ResourceLink(ResourceLink::new(
+        name.to_string_lossy(),
+        tools::share_file::file_uri(path),
+    ))
 }
 
 pub(super) const MAX_TITLE: usize = 160;

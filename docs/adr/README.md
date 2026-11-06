@@ -80,3 +80,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0070](0070-tool-images-load-on-demand.md) | Tool images load on demand | Accepted |
 | [0071](0071-discard-tool-outputs.md) | The model can discard old tool outputs | Accepted |
 | [0072](0072-remote-rho-ollama-api-thinking-store.md) | Remote rho as provider, Ollama API, thinking store | Accepted |
+| [0073](0073-share-file-links.md) | ShareFile links | Accepted |

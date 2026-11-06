@@ -83,6 +83,7 @@ impl State {
             forms: self.caps.forms.load(Ordering::Relaxed),
             terminal: self.caps.terminal_output.load(Ordering::Relaxed),
             image_refs: self.caps.image_refs.load(Ordering::Relaxed),
+            share_key: self.hub.share_key.filter(|_| self.web_limits),
             ready: false,
             held: starts.then(Vec::new),
         }
