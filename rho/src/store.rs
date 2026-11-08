@@ -150,6 +150,28 @@ CREATE TABLE api_thinking (
 
 CREATE INDEX api_thinking_by_age ON api_thinking (created_at);
 "#,
+    r#"
+-- What the ACP frontend showed (ADR 0074), so web client cursors stay
+-- valid after an unload or a restart. Valid while the session's `epoch`
+-- and `updated_at` are the ones it was saved with.
+CREATE TABLE transcripts (
+    session_id TEXT NOT NULL PRIMARY KEY REFERENCES sessions (id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    -- Entries before the previous epoch, no longer kept.
+    dropped INTEGER NOT NULL CHECK (dropped >= 0),
+    -- Where the current epoch starts, counted from `dropped`.
+    current INTEGER NOT NULL CHECK (current >= 0),
+    epoch INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE transcript_entries (
+    session_id TEXT NOT NULL REFERENCES transcripts (session_id) ON DELETE CASCADE,
+    entry INTEGER NOT NULL CHECK (entry >= 0),
+    data TEXT NOT NULL CHECK (json_valid(data)),
+    PRIMARY KEY (session_id, entry)
+) STRICT;
+"#,
 ];
 
 /// Edit diffs and streamed outputs older than this are deleted; the call
@@ -195,6 +217,18 @@ pub struct SessionInfo {
     pub updated_at: i64,
     /// The session this one joined, see `Store::join`.
     pub alias_of: Option<SessionId>,
+}
+
+/// The ACP frontend's transcript, see `Store::save_transcript`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SavedTranscript {
+    pub id: String,
+    /// Entries before it are no longer kept.
+    pub dropped: i64,
+    /// Where the current epoch starts in `entries`.
+    pub current: i64,
+    /// The entries from `dropped` on (from `from` when saved), as JSON.
+    pub entries: Vec<String>,
 }
 
 /// One page of `Store::list`, newest first.
@@ -689,6 +723,105 @@ impl Store {
         .await
     }
 
+    /// Saves the frontend's transcript `t`, whose `entries` start at
+    /// `from`. `whole`: it was never saved, `t` has all of it. Otherwise
+    /// only if the saved one is the same transcript; `false` if not saved
+    /// (also when the session is not stored yet).
+    pub(crate) async fn save_transcript(
+        &self,
+        id: &SessionId,
+        t: SavedTranscript,
+        from: i64,
+        whole: bool,
+    ) -> Result<bool> {
+        let id = id.clone();
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            if whole {
+                tx.execute("DELETE FROM transcripts WHERE session_id = ?1", [&id])?;
+            } else {
+                // Gone after a `redact`: what is in memory may hold the phrase.
+                let same: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM transcripts WHERE session_id = ?1 AND id = ?2)",
+                    params![id, t.id],
+                    |r| r.get(0),
+                )?;
+                if !same {
+                    return Ok(false);
+                }
+            }
+            let saved = tx.execute(
+                "INSERT INTO transcripts (session_id, id, dropped, current, epoch, updated_at)
+                 SELECT id, ?2, ?3, ?4, epoch, updated_at FROM sessions WHERE id = ?1
+                 ON CONFLICT (session_id) DO UPDATE SET dropped = excluded.dropped,
+                     current = excluded.current, epoch = excluded.epoch,
+                     updated_at = excluded.updated_at",
+                params![id, t.id, t.dropped, t.current],
+            )?;
+            if saved == 0 {
+                return Ok(false);
+            }
+            tx.execute(
+                "DELETE FROM transcript_entries WHERE session_id = ?1 AND (entry < ?2 OR entry >= ?3)",
+                params![id, t.dropped, from],
+            )?;
+            let mut insert = tx.prepare(
+                "INSERT INTO transcript_entries (session_id, entry, data) VALUES (?1, ?2, ?3)",
+            )?;
+            for (i, data) in t.entries.iter().enumerate() {
+                insert.execute(params![id, from + i as i64, data])?;
+            }
+            drop(insert);
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// The saved transcript of the session, if the session did not change
+    /// since (same `epoch` and `updated_at`).
+    pub async fn transcript(&self, id: &SessionId) -> Result<Option<SavedTranscript>> {
+        let id = id.clone();
+        self.call(move |c| {
+            let saved = c
+                .query_row(
+                    "SELECT t.id, t.dropped, t.current FROM transcripts t
+                     JOIN sessions s ON s.id = t.session_id
+                     WHERE t.session_id = ?1 AND t.epoch = s.epoch AND t.updated_at = s.updated_at",
+                    [&id],
+                    |r| {
+                        Ok(SavedTranscript {
+                            id: r.get(0)?,
+                            dropped: r.get(1)?,
+                            current: r.get(2)?,
+                            entries: vec![],
+                        })
+                    },
+                )
+                .optional()?;
+            let Some(mut saved) = saved else {
+                return Ok(None);
+            };
+            let mut stmt = c.prepare(
+                "SELECT entry, data FROM transcript_entries WHERE session_id = ?1 ORDER BY entry",
+            )?;
+            let rows = stmt.query_map([&id], |r| Ok((r.get::<_, i64>(0)?, r.get(1)?)))?;
+            for (i, row) in rows.enumerate() {
+                let (entry, data) = row?;
+                // A gap: not what was saved.
+                if entry != saved.dropped + i as i64 {
+                    return Ok(None);
+                }
+                saved.entries.push(data);
+            }
+            if saved.current > saved.entries.len() as i64 {
+                return Ok(None);
+            }
+            Ok(Some(saved))
+        })
+        .await
+    }
+
     /// Saves the diffs of Edit calls, by tool call, and deletes diffs older
     /// than `DIFF_DAYS`.
     pub(crate) async fn save_diffs(
@@ -880,6 +1013,8 @@ impl Store {
                 sessions.insert(id?);
             }
             drop(stmt);
+            // Saved transcripts may hold the phrase; the open ones are not saved again.
+            tx.execute("DELETE FROM transcripts", [])?;
             // A new `updated_at` makes the History index rebuild the session.
             let now = now_ms();
             for id in &sessions {
@@ -1260,6 +1395,76 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn transcripts_are_saved_in_parts_and_valid_while_the_session_is_unchanged() {
+        let store = Store::memory().unwrap();
+        let id = SessionId::new("s");
+        let t = |dropped, entries: &[&str]| SavedTranscript {
+            id: "t1".into(),
+            dropped,
+            current: 0,
+            entries: entries.iter().map(|e| e.to_string()).collect(),
+        };
+        let entries = async || store.transcript(&id).await.unwrap().map(|t| t.entries);
+        // The session is not stored yet.
+        assert!(
+            !store
+                .save_transcript(&id, t(0, &["1"]), 0, true)
+                .await
+                .unwrap()
+        );
+        store.save_state(state("s", "/w")).await.unwrap();
+        assert!(
+            store
+                .save_transcript(&id, t(0, &["1", "2"]), 0, true)
+                .await
+                .unwrap()
+        );
+        // What changed, from entry 1 on.
+        assert!(
+            store
+                .save_transcript(&id, t(0, &["22", "3"]), 1, false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(entries().await.unwrap(), ["1", "22", "3"]);
+        // Entries before `dropped` go.
+        assert!(
+            store
+                .save_transcript(&id, t(1, &[]), 3, false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(entries().await.unwrap(), ["22", "3"]);
+        // Not over another transcript, unless whole.
+        let other = SavedTranscript {
+            id: "t2".into(),
+            ..t(1, &[])
+        };
+        assert!(!store.save_transcript(&id, other, 3, false).await.unwrap());
+
+        // A compaction makes it out of date.
+        store.next_epoch(&id).await.unwrap();
+        assert_eq!(entries().await, None);
+
+        // A redact deletes it; the open one is not saved again.
+        assert!(
+            store
+                .save_transcript(&id, t(0, &["1"]), 0, true)
+                .await
+                .unwrap()
+        );
+        assert!(entries().await.is_some());
+        store.redact("zzz").await.unwrap();
+        assert_eq!(entries().await, None);
+        assert!(
+            !store
+                .save_transcript(&id, t(0, &[]), 1, false)
+                .await
+                .unwrap()
         );
     }
 

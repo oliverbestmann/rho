@@ -81,3 +81,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0071](0071-discard-tool-outputs.md) | The model can discard old tool outputs | Accepted |
 | [0072](0072-remote-rho-ollama-api-thinking-store.md) | Remote rho as provider, Ollama API, thinking store | Accepted |
 | [0073](0073-share-file-links.md) | ShareFile links | Accepted |
+| [0074](0074-transcripts-kept-in-indexeddb.md) | Transcripts kept in IndexedDB, saved transcripts in rho | Accepted |

@@ -216,6 +216,10 @@ export class Session {
     });
   }
 
+  protected showEarlier() {
+    void this.acp.earlier(this.id());
+  }
+
   /** Jumps to the end, which then follows new output by itself. */
   protected scrollToEnd() {
     // Wait a few frames so a closing keyboard has resized the list first.

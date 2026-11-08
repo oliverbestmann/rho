@@ -341,16 +341,18 @@ impl Hub {
         released
     }
 
-    /// Saves an unused session: notices since the last save, e.g. a
-    /// background task's, survive a restart.
+    /// Saves an idle session: notices since the last save, e.g. a
+    /// background task's, survive a restart. Then its transcript.
     fn save(self: &Arc<Self>, sid: &SessionId) {
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let (hub, sid) = (self.clone(), sid.clone());
         rt.spawn(async move {
-            if let Some((session, ..)) = hub.open(&sid) {
-                session.lock().await.save().await;
+            if let Some((session, ctx, frontend, _)) = hub.open(&sid) {
+                let mut session = session.lock().await;
+                session.save().await;
+                frontend.save_transcript(&ctx).await;
             }
         });
     }
@@ -387,7 +389,7 @@ impl Hub {
     /// save is done it stays open: a client that opens it meanwhile
     /// attaches to it instead of loading a store the save has not reached.
     async fn unload(&self, sid: &SessionId, idle: Duration) -> bool {
-        let Some((session, ctx, ..)) = self.open(sid) else {
+        let Some((session, ctx, frontend, _)) = self.open(sid) else {
             return true;
         };
         let mut session = session.lock().await;
@@ -402,6 +404,7 @@ impl Hub {
             ctx.notify(NoteType::Info, "Session idle", &text, false);
             session.save().await;
         }
+        frontend.save_transcript(&ctx).await;
         let mut sessions = self.sessions.lock().unwrap();
         let unused = sessions.get(sid).is_some_and(Entry::unused);
         if unused {
@@ -423,10 +426,10 @@ impl Drop for Run {
         let mut sessions = self.hub.sessions.lock().unwrap();
         if let Some(entry) = sessions.get_mut(&self.sid) {
             entry.running.retain(|(id, _)| *id != self.id);
+            // A turn ended: the transcript is saved with the session, so a
+            // restart keeps the clients' cursors (ADR 0074).
             if entry.running.is_empty() {
                 entry.frontend.set_busy(false);
-            }
-            if entry.unused() {
                 self.hub.save(&self.sid);
             }
         }

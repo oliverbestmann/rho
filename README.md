@@ -248,6 +248,12 @@ starts from the `"sandbox"` config again. Edit diffs and the streamed output of
 terminal calls are stored for 7 days and replayed with the call; older
 calls show only their output for the model (ADR 0041, 0060).
 
+What a session showed is saved with it when a turn ends and when it
+unloads, so cursors stay valid after a restart while the session is
+unchanged. The web client keeps the transcripts in IndexedDB: a reload
+shows the last 50 entries at once ("Show earlier" adds more) and asks rho
+only for what came after (ADR 0074).
+
 The history is saved block by block as it grows (ADR 0060): a model
 response before its tool calls run, each result when its call ends. After
 a restart a session loads with its open tool calls closed: one that was

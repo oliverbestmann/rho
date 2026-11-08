@@ -763,12 +763,12 @@ async fn acp_lists_and_loads_saved_sessions() {
             "agent: Let me look.",
             "tool: t1",
             "agent: Done.",
-            // The saved turn report.
-            "tool: notice-4",
+            // The saved turn report, as the saved transcript showed it.
+            "tool: notice-5",
             "usage: 15 of 10",
             "agent: Again.",
-            // The new prompt's usage notice.
-            "tool: notice-7"
+            // The new prompt's usage notice: after the restored ids.
+            "tool: notice-8"
         ]
     );
 

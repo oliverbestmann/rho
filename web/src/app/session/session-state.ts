@@ -26,6 +26,8 @@ export class SessionState {
   readonly queue = signal<Queued[]>([]);
   /** Where rho's last update was in its transcript, `_meta.rho.cursor`; sent back on a reload. */
   cursor: unknown;
+  /** Filled from the browser's copy, which has older entries than shown, see `restore`. */
+  readonly earlier = signal(false);
   private readonly tools = new Map<string, Extract<Entry, { kind: 'tool' }>>();
 
   /** A `session/update` from rho. */
@@ -37,8 +39,21 @@ export class SessionState {
     if (u.sessionUpdate === 'session_info_update' && rhoMeta(u._meta)?.['reset'] === true) {
       this.tools.clear();
       this.entries.set([]);
+      this.earlier.set(false);
     }
     this.apply(u);
+  }
+
+  /** Shows the kept `updates` instead of what it showed; `earlier`: older ones are kept. */
+  restore(updates: acp.SessionUpdate[], earlier: boolean) {
+    this.tools.clear();
+    this.entries.set([]);
+    for (const u of updates) {
+      // Of a call that started before them: alone it would be an empty card.
+      if (u.sessionUpdate === 'tool_call_update' && !this.tools.has(u.toolCallId)) continue;
+      this.apply(u);
+    }
+    this.earlier.set(earlier);
   }
 
   apply(u: acp.SessionUpdate) {

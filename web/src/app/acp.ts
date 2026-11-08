@@ -12,7 +12,8 @@ import * as acp from '@agentclientprotocol/sdk';
 import { MatSnackBar, MatSnackBarRef, TextOnlySnackBar } from '@angular/material/snack-bar';
 import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client';
 import { Server, Settings } from './settings';
-import { blockText, SessionState } from './session/session-state';
+import { blockText, rhoMeta, SessionState } from './session/session-state';
+import { cursorOf, HistoryDb } from './session/history-db';
 import type { Image } from './session/composer';
 
 /** A session loaded over the current connection; its state follows the updates. */
@@ -44,9 +45,11 @@ type Status = 'offline' | 'connecting' | 'online';
 /** Wait after a lost connection before connecting again. */
 const LOST_MS = 1000;
 /** How long a connection attempt may take. */
-const ATTEMPT_MS = 2000;
+const ATTEMPT_MS = 10_000;
 /** Time between the starts of two attempts. */
 const RETRY_MS = 2000;
+/** Entries shown from the browser's copy on a reload, and how many more each "Show earlier" adds. */
+const WINDOW = 50;
 
 /** An error with the JSON-RPC `data` rho puts the cause in. */
 export function errorText(e: unknown) {
@@ -80,6 +83,14 @@ export class Acp {
   private readonly kept = new Map<string, SessionState>();
   /** Tool call images by their `rho-image:` uri, fetched once. */
   private readonly images = new Map<string, Promise<Image>>();
+  /** The transcripts kept in the browser, for reloads (ADR 0074). */
+  private readonly history = new HistoryDb();
+  /** Blocks of prompts sent from here: rho answers each with an empty update, kept as the block. */
+  private readonly echoes = new Map<string, acp.ContentBlock[]>();
+  /** Updates that came while `earlier` read the kept entries, to apply again. */
+  private readonly buffers = new Map<string, acp.SessionNotification[]>();
+  /** Entries read from the kept copy, per session; `earlier` reads more. */
+  private readonly windows = new Map<string, number>();
   private url?: string;
   private connection?: acp.ClientConnection;
   private timer?: ReturnType<typeof setTimeout>;
@@ -131,14 +142,43 @@ export class Acp {
   session(agent: acp.ClientContext, sessionId: string, cwd: string): Opened {
     const cached = this.opened.get(sessionId);
     if (cached) return cached;
-    const state = this.kept.get(sessionId) ?? new SessionState();
+    const kept = this.kept.get(sessionId);
     this.kept.delete(sessionId);
-    const opened: Opened = { state, loading: signal(true), error: signal(undefined) };
+    const opened: Opened = {
+      state: kept ?? new SessionState(),
+      loading: signal(true),
+      error: signal(undefined),
+    };
     this.opened.set(sessionId, opened);
+    void this.load(agent, opened, sessionId, cwd, !kept);
+    return opened;
+  }
+
+  private key(sessionId: string) {
+    return `${this.url} ${sessionId}`;
+  }
+
+  /** `session/load`, after filling a new state from the browser's copy. */
+  private async load(
+    agent: acp.ClientContext,
+    opened: Opened,
+    sessionId: string,
+    cwd: string,
+    restore: boolean,
+  ) {
+    const { state } = opened;
+    if (restore) {
+      const kept = await this.history.load(this.key(sessionId), WINDOW);
+      if (kept.cursor) {
+        state.restore(kept.entries, kept.more);
+        state.cursor = kept.cursor;
+        this.windows.set(sessionId, WINDOW);
+      }
+    }
     // rho replays the history as updates before it answers: after `since` if it still has it,
     // else it sends `_meta.rho.reset` and all.
     const since = state.cursor;
-    agent
+    await agent
       .request(acp.methods.agent.session.load, {
         sessionId,
         cwd,
@@ -152,7 +192,22 @@ export class Acp {
         opened.error.set(errorText(e));
       })
       .finally(() => opened.loading.set(false));
-    return opened;
+  }
+
+  /** Shows `WINDOW` more of the entries kept in the browser. */
+  async earlier(sessionId: string) {
+    const opened = this.opened.get(sessionId);
+    if (!opened || this.buffers.has(sessionId)) return;
+    const buffer: acp.SessionNotification[] = [];
+    this.buffers.set(sessionId, buffer);
+    const window = (this.windows.get(sessionId) ?? WINDOW) + WINDOW;
+    const kept = await this.history.load(this.key(sessionId), window);
+    this.buffers.delete(sessionId);
+    // Gone meanwhile, or reset: what it shows is newer.
+    if (this.opened.get(sessionId) !== opened || !kept.cursor || !opened.state.earlier()) return;
+    this.windows.set(sessionId, window);
+    opened.state.restore(kept.entries, kept.more);
+    for (const n of buffer) opened.state.receive(n);
   }
 
   /**
@@ -233,6 +288,7 @@ export class Acp {
     ];
     if (!opened.state.commands().some((c) => c.name === name)) {
       opened.state.addUser(prompt.map(blockText).join(''));
+      this.echoes.set(sessionId, [...prompt]);
     }
     prompting(true);
     try {
@@ -246,6 +302,8 @@ export class Acp {
     } catch (e) {
       this.report(e);
     } finally {
+      // rho echoes before the turn starts.
+      this.echoes.delete(sessionId);
       prompting(false);
     }
   }
@@ -256,7 +314,31 @@ export class Acp {
   }
 
   private update(params: acp.SessionNotification) {
-    this.opened.get(params.sessionId)?.state.receive(params);
+    const { sessionId } = params;
+    const opened = this.opened.get(sessionId);
+    if (!opened) return;
+    const key = this.key(sessionId);
+    const u = params.update;
+    if (u.sessionUpdate === 'session_info_update' && rhoMeta(u._meta)?.['reset'] === true) {
+      this.history.clear(key);
+      this.windows.delete(sessionId);
+    }
+    const cursor = cursorOf(params);
+    if (cursor) {
+      // The echo of our own prompt: kept as the block it stands for.
+      const echo = Object.keys(u).every((k) => k === 'sessionUpdate')
+        ? this.echoes.get(sessionId)?.shift()
+        : undefined;
+      const update: acp.SessionUpdate = echo
+        ? { sessionUpdate: 'user_message_chunk', content: echo }
+        : u;
+      this.history.record(key, update, cursor);
+      // Shown already by `prompt`, but not in what `earlier` reads.
+      this.buffers.get(sessionId)?.push({ ...params, update });
+    } else {
+      this.buffers.get(sessionId)?.push(params);
+    }
+    opened.state.receive(params);
   }
 
   /** No connection: rho forgot what we viewed, the next visit loads again. */

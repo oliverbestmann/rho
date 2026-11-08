@@ -232,13 +232,27 @@ pub(super) async fn open_stored(
 /// Puts the history of a session that opens into its transcript: the
 /// previous epoch from the store, then the current one, before the notices
 /// of its start. Compaction keeps older epochs in the store; they are not
-/// shown, so they do not fill the clients' memory.
+/// shown, so they do not fill the clients' memory. A saved transcript that
+/// is still valid is taken instead (ADR 0074).
 async fn record_stored(
     frontend: &AcpFrontend,
     session: &crate::agent::Session,
 ) -> anyhow::Result<()> {
     let tools = session.tools().map(|(n, t)| (n.clone(), t.clone()));
     let _ = frontend.tools.set(tools.collect());
+    if let Some(store) = session.ctx.store() {
+        match store.transcript(session.ctx.session_id()).await {
+            Ok(Some(saved)) => {
+                let mut restored = false;
+                frontend.record_first(|| restored = frontend.restore(saved));
+                if restored {
+                    return Ok(());
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("rho acp: saved transcript not read: {e:#}"),
+        }
+    }
     let epoch = session.epoch();
     let (mut messages, diffs, outputs) = match session.ctx.store() {
         Some(store) => {

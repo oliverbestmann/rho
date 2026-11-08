@@ -28,6 +28,23 @@ describe('SessionState', () => {
     expect(call).toMatchObject({ title: 'Read a', status: 'completed', kind: 'read' });
   });
 
+  it('restores kept updates without updates of calls before them', () => {
+    const s = new SessionState();
+    s.apply({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old' } });
+    s.restore(
+      [
+        { sessionUpdate: 'tool_call_update', toolCallId: 'early', status: 'completed' },
+        { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Read a' },
+        { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' },
+      ],
+      true,
+    );
+    const e = s.entries();
+    expect(e.map((x) => x.kind)).toEqual(['tool']);
+    expect(e[0].kind === 'tool' && e[0].call().status).toBe('completed');
+    expect(s.earlier()).toBe(true);
+  });
+
   it('keeps each note apart from agent text', () => {
     const s = new SessionState();
     const note = { sessionUpdate: 'agent_message_chunk', _meta: { rho: { note: true } } } as const;

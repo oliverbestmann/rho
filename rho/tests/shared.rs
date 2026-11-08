@@ -1454,6 +1454,55 @@ async fn loading_again_with_a_cursor_sends_only_what_came_after() {
 }
 
 #[tokio::test]
+async fn a_cursor_stays_valid_after_a_restart_while_the_session_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let db = dir.path().join("sessions.db");
+    let provider = Scripted::new(vec![answer("One."), answer("Two.")]);
+    let agent = agent(provider, &db);
+    let hub = Arc::new(Hub::default());
+    let sid = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent.clone(), hub.clone(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                cx.send_request(prompt(&sid, "hi")).block_task().await?;
+                Ok(sid)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let store = rho::store::Store::open(&db).unwrap();
+    let id = rho::store::SessionId::new(&*sid.0);
+    // Saved when the turn ended.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store.transcript(&id).await.unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let seen = load_since(&agent, &hub, &sid, &cwd, None).await;
+    let cursor = last_cursor(&seen).unwrap();
+
+    // A new hub is a restart: the cursor still points into the transcript.
+    let restarted = Arc::new(Hub::default());
+    let after = load_since(&agent, &restarted, &sid, &cwd, Some(cursor)).await;
+    assert!(!reset(&after));
+    assert!(chunks(&note_updates(&after)).is_empty());
+}
+
+#[tokio::test]
 async fn a_session_joins_another_and_stands_for_it() {
     let dir = tempfile::tempdir().unwrap();
     let (web_cwd, zed_cwd) = (dir.path().join("web"), dir.path().join("zed"));

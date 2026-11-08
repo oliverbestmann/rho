@@ -29,10 +29,13 @@
         <p class="error">{{ error }}</p>
       }
 
-      <!-- Hidden until loaded, so the replayed history does not fly by. -->
-      @if (shown()?.loading()) {
+      <!-- Hidden until loaded, so the replayed history does not fly by; the browser's copy shows at once. -->
+      @if (shown()?.loading() && !chunks().length) {
         <mat-spinner class="loading" diameter="40" aria-label="Loading" />
       } @else {
+        @if (shown()?.state.earlier()) {
+          <button matButton class="earlier" (click)="showEarlier()">Show earlier</button>
+        }
         @for (chunk of chunks(); track chunk.key) {
           @defer (on viewport; when chunk.eager) {
             @for (entry of chunk.entries; track $index) {

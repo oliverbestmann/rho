@@ -21,8 +21,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentEvent;
-use crate::extension::{BoxFuture, Form, FormReply, Frontend, STREAM_CAP, STREAM_CUT, red};
+use crate::extension::{
+    BoxFuture, Context, Form, FormReply, Frontend, STREAM_CAP, STREAM_CUT, red,
+};
 use crate::provider::{ToolCallId, ToolName};
+use crate::store::SavedTranscript;
 use crate::tools::DynTool;
 
 use super::queue::Queued;
@@ -70,7 +73,8 @@ pub(super) struct Viewer {
 /// The default is in no transcript: `session/load` sends everything.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(super) struct Cursor {
-    /// `AcpFrontend::id`: another one after a restart or an unload.
+    /// `AcpFrontend::id`: another one after an unload or a restart, unless
+    /// the saved transcript was still valid (ADR 0074).
     transcript: String,
     #[serde(flatten)]
     pos: Pos,
@@ -82,6 +86,10 @@ pub(super) struct Cursor {
 pub(super) struct Pos {
     entry: u64,
     len: usize,
+    /// Where the previous epoch starts: entries before it are gone, a
+    /// client that keeps them can drop them. Not read from `since`.
+    #[serde(default)]
+    start: u64,
 }
 
 /// Which viewers an update goes to. `All` and `Record` also add it to the
@@ -121,8 +129,14 @@ struct Transcript {
     epochs: [usize; 2],
     /// Entries dropped by `new_epoch`, so `Pos::entry` stays the same.
     dropped: u64,
+    /// Entries before it are in the store as they are, see
+    /// `AcpFrontend::save_transcript`.
+    clean: u64,
+    /// It was saved: later saves write only what changed.
+    saved: bool,
 }
 
+#[derive(Serialize, Deserialize)]
 enum Entry {
     Text(String),
     Thinking(String),
@@ -169,7 +183,8 @@ impl Transcript {
     /// where it ends.
     fn push(&mut self, entry: Entry) -> Pos {
         // Not into the previous epoch.
-        let last = (self.entries.len() > self.epochs[1])
+        let before = self.entries.len();
+        let last = (before > self.epochs[1])
             .then(|| self.entries.last_mut())
             .flatten();
         match (last, entry) {
@@ -184,16 +199,22 @@ impl Transcript {
             ) if *id == next => data.push_str(&more),
             (_, entry) => self.entries.push(entry),
         }
-        let last = self.entries.last().expect("pushed");
+        let last_entry = self.dropped + self.entries.len() as u64 - 1;
+        // Merged: the saved one is shorter.
+        if self.entries.len() == before {
+            self.clean = self.clean.min(last_entry);
+        }
         Pos {
-            entry: self.dropped + self.entries.len() as u64 - 1,
-            len: last.len(),
+            entry: last_entry,
+            len: self.entries.last().expect("pushed").len(),
+            start: self.dropped,
         }
     }
 
     /// A compaction: the epoch before the current one is dropped.
     fn new_epoch(&mut self) {
         self.dropped += self.epochs[1] as u64;
+        self.clean = self.clean.max(self.dropped);
         self.entries.drain(..self.epochs[1]);
         self.epochs = [0, self.entries.len()];
     }
@@ -232,6 +253,7 @@ impl Transcript {
             let pos = Pos {
                 entry: self.dropped + (start + j) as u64,
                 len: e.len(),
+                start: self.dropped,
             };
             e.update(from, terminal).map(|u| (u, pos))
         }))
@@ -241,7 +263,8 @@ impl Transcript {
 /// One session's frontend, for every connection that opened it.
 pub(super) struct AcpFrontend {
     /// Tells this transcript from the session's earlier ones, see `Cursor`.
-    id: String,
+    /// A saved one's after `restore`.
+    id: Mutex<String>,
     /// For `Bash` calls shown as terminals.
     cwd: PathBuf,
     notices: AtomicU64,
@@ -271,7 +294,7 @@ pub(super) struct AcpFrontend {
 impl AcpFrontend {
     pub(super) fn new(cwd: &Path) -> Arc<Self> {
         Arc::new(Self {
-            id: format!("{:016x}", getrandom::u64().unwrap_or_default()),
+            id: Mutex::new(format!("{:016x}", getrandom::u64().unwrap_or_default())),
             cwd: cwd.to_path_buf(),
             notices: AtomicU64::new(0),
             viewers: Mutex::default(),
@@ -316,8 +339,9 @@ impl AcpFrontend {
         let asked = since.is_some();
         {
             let transcript = self.transcript.lock().unwrap();
+            let id = self.id.lock().unwrap().clone();
             let after = since
-                .filter(|c| c.transcript == self.id)
+                .filter(|c| c.transcript == id)
                 .and_then(|c| transcript.updates(terminal, Some(c.pos)));
             let updates = match after {
                 Some(updates) => updates,
@@ -345,6 +369,102 @@ impl AcpFrontend {
         let mut t = self.transcript.lock().unwrap();
         for entry in later.entries {
             t.push(entry);
+        }
+    }
+
+    /// Takes over a transcript `save_transcript` saved, with its id, so the
+    /// cursors of clients stay valid. `false` if it cannot be read; the
+    /// transcript stays as it was.
+    pub(super) fn restore(&self, saved: SavedTranscript) -> bool {
+        let entries: Result<Vec<Entry>, _> = saved
+            .entries
+            .iter()
+            .map(|e| serde_json::from_str(e))
+            .collect();
+        let (Ok(entries), Ok(dropped), Ok(current)) = (
+            entries,
+            u64::try_from(saved.dropped),
+            usize::try_from(saved.current),
+        ) else {
+            return false;
+        };
+        let clean = dropped + entries.len() as u64;
+        // New notices must not reuse the ids of restored ones.
+        let last_notice = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Update { plain, .. } => match &**plain {
+                    SessionUpdate::ToolCall(c) => Some(&c.tool_call_id),
+                    SessionUpdate::ToolCallUpdate(c) => Some(&c.tool_call_id),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter_map(|id| id.0.strip_prefix("notice-")?.parse::<u64>().ok())
+            .max();
+        if let Some(n) = last_notice {
+            self.notices.fetch_max(n + 1, Ordering::Relaxed);
+        }
+        *self.transcript.lock().unwrap() = Transcript {
+            entries,
+            epochs: [0, current],
+            dropped,
+            clean,
+            saved: true,
+        };
+        *self.id.lock().unwrap() = saved.id;
+        true
+    }
+
+    /// Saves the transcript with the session in `ctx`'s store, what changed
+    /// since the last save. Run after the session was saved: the saved
+    /// transcript is valid while the stored session stays the same.
+    pub(super) async fn save_transcript(&self, ctx: &Context) {
+        let Some(store) = ctx.store() else { return };
+        let (saved, from, whole) = {
+            let mut t = self.transcript.lock().unwrap();
+            let whole = !t.saved;
+            let from = if whole {
+                t.dropped
+            } else {
+                t.clean.max(t.dropped)
+            };
+            let skip = (from - t.dropped) as usize;
+            let entries: Result<Vec<_>, _> = t.entries[skip..]
+                .iter()
+                .map(serde_json::to_string)
+                .collect();
+            let entries = match entries {
+                Ok(entries) => entries,
+                Err(e) => {
+                    eprintln!("rho acp: transcript not saved: {e}");
+                    return;
+                }
+            };
+            let saved = SavedTranscript {
+                id: self.id.lock().unwrap().clone(),
+                dropped: t.dropped as i64,
+                current: t.epochs[1] as i64,
+                entries,
+            };
+            // What changes from now on lowers it again.
+            t.clean = t.dropped + t.entries.len() as u64;
+            (saved, from, whole)
+        };
+        match store
+            .save_transcript(ctx.session_id(), saved, from as i64, whole)
+            .await
+        {
+            Ok(written) => {
+                if written {
+                    self.transcript.lock().unwrap().saved = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("rho acp: transcript not saved: {e:#}");
+                let mut t = self.transcript.lock().unwrap();
+                t.clean = t.clean.min(from);
+            }
         }
     }
 
@@ -638,7 +758,7 @@ impl AcpFrontend {
         let mut notification = SessionNotification::new(v.sid.clone(), update);
         if let Some(pos) = pos {
             let cursor = Cursor {
-                transcript: self.id.clone(),
+                transcript: self.id.lock().unwrap().clone(),
                 pos,
             };
             notification =
@@ -917,9 +1037,53 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_transcript_keeps_its_id_and_positions() {
+        let a = AcpFrontend::new(Path::new("/w"));
+        let pos = {
+            let mut t = a.transcript.lock().unwrap();
+            t.push(Entry::Text("Hel".into()));
+            t.new_epoch();
+            t.new_epoch();
+            t.push(Entry::Thinking("hm".into()));
+            t.push(Entry::Text("lo".into()))
+        };
+        let saved = {
+            let t = a.transcript.lock().unwrap();
+            SavedTranscript {
+                id: a.id.lock().unwrap().clone(),
+                dropped: t.dropped as i64,
+                current: t.epochs[1] as i64,
+                entries: t
+                    .entries
+                    .iter()
+                    .map(|e| serde_json::to_string(e).unwrap())
+                    .collect(),
+            }
+        };
+        let b = AcpFrontend::new(Path::new("/w"));
+        assert!(!b.restore(SavedTranscript {
+            entries: vec!["{}".into()],
+            ..saved.clone()
+        }));
+        assert!(b.restore(saved));
+        assert_eq!(*b.id.lock().unwrap(), *a.id.lock().unwrap());
+        let mut t = b.transcript.lock().unwrap();
+        assert_eq!(texts(&t, false), ["hm", "lo"]);
+        assert_eq!(texts_since(&t, false, Some(pos)).unwrap(), [] as [&str; 0]);
+        // All of it is saved; a merge into the last entry changes that one.
+        assert_eq!(t.clean, 3);
+        t.push(Entry::Text("!".into()));
+        assert_eq!(t.clean, 2);
+    }
+
+    #[test]
     fn a_cursor_resumes_mid_entry_and_counts_dropped_entries() {
         let mut t = Transcript::default();
-        let pos = |entry, len| Pos { entry, len };
+        let pos = |entry, len| Pos {
+            entry,
+            len,
+            start: 0,
+        };
         let first = t.push(Entry::Text("Hel".into()));
         assert_eq!(first, pos(0, 3));
         assert_eq!(t.push(Entry::Text("lo".into())), pos(0, 5));
@@ -938,7 +1102,13 @@ mod tests {
         // The first epoch is gone, its positions with it.
         assert!(t.updates(false, Some(first)).is_none());
         assert_eq!(texts_since(&t, false, Some(pos(2, 2))).unwrap(), ["xt"]);
-        assert_eq!(t.push(Entry::Text("!".into())), pos(3, 1));
+        assert_eq!(
+            t.push(Entry::Text("!".into())),
+            Pos {
+                start: 2,
+                ..pos(3, 1)
+            }
+        );
         // Past the end of an entry, or of the transcript.
         assert!(t.updates(false, Some(pos(2, 9))).is_none());
         assert!(t.updates(false, Some(pos(9, 0))).is_none());

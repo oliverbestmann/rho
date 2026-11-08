@@ -14,7 +14,7 @@ tool cards that stay closed.
 Keeping the transcript in IndexedDB was considered. It does not help after a
 restart or an unload (the transcript id changes, so rho sends everything
 again), the client does not know where epochs start, and several tabs on one
-session would share one store. It is not done.
+session would share one store. It is not done. (Done later in ADR 0074, which solves these.)
 
 ## Decision
 

@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import * as acp from '@agentclientprotocol/sdk';
 import { Acp, errorText } from './acp';
 import { Settings } from './settings';
+import { HistoryDb } from './session/history-db';
 import { MatSnackBar } from '@angular/material/snack-bar';
 
 describe('Acp.session', () => {
@@ -116,7 +117,7 @@ describe('Acp reconnect policy', () => {
     document.dispatchEvent(new Event('visibilitychange'));
   }
 
-  it('waits 1 s after a loss, then tries every 2 s with a 2 s timeout', async () => {
+  it('waits 1 s after a loss, then tries every 2 s with a 10 s timeout', async () => {
     FakeSocket.answering = false;
     FakeSocket.all[0].close();
     await vi.advanceTimersByTimeAsync(999);
@@ -127,7 +128,9 @@ describe('Acp reconnect policy', () => {
     expect(FakeSocket.all).toHaveLength(2);
     expect(a.status()).toBe('connecting');
 
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(FakeSocket.all[1].closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     expect(FakeSocket.all[1].closed).toBe(true);
     // The next attempt is due at once, after the close settled.
     await vi.advanceTimersByTimeAsync(1);
@@ -227,6 +230,25 @@ describe('Acp prompts', () => {
     });
     const user = opened.state.entries().at(-1)!;
     expect(user.kind === 'user' && user.text()).toContain('data:image/png;base64,AA');
+  });
+
+  it('keeps the echo of its own prompt as the prompt', async () => {
+    const { a, opened } = await setup();
+    const inner = a as unknown as {
+      history: HistoryDb;
+      update(n: acp.SessionNotification): void;
+    };
+    const record = vi.spyOn(inner.history, 'record');
+    void a.prompt('s', 'hi');
+    const cursor = { transcript: 't', entry: 4, len: 0 };
+    const echo = { sessionUpdate: 'session_info_update' } as const;
+    inner.update({ sessionId: 's', update: echo, _meta: { rho: { cursor } } });
+    const prompt = { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } };
+    expect(record).toHaveBeenLastCalledWith(expect.any(String), prompt, cursor);
+    // Once per block: a later empty update stays as it is.
+    inner.update({ sessionId: 's', update: echo, _meta: { rho: { cursor } } });
+    expect(record).toHaveBeenLastCalledWith(expect.any(String), echo, cursor);
+    expect(opened.state.entries().filter((e) => e.kind === 'user')).toHaveLength(1);
   });
 
   it('queues and unqueues in rho', async () => {

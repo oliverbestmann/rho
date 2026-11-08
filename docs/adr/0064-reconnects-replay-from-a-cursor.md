@@ -40,6 +40,7 @@ had nearly all of it.
   everything, as before.
 - Each recorded notification carries about 60 bytes more.
 - A page reload still loads everything: the cursor lives only in memory.
+  (Changed by ADR 0074: the web client keeps it in IndexedDB.)
 - `session/resume` and other clients (Zed) are unchanged; they do not send
   `since`.
 
