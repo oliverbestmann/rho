@@ -165,17 +165,35 @@ describe('Acp reconnect policy', () => {
     await vi.waitFor(() => expect(a.status()).toBe('online'));
   });
 
-  it('waits without network and connects at once when it is back', async () => {
+  it('keeps trying without network and connects at once when it is back', async () => {
     online = false;
     window.dispatchEvent(new Event('offline'));
+    FakeSocket.answering = false;
     FakeSocket.all[0].close();
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(FakeSocket.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    // The browser may be wrong about the network.
+    expect(FakeSocket.all).toHaveLength(2);
 
+    FakeSocket.answering = true;
     online = true;
     window.dispatchEvent(new Event('online'));
-    expect(FakeSocket.all).toHaveLength(2);
+    expect(FakeSocket.all[1].closed).toBe(true);
+    expect(FakeSocket.all).toHaveLength(3);
     await vi.waitFor(() => expect(a.status()).toBe('online'));
+  });
+
+  it('says "No network" only while not connected', async () => {
+    const open = vi.spyOn(TestBed.inject(MatSnackBar), 'open');
+    online = false;
+    window.dispatchEvent(new Event('offline'));
+    TestBed.tick();
+    // The socket still works: the browser is wrong.
+    expect(open).not.toHaveBeenCalled();
+
+    FakeSocket.all[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    TestBed.tick();
+    expect(open).toHaveBeenCalledWith('No network');
   });
 
   it('shows rho errors but not a lost connection', () => {

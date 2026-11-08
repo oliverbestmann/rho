@@ -102,32 +102,45 @@ export class Acp {
       const server = this.settings.server();
       untracked(() => this.open(server));
     });
-    // Phones drop sockets while asleep or without network: connect at once when both are back,
-    // dropping a pending attempt.
+    // Phones drop sockets while asleep or without network: connect at once when the page is
+    // shown or the network is back, dropping a pending attempt.
     const done = new AbortController();
     inject(DestroyRef).onDestroy(() => done.abort());
-    const { signal } = done;
+    const { signal: aborted } = done;
     const resume = () => {
       if (this.canConnect() && this.status() !== 'online') this.open(this.settings.server());
     };
-    document.addEventListener('visibilitychange', resume, { signal });
-    let note: MatSnackBarRef<TextOnlySnackBar> | undefined;
+    document.addEventListener('visibilitychange', resume, { signal: aborted });
+    const network = signal(navigator.onLine);
     window.addEventListener(
       'online',
       () => {
-        note?.dismiss();
+        network.set(true);
         resume();
       },
-      { signal },
+      { signal: aborted },
     );
-    const offline = () => (note = this.snackBar.open('No network'));
-    window.addEventListener('offline', offline, { signal });
-    if (!navigator.onLine) offline();
+    window.addEventListener('offline', () => network.set(false), { signal: aborted });
+    // Only while not connected: browsers report offline wrongly, e.g. on a network switch
+    // or a phone that slept, while the socket works.
+    let note: MatSnackBarRef<TextOnlySnackBar> | undefined;
+    effect(() => {
+      const show = !network() && this.status() !== 'online';
+      untracked(() => {
+        if (show && !note) {
+          note = this.snackBar.open('No network');
+          note.afterDismissed().subscribe(() => (note = undefined));
+        } else if (!show) note?.dismiss();
+      });
+    });
   }
 
-  /** Hidden pages and devices without network wait for the events that end that. */
+  /**
+   * Hidden pages wait until they are shown. Without network it keeps trying: browsers report
+   * offline wrongly, and attempts then fail fast.
+   */
   private canConnect() {
-    return !document.hidden && navigator.onLine;
+    return !document.hidden;
   }
 
   /** Only rho's own errors: a lost connection shows as the reconnecting marker. */
