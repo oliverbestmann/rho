@@ -172,6 +172,11 @@ CREATE TABLE transcript_entries (
     PRIMARY KEY (session_id, entry)
 ) STRICT;
 "#,
+    r#"
+-- Model requests since the epoch started.
+ALTER TABLE sessions ADD COLUMN epoch_requests INTEGER NOT NULL DEFAULT 0
+    CHECK (epoch_requests >= 0);
+"#,
 ];
 
 /// Edit diffs and streamed outputs older than this are deleted; the call
@@ -181,7 +186,7 @@ const DIFF_DAYS: i64 = 7;
 const COLUMNS: &str = "id, cwd, additional_dirs, title, model, thinking, input_tokens, \
     output_tokens, cache_read_tokens, cache_write_tokens, last_input_tokens, last_output_tokens, \
     last_cache_read_tokens, last_cache_write_tokens, cost, epoch, profile, features, \
-    extension_state, created_at, updated_at, alias_of";
+    extension_state, created_at, updated_at, alias_of, epoch_requests";
 
 pub const MASK: &str = "REDACTED";
 
@@ -207,6 +212,8 @@ pub struct SessionInfo {
     pub cost: f64,
     /// Number of compactions.
     pub epoch: i64,
+    /// Model requests since the epoch started.
+    pub epoch_requests: u32,
     pub profile: ProfileId,
     /// The features that are on.
     pub features: Vec<FeatureId>,
@@ -260,6 +267,7 @@ pub(crate) struct State {
     pub usage: Usage,
     pub last_usage: Usage,
     pub cost: f64,
+    pub epoch_requests: u32,
     pub profile: ProfileId,
     pub features: Vec<FeatureId>,
     pub extension_state: serde_json::Map<String, serde_json::Value>,
@@ -608,9 +616,9 @@ impl Store {
                      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                      last_input_tokens, last_output_tokens, last_cache_read_tokens,
                      last_cache_write_tokens, cost, profile, features, extension_state,
-                     created_at, updated_at)
+                     created_at, updated_at, epoch_requests)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?17, ?18, ?19, ?16, ?16)
+                     ?15, ?17, ?18, ?19, ?16, ?16, ?20)
                  ON CONFLICT (id) DO UPDATE SET
                      additional_dirs = excluded.additional_dirs,
                      title = COALESCE(excluded.title, title),
@@ -625,6 +633,7 @@ impl Store {
                      last_cache_read_tokens = excluded.last_cache_read_tokens,
                      last_cache_write_tokens = excluded.last_cache_write_tokens,
                      cost = excluded.cost,
+                     epoch_requests = excluded.epoch_requests,
                      profile = excluded.profile,
                      features = excluded.features,
                      extension_state = excluded.extension_state,
@@ -649,6 +658,7 @@ impl Store {
                     s.profile,
                     serde_json::to_string(&s.features)?,
                     serde_json::to_string(&s.extension_state)?,
+                    s.epoch_requests,
                 ],
             )?;
             Ok(())
@@ -1223,6 +1233,7 @@ fn read_info(r: &Row) -> rusqlite::Result<Result<SessionInfo>> {
         },
         cost: r.get("cost")?,
         epoch: r.get("epoch")?,
+        epoch_requests: r.get("epoch_requests")?,
         profile: r.get("profile")?,
         features: vec![],
         extension_state: Default::default(),
@@ -1326,6 +1337,7 @@ mod tests {
                 cache_write: 8,
             },
             cost: 0.5,
+            epoch_requests: 3,
             profile: ProfileId::new("plan"),
             features: vec![FeatureId::new("ssh")],
             extension_state: serde_json::json!({"go-check.off": true})
@@ -1358,6 +1370,7 @@ mod tests {
         assert_eq!(loaded.info.additional_dirs, [PathBuf::from("/extra")]);
         assert_eq!(loaded.info.usage.cache_write, 4);
         assert_eq!(loaded.info.last_usage.cache_write, 8);
+        assert_eq!(loaded.info.epoch_requests, 3);
         assert_eq!(loaded.info.profile, ProfileId::new("plan"));
         assert_eq!(loaded.info.features, [FeatureId::new("ssh")]);
         assert_eq!(

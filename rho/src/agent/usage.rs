@@ -41,6 +41,10 @@ impl Session {
             count(window),
             used as f64 * 100.0 / window as f64
         );
+        out += &format!(
+            "- Requests since the last compaction or clear: {}\n",
+            self.epoch_requests
+        );
         if self.cost > 0.0 {
             out += &format!("- Cost: ${:.4}\n", self.cost);
         }

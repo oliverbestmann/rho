@@ -253,10 +253,13 @@ async fn compaction_counts_its_usage() {
         .await
         .unwrap();
     let (before, requests) = (session.usage, session.requests);
+    assert_eq!(session.epoch_requests, 1);
     session.last_request = None;
     agent.compact(&mut session, "").await.unwrap();
     assert_eq!(session.usage - before, usage);
     assert_eq!(session.requests, requests + 1);
+    // The compaction request belongs to the old epoch.
+    assert_eq!(session.epoch_requests, 0);
 }
 
 #[tokio::test]

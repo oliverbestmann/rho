@@ -30,6 +30,9 @@ import { rhoMeta } from './session-state';
     <mat-menu #details xPosition="before">
       <div class="details">
         <div>{{ tokens(usage().used) }} of {{ tokens(usage().size) }} tokens, {{ percent() }}%</div>
+        @if (epochRequests() !== undefined) {
+          <div>Requests since compaction or clear: {{ epochRequests() }}</div>
+        }
         @if (cost(); as cost) {
           <div>Cost: {{ cost }}</div>
         }
@@ -93,6 +96,11 @@ export class ContextUsage {
       c &&
       new Intl.NumberFormat(undefined, { style: 'currency', currency: c.currency }).format(c.amount)
     );
+  });
+
+  protected readonly epochRequests = computed(() => {
+    const n = rhoMeta(this.usage()._meta)?.['epochRequests'];
+    return typeof n === 'number' ? n : undefined;
   });
 
   /** rho's approximate history and last request sizes, from `_meta.rho`. */

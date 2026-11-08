@@ -275,6 +275,7 @@ impl Agent {
         // Counted like any request, also when no summary comes back.
         session.usage += usage;
         session.requests += 1;
+        session.epoch_requests += 1;
         session.cost += provider
             .model_info(&model)
             .and_then(|m| m.cost(&usage))
@@ -345,6 +346,7 @@ fn new_epoch(session: &mut Session, history: Vec<Message>) {
     session.last_request = None;
     // The context in use is unknown until the next request, not the old one.
     session.last_usage = Usage::default();
+    session.epoch_requests = 0;
     session.publish_info();
     session.emit_usage();
     // The profile and feature notes went with the history: tell the model again.

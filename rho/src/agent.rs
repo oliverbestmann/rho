@@ -52,6 +52,8 @@ pub enum AgentEvent<'a> {
         /// See `Session::history_bytes` and `Session::request_bytes`.
         history_bytes: u64,
         request_bytes: u64,
+        /// Model requests since the epoch (compaction or clear) started.
+        epoch_requests: u32,
     },
     ToolStart {
         id: &'a ToolCallId,
@@ -158,6 +160,8 @@ pub struct Session {
     pub cost: f64,
     /// Model requests so far.
     pub requests: u32,
+    /// Model requests since the epoch (compaction or clear) started; saved.
+    pub epoch_requests: u32,
     tools: Vec<Arc<dyn DynTool>>,
     /// `tools` specs, built once: every request sends the same bytes, and
     /// schemas are not regenerated per request.
@@ -235,6 +239,7 @@ impl Session {
             cost: self.cost,
             history_bytes: self.history_bytes(),
             request_bytes: self.request_bytes,
+            epoch_requests: self.epoch_requests,
         });
     }
 
@@ -290,6 +295,7 @@ impl Session {
         self.request_bytes =
             crate::provider::json_size(&(&request.system, &request.messages, &request.tools));
         self.requests += 1;
+        self.epoch_requests += 1;
         let mut stream = ctx.stream(&*self.provider, request);
         let mut content: Vec<Content> = Vec::new();
         let mut stop = StopReason::EndTurn;
@@ -328,6 +334,7 @@ impl Session {
                         cost: self.cost,
                         history_bytes: self.history_bytes(),
                         request_bytes: self.request_bytes,
+                        epoch_requests: self.epoch_requests,
                     });
                 }
                 Event::Done(reason) => stop = reason,
@@ -473,6 +480,7 @@ impl Agent {
         session.usage = info.usage;
         session.last_usage = info.last_usage;
         session.cost = info.cost;
+        session.epoch_requests = info.epoch_requests;
         session.publish_info();
         let p = session.persist.as_mut().expect("store");
         (p.epoch, p.base, p.created) = (info.epoch, loaded.base, true);
@@ -560,6 +568,7 @@ impl Agent {
             last_usage: Usage::default(),
             cost: 0.0,
             requests: 0,
+            epoch_requests: 0,
             specs: setup.tools.iter().map(|t| t.spec()).collect(),
             tools: setup.tools,
             system,

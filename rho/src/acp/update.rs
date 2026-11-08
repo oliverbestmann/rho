@@ -119,6 +119,7 @@ pub(super) struct LastUsage {
     cost: f64,
     history_bytes: u64,
     request_bytes: u64,
+    epoch_requests: u32,
 }
 
 impl LastUsage {
@@ -177,6 +178,7 @@ pub(super) fn usage_update(last: &LastUsage, size: u64) -> SessionUpdate {
             "cacheTtlSecs": crate::compact::CACHE_TTL.as_secs(),
             "historyBytes": last.history_bytes,
             "requestBytes": last.request_bytes,
+            "epochRequests": last.epoch_requests,
         }
     })));
     if last.cost > 0.0 {
@@ -373,6 +375,7 @@ pub(super) fn to_update(
             cost,
             history_bytes,
             request_bytes,
+            epoch_requests,
         } => {
             *last_usage = LastUsage {
                 model: model.to_string(),
@@ -382,6 +385,7 @@ pub(super) fn to_update(
                 cost,
                 history_bytes,
                 request_bytes,
+                epoch_requests,
             };
             usage_update(last_usage, context_window)
         }
@@ -847,6 +851,7 @@ mod tests {
                 cost: 0.5,
                 history_bytes: 4096,
                 request_bytes: 3000,
+                epoch_requests: 7,
             },
             0,
             None,
@@ -866,6 +871,7 @@ mod tests {
         assert_eq!(rho["session"]["cacheRead"], 1000);
         assert_eq!(rho["cacheHitRate"], 0.9);
         assert_eq!(rho["cacheTtlSecs"], 300);
+        assert_eq!(rho["epochRequests"], 7);
         assert_eq!(
             (rho["historyBytes"].clone(), rho["requestBytes"].clone()),
             (json!(4096), json!(3000))

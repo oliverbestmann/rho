@@ -142,6 +142,7 @@ impl Session {
             usage: self.usage,
             last_usage: self.last_usage,
             cost: self.cost,
+            epoch_requests: self.epoch_requests,
             profile: self.ctx.profile().id,
             features: self.ctx.active_features(),
             extension_state: self.ctx.all_stored(),
