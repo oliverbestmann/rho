@@ -38,7 +38,7 @@ import { dir, hue, isRunning, listSessions } from './list';
       <mat-progress-bar mode="indeterminate" />
     }
     @if (acp.status() !== 'online') {
-      <app-working class="message">Reconnecting…</app-working>
+      <app-working class="message">{{ acp.reconnectText() }}</app-working>
     }
     @if (sessions.error(); as error) {
       <p class="message error">{{ errorText(error) }}</p>

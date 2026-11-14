@@ -67,7 +67,7 @@
         }
         <!-- An open question is what the turn waits for, so it shows instead. -->
         @if (reconnecting()) {
-          <app-working>Reconnecting…</app-working>
+          <app-working>{{ acp.reconnectText() }}</app-working>
         } @else if (running() && !asks().length) {
           <app-working />
         }

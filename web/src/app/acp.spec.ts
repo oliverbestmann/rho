@@ -91,7 +91,9 @@ describe('Acp reconnect policy', () => {
   let a: Acp;
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    });
     vi.stubGlobal('WebSocket', FakeSocket);
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => online });
@@ -180,6 +182,24 @@ describe('Acp reconnect policy', () => {
     expect(FakeSocket.all[1].closed).toBe(true);
     expect(FakeSocket.all).toHaveLength(3);
     await vi.waitFor(() => expect(a.status()).toBe('online'));
+  });
+
+  it('shows the seconds without a connection after 10 s', async () => {
+    FakeSocket.answering = false;
+    FakeSocket.all[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    TestBed.tick();
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(a.reconnectText()).toBe('Reconnecting…');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(a.reconnectText()).toBe('Reconnecting… 10 s');
+
+    FakeSocket.answering = true;
+    FakeSocket.all.at(-1)!.close();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(a.status()).toBe('online'));
+    TestBed.tick();
+    expect(a.reconnectText()).toBe('Reconnecting…');
   });
 
   it('says "No network" only while not connected', async () => {

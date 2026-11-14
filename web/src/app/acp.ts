@@ -1,4 +1,5 @@
 import {
+  computed,
   DestroyRef,
   effect,
   inject,
@@ -69,6 +70,13 @@ export class Acp {
   private readonly snackBar = inject(MatSnackBar);
 
   readonly status = signal<Status>('offline');
+  /** Seconds without a connection, 0 while online. */
+  private readonly offlineSeconds = signal(0);
+  /** The reconnecting marker, with the seconds after 10 s. */
+  readonly reconnectText = computed(() => {
+    const s = this.offlineSeconds();
+    return s >= 10 ? `Reconnecting… ${s} s` : 'Reconnecting…';
+  });
   readonly error = signal<string | undefined>(undefined);
   /** The agent of the open connection, undefined until `initialize` is done. */
   readonly agent = signal<acp.ClientContext | undefined>(undefined);
@@ -121,6 +129,13 @@ export class Acp {
       { signal: aborted },
     );
     window.addEventListener('offline', () => network.set(false), { signal: aborted });
+    const lost = computed(() => this.status() !== 'online');
+    effect((onCleanup) => {
+      this.offlineSeconds.set(0);
+      if (!lost()) return;
+      const tick = setInterval(() => this.offlineSeconds.update((s) => s + 1), 1000);
+      onCleanup(() => clearInterval(tick));
+    });
     // Only while not connected: browsers report offline wrongly, e.g. on a network switch
     // or a phone that slept, while the socket works.
     let note: MatSnackBarRef<TextOnlySnackBar> | undefined;

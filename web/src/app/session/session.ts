@@ -69,7 +69,7 @@ export class Session {
   /** Query parameter, the title from the list until rho sends a new one. */
   readonly listTitle = input<string | undefined>(undefined, { alias: 'title' });
 
-  private readonly acp = inject(Acp);
+  protected readonly acp = inject(Acp);
 
   /** Kept in localStorage per session, so it survives a reload. */
   protected readonly draft = linkedSignal(() => localStorage.getItem(draftKey(this.id())) ?? '');
