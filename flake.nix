@@ -93,6 +93,8 @@
               perl
               git
             ];
+            # nixpkgs' cargo setup hook sets AWS_LC_SYS_USE_SYSTEM=1.
+            buildInputs = [ pkgs.aws-lc ];
             dontUseCmakeConfigure = true;
             ZVEC_LIB_DIR = "${zvec}";
             ZVEC_AUTO_BUILD = "0";
@@ -114,7 +116,14 @@
             };
             cargoBuildFlags = [ "-p" "rho-agent" ];
             # Memory/History embeddings: link onnxruntime from nixpkgs; the ld wrapper adds it to the rpath.
-            buildInputs = [ pkgs.onnxruntime ];
+            # aws-lc: nixpkgs' cargo setup hook sets AWS_LC_SYS_USE_SYSTEM=1.
+            # oniguruma, sqlite: the -sys crates link them when pkg-config is present.
+            buildInputs = [
+              pkgs.onnxruntime
+              pkgs.aws-lc
+              pkgs.oniguruma
+              pkgs.sqlite
+            ];
             ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
             ORT_PREFER_DYNAMIC_LINK = "1";
             # Compiled in as the default web client dir (`acp_ws::web_dir`).
@@ -122,7 +131,11 @@
             # Tests run in the dev shell; some need the network or a writable home.
             doCheck = false;
             # SemanticSearch looks up `zg` on the PATH.
-            nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeBuildInputs = [
+              pkgs.makeWrapper
+              # aws-lc-sys finds aws-lc via pkg-config.
+              pkgs.pkg-config
+            ];
             postInstall = "wrapProgram $out/bin/rho --prefix PATH : ${zg}/bin";
           };
         }
