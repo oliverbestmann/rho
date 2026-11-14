@@ -117,7 +117,7 @@ describe('Acp reconnect policy', () => {
     document.dispatchEvent(new Event('visibilitychange'));
   }
 
-  it('waits 1 s after a loss, then tries every 2 s with a 10 s timeout', async () => {
+  it('waits 1 s after a loss, then tries every 2 s with a 60 s timeout', async () => {
     FakeSocket.answering = false;
     FakeSocket.all[0].close();
     await vi.advanceTimersByTimeAsync(999);
@@ -128,7 +128,7 @@ describe('Acp reconnect policy', () => {
     expect(FakeSocket.all).toHaveLength(2);
     expect(a.status()).toBe('connecting');
 
-    await vi.advanceTimersByTimeAsync(9999);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(FakeSocket.all[1].closed).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(FakeSocket.all[1].closed).toBe(true);

@@ -45,7 +45,7 @@ type Status = 'offline' | 'connecting' | 'online';
 /** Wait after a lost connection before connecting again. */
 const LOST_MS = 1000;
 /** How long a connection attempt may take. */
-const ATTEMPT_MS = 10_000;
+const ATTEMPT_MS = 60_000;
 /** Time between the starts of two attempts. */
 const RETRY_MS = 2000;
 /** Entries shown from the browser's copy on a reload, and how many more each "Show earlier" adds. */
