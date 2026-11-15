@@ -1,10 +1,11 @@
 //! The request log for stats (ADR 0075).
 
 use anyhow::Result;
+use futures::stream::{BoxStream, StreamExt};
 use rusqlite::{Connection, params};
 
 use super::{SessionId, Store};
-use crate::provider::{LimitWindow, Limits, ModelSpec, Usage};
+use crate::provider::{Event, LimitWindow, Limits, ModelInfo, ModelSpec, Usage};
 
 /// One model request, see `Store::record_request`.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,6 +25,78 @@ pub struct RequestRecord {
 impl Store {
     pub async fn record_request(&self, r: RequestRecord) -> Result<()> {
         self.call(move |c| insert(c, &r)).await
+    }
+
+    /// `events` of one request to `model`, recorded when the stream ends or is
+    /// dropped, if it reported usage.
+    pub(crate) fn recorded(
+        &self,
+        events: BoxStream<'static, Result<Event>>,
+        session_id: Option<SessionId>,
+        model: ModelSpec,
+        info: Option<ModelInfo>,
+    ) -> BoxStream<'static, Result<Event>> {
+        let mut pending = Pending {
+            store: self.clone(),
+            record: RequestRecord {
+                created_at: 0,
+                session_id,
+                model,
+                usage: Usage::default(),
+                cost: 0.0,
+                costs: None,
+                limits: Limits::default(),
+            },
+            info,
+            used: false,
+        };
+        events
+            .inspect(move |event| {
+                // The whole of it, so it drops with the stream.
+                let pending = &mut pending;
+                match event {
+                    // Each report replaces the last.
+                    Ok(Event::Usage(u)) => {
+                        pending.record.usage = *u;
+                        pending.used = true;
+                    }
+                    Ok(Event::Limits(l)) => pending.record.limits = *l,
+                    _ => {}
+                }
+            })
+            .boxed()
+    }
+}
+
+/// A request being recorded; written when dropped with the stream.
+struct Pending {
+    store: Store,
+    record: RequestRecord,
+    info: Option<ModelInfo>,
+    used: bool,
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if !self.used {
+            return;
+        }
+        let mut r = self.record.clone();
+        r.created_at = super::now_ms();
+        if let Some(price) = self.info.as_ref().and_then(|i| i.price_for(&r.usage)) {
+            let costs = price.costs(&r.usage);
+            r.cost = costs.iter().sum();
+            r.costs = Some(costs);
+        }
+        let store = self.store.clone();
+        runtime.spawn(async move {
+            if let Err(e) = store.record_request(r).await {
+                eprintln!("rho: recording a request: {e:#}");
+            }
+        });
     }
 }
 

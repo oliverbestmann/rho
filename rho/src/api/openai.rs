@@ -364,7 +364,7 @@ async fn chat(State(api): State<Arc<super::Api>>, body: Bytes) -> Response {
         model: req.model,
     };
     api.restore_thinking(&mut request).await;
-    let events = provider.stream(request, &|_| {});
+    let events = api.stream(&*provider, &meta.model, request).await;
     if req.stream {
         let usage = req.stream_options.is_some_and(|o| o.include_usage);
         return stream(api, events, meta, usage);

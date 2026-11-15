@@ -10,17 +10,31 @@ use crate::provider::Event;
 /// the body chunks (e.g. `SseParser::feed`).
 pub fn events(
     send: impl Future<Output = Result<reqwest::Response>> + Send + 'static,
-    mut feed: impl FnMut(&[u8]) -> Vec<Result<Event>> + Send + 'static,
+    feed: impl FnMut(&[u8]) -> Vec<Result<Event>> + Send + 'static,
 ) -> BoxStream<'static, Result<Event>> {
+    events_with(send, |_| None, feed)
+}
+
+/// `events`, starting with the event `head` makes of the response headers.
+pub fn events_with(
+    send: impl Future<Output = Result<reqwest::Response>> + Send + 'static,
+    head: impl FnOnce(&reqwest::header::HeaderMap) -> Option<Event> + Send + 'static,
+    feed: impl FnMut(&[u8]) -> Vec<Result<Event>> + Send + 'static,
+) -> BoxStream<'static, Result<Event>> {
+    let mut parts = Some((head, feed));
     stream::once(send)
-        .map_ok(|resp| resp.bytes_stream().map_err(anyhow::Error::from))
-        .try_flatten()
-        .flat_map(move |chunk| {
-            stream::iter(match chunk {
-                Ok(bytes) => feed(&bytes),
-                Err(e) => vec![Err(e)],
-            })
+        .map_ok(move |resp| {
+            let (head, mut feed) = parts.take().expect("one response");
+            let first = head(resp.headers()).map(Ok);
+            let body = resp.bytes_stream().flat_map(move |chunk| {
+                stream::iter(match chunk {
+                    Ok(bytes) => feed(&bytes),
+                    Err(e) => vec![Err(e.into())],
+                })
+            });
+            stream::iter(first).chain(body)
         })
+        .try_flatten()
         .boxed()
 }
 

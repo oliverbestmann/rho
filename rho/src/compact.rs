@@ -213,7 +213,7 @@ impl Agent {
         let warm = session
             .last_request
             .is_some_and(|t| t.elapsed() + CACHE_MARGIN < CACHE_TTL);
-        let (provider, request, label) = match &session.compact_model {
+        let (provider, spec, request, label) = match &session.compact_model {
             Some(cheap) if !warm => {
                 let provider = session.ctx.registry().resolve(cheap)?;
                 let text = format!(
@@ -231,7 +231,12 @@ impl Agent {
                     max_tokens: MAX_SUMMARY_TOKENS,
                     thinking: Thinking::Off,
                 };
-                (provider, request, format!("{cheap}, cache expired"))
+                (
+                    provider,
+                    cheap.clone(),
+                    request,
+                    format!("{cheap}, cache expired"),
+                )
             }
             _ => {
                 // Must match the last run's request prefix to read the cache.
@@ -252,6 +257,7 @@ impl Agent {
                 let state = if warm { "cache warm" } else { "cache expired" };
                 (
                     session.provider.clone(),
+                    session.model.clone(),
                     request,
                     format!("{}, {state}", session.model),
                 )
@@ -259,7 +265,7 @@ impl Agent {
         };
 
         let model = request.model.clone();
-        let mut stream = session.ctx.stream(&*provider, request);
+        let mut stream = session.ctx.stream(&*provider, &spec, request);
         let mut summary = String::new();
         let mut usage = Usage::default();
         let mut truncated = false;

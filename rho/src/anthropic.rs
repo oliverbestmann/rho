@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::AuthStore;
 use crate::provider::{
-    Content, Event, ImageSource, Message, ModelId, ModelInfo, Provider, ProviderName, Request,
-    Role, StopReason, Thinking, ToolCallId, ToolName, ToolSpec, Usage, sse,
+    Content, Event, ImageSource, LimitWindow, Limits, Message, ModelId, ModelInfo, Provider,
+    ProviderName, Request, Role, StopReason, Thinking, ToolCallId, ToolName, ToolSpec, Usage, sse,
 };
 
 /// Claude Code version we claim to be; keep in sync with pi-ai.
@@ -171,7 +171,7 @@ impl Provider for Anthropic {
         before_send(&mut body);
         add_billing(&mut body);
         let mut parser = SseParser::default();
-        sse::events(self.clone().send(body), move |b| parser.feed(b))
+        sse::events_with(self.clone().send(body), limits, move |b| parser.feed(b))
     }
 
     fn models(&self) -> Vec<ModelInfo> {
@@ -192,6 +192,26 @@ impl Provider for Anthropic {
         self.model_info(model)
             .map_or(1_000_000, |m| m.context_window)
     }
+}
+
+/// The subscription's limits from `anthropic-ratelimit-unified-*` headers
+/// (fraction used, reset in Unix seconds).
+fn limits(headers: &reqwest::header::HeaderMap) -> Option<Event> {
+    let window = |name: &str| {
+        let get = |key: &str| -> Option<f64> {
+            let header = format!("anthropic-ratelimit-unified-{name}-{key}");
+            headers.get(header)?.to_str().ok()?.parse().ok()
+        };
+        Some(LimitWindow {
+            utilization: get("utilization")?,
+            resets_at: (get("reset")? * 1000.0) as i64,
+        })
+    };
+    let limits = Limits {
+        five_hour: window("5h"),
+        seven_day: window("7d"),
+    };
+    (limits != Limits::default()).then_some(Event::Limits(limits))
 }
 
 /// Request body of `POST /v1/messages`.
@@ -680,6 +700,30 @@ impl SseParser {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn limits_come_from_unified_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(limits(&headers), None);
+        for (k, v) in [
+            ("anthropic-ratelimit-unified-5h-utilization", "0.26"),
+            ("anthropic-ratelimit-unified-5h-reset", "1775455200"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.19"),
+            // Without its reset the 7 day window is left out.
+        ] {
+            headers.insert(k, v.parse().unwrap());
+        }
+        assert_eq!(
+            limits(&headers),
+            Some(Event::Limits(Limits {
+                five_hour: Some(LimitWindow {
+                    utilization: 0.26,
+                    resets_at: 1_775_455_200_000,
+                }),
+                seven_day: None,
+            }))
+        );
+    }
 
     /// Wire JSON of the body for `request`, with the billing header it gets in `stream`.
     fn wire(request: &Request) -> Value {

@@ -105,6 +105,22 @@ impl Api {
             .as_ref()
     }
 
+    /// Sends `request` to `provider`, the one of `model` (as the client named
+    /// it), recorded in the store.
+    async fn stream(
+        &self,
+        provider: &dyn Provider,
+        model: &str,
+        request: Request,
+    ) -> futures::stream::BoxStream<'static, anyhow::Result<Event>> {
+        let info = provider.model_info(&request.model);
+        let events = provider.stream(request, &|_| {});
+        match (self.store().await, model.parse::<ModelSpec>()) {
+            (Some(store), Ok(spec)) => store.recorded(events, None, spec, info),
+            _ => events,
+        }
+    }
+
     /// Puts saved thinking blocks back into assistant messages with tool
     /// calls that came without them; clients rarely send them. All of them,
     /// so requests keep a stable prefix for the prompt cache. Without saved
@@ -272,6 +288,7 @@ impl Reply {
             Event::Block(c) => self.blocks.push(c),
             Event::Usage(u) => self.usage = u,
             Event::Done(stop) => self.stop = Some(stop),
+            Event::Limits(_) => {}
         }
     }
 }

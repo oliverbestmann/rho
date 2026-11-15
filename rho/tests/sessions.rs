@@ -54,6 +54,65 @@ fn tool_then_answer() -> Vec<Vec<Event>> {
 }
 
 #[tokio::test]
+async fn requests_with_usage_are_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());
+    let mut responses = tool_then_answer();
+    responses[0].insert(
+        0,
+        Event::Limits(rho::provider::Limits {
+            five_hour: None,
+            seven_day: Some(rho::provider::LimitWindow {
+                utilization: 0.25,
+                resets_at: 5000,
+            }),
+        }),
+    );
+    let agent = agent(Scripted::new(responses), &db);
+    let mut session = agent
+        .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
+        .await
+        .unwrap();
+    agent
+        .run(&mut session, vec![Content::text("hi")])
+        .await
+        .unwrap();
+
+    // Written in the background; the answer without usage is not recorded.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let query = "SELECT session_id, provider, model, input_tokens, output_tokens, limit_7d, \
+                 limit_7d_reset FROM requests";
+    for _ in 0..100 {
+        let rows: Vec<(String, String, String, i64, i64, f64, i64)> = conn
+            .prepare(query)
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        if !rows.is_empty() {
+            assert_eq!(
+                rows,
+                [("s".into(), "test".into(), "m".into(), 10, 5, 0.25, 5000)]
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no request recorded");
+}
+
+#[tokio::test]
 async fn sessions_are_saved_and_resumed() {
     let dir = tempfile::tempdir().unwrap();
     let (db, cwd) = (dir.path().join("sessions.db"), dir.path().to_path_buf());

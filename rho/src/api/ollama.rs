@@ -459,7 +459,8 @@ async fn respond(
     }
     let started = Instant::now();
     api.restore_thinking(&mut request).await;
-    let events = provider.stream(request, &|_| {});
+    let name = model.strip_suffix(":latest").unwrap_or(&model);
+    let events = api.stream(&*provider, name, request).await;
     if stream.unwrap_or(true) {
         return ndjson(api, events, model, shape, started);
     }

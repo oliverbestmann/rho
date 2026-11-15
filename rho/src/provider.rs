@@ -475,6 +475,8 @@ pub enum Event {
     /// A complete non-text block (tool call, thinking) to keep in history.
     Block(Content),
     Usage(Usage),
+    /// The subscription's limits, from the response headers.
+    Limits(Limits),
     Done(StopReason),
 }
 

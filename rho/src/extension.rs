@@ -562,19 +562,30 @@ impl Context {
         let _ = self.0.extensions.set(extensions);
     }
 
-    /// Sends `request` to `provider`, with the extensions' `before_send`
-    /// hooks. Every model request goes through here.
+    /// Sends `request` to `provider` (the one of `model`), with the
+    /// extensions' `before_send` hooks, and records it in the store. Every
+    /// model request of a session goes through here.
     pub fn stream(
         &self,
         provider: &dyn Provider,
+        model: &ModelSpec,
         request: Request,
     ) -> futures::stream::BoxStream<'static, Result<Event>> {
         let exts = self.0.extensions.get().map_or(&[][..], Vec::as_slice);
-        provider.stream(request, &|body| {
+        let events = provider.stream(request, &|body| {
             for ext in exts {
                 ext.before_send(self, body);
             }
-        })
+        });
+        match self.store() {
+            Some(store) => store.recorded(
+                events,
+                Some(self.0.session_id.clone()),
+                model.clone(),
+                provider.model_info(model.id()),
+            ),
+            None => events,
+        }
     }
 
     /// The session's model, thinking level, profile and usage right now.
@@ -936,6 +947,7 @@ impl Context {
         let provider = self.0.registry.resolve(model)?;
         let mut stream = self.stream(
             &*provider,
+            model,
             Request {
                 model: model.id().clone(),
                 system: system.into(),

@@ -296,7 +296,7 @@ impl Session {
             crate::provider::json_size(&(&request.system, &request.messages, &request.tools));
         self.requests += 1;
         self.epoch_requests += 1;
-        let mut stream = ctx.stream(&*self.provider, request);
+        let mut stream = ctx.stream(&*self.provider, &self.model, request);
         let mut content: Vec<Content> = Vec::new();
         let mut stop = StopReason::EndTurn;
         let mut usage = Usage::default();
@@ -338,6 +338,7 @@ impl Session {
                     });
                 }
                 Event::Done(reason) => stop = reason,
+                Event::Limits(_) => {}
             }
         }
         Ok((content, stop, usage))
