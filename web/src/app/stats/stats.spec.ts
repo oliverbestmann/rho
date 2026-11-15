@@ -7,6 +7,7 @@ import {
   compareRange,
   dayBounds,
   isoWeek,
+  linePath,
   pace,
   parseMonth,
   weekCosts,
@@ -60,6 +61,11 @@ describe('stats helpers', () => {
     expect(grid.flat().reduce((a, b) => a + b)).toBe(5);
   });
 
+  it('draws lines across hours without samples', () => {
+    expect(linePath([null, 0.5, null, 1], 5)).toBe('M250.0 100.0L750.0 0.0');
+    expect(linePath([null, null], 5)).toBe('');
+  });
+
   it('projects a window to its reset', () => {
     const resetsAt = 7 * 24 * HOUR;
     // A day in at 10%: 70% at reset.
@@ -108,7 +114,7 @@ describe('Stats', () => {
           sevenDay: {
             peak: 0.95,
             highMs: 2 * HOUR,
-            hourly: [0.1, null, 0.95],
+            hourly: [null, 0.1, null, 0.95],
             latest: { at: 0, utilization: 0.95, resetsAt: 0 },
           },
         },
@@ -147,6 +153,8 @@ describe('Stats', () => {
     expect(text).toContain('7 d at 90%+ for 2 h 0 min');
     expect(text).toContain('claude-x');
     expect(text).toContain('Cache hit');
+    expect(text).toContain('Limits, hourly');
+    expect(text).toContain('recorded since');
     expect(text).toContain('Projectsrho900 requests');
     expect(text).not.toContain('/home/me');
     expect(text).toContain('No session');

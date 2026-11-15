@@ -18,6 +18,7 @@ import {
   pace,
   parseMonth,
   type Latest,
+  type Series,
 } from './charts';
 
 interface Totals {
@@ -105,6 +106,12 @@ const percent = new Intl.NumberFormat(undefined, { style: 'percent' });
 const signed = new Intl.NumberFormat(undefined, { style: 'percent', signDisplay: 'exceptZero' });
 const hours = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const date = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+const sinceFormat = new Intl.DateTimeFormat(undefined, {
+  day: 'numeric',
+  month: 'short',
+  hour: 'numeric',
+  minute: '2-digit',
+});
 const dateTime = new Intl.DateTimeFormat(undefined, {
   weekday: 'short',
   hour: 'numeric',
@@ -212,11 +219,16 @@ const duration = (ms: number) => {
                 <span class="chip">{{ c }}</span>
               }
             </div>
-            @if (p.sevenDay; as w) {
-              <h3>7 d limit, hourly</h3>
-              <app-line-chart [values]="w.hourly" [slots]="slots()" />
+            @if (limits(p); as l) {
+              <h3>
+                Limits, hourly
+                @if (l.since) {
+                  · recorded since {{ l.since }}
+                }
+              </h3>
+              <app-line-chart [series]="l.series" [days]="days()" />
             }
-            <h3>Cost per day</h3>
+            <h3>Cost per day · up to {{ money.format(max(p.days)) }}</h3>
             <app-bar-chart [values]="p.days" [days]="days()" />
           </section>
         } @empty {
@@ -405,10 +417,6 @@ export class Stats {
 
   private readonly parsed = computed(() => parseMonth(this.month()));
   protected readonly days = computed(() => dayBounds(this.parsed()));
-  protected readonly slots = computed(() => {
-    const d = this.days();
-    return Math.round((d[d.length - 1] - d[0]) / HOUR);
-  });
   protected readonly current = computed(() => this.days()[this.days().length - 1] > Date.now());
   protected readonly title = computed(() =>
     new Date(this.days()[0]).toLocaleDateString(undefined, { month: 'long', year: 'numeric' }),
@@ -479,6 +487,22 @@ export class Stats {
       },
     ];
   });
+
+  protected readonly max = (values: number[]) => Math.max(0, ...values);
+
+  /** The limit series of a provider, and when its first sample came if after the 1st. */
+  protected limits(p: ProviderStats): { series: Series[]; since: string | null } | null {
+    const windows = [
+      { label: '5 h', w: p.fiveHour },
+      { label: '7 d', w: p.sevenDay },
+    ].filter((x) => x.w);
+    if (!windows.length) return null;
+    const first = Math.min(...windows.map((x) => x.w!.hourly.findIndex((v) => v !== null)));
+    return {
+      series: windows.map((x) => ({ label: x.label, values: x.w!.hourly })),
+      since: first > 0 ? sinceFormat.format(this.days()[0] + first * HOUR) : null,
+    };
+  }
 
   protected chips(p: ProviderStats): string[] {
     const out: string[] = [];

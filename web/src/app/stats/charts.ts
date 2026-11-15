@@ -2,6 +2,19 @@ import { Component, computed, input } from '@angular/core';
 
 export const HOUR = 3_600_000;
 const W = 1000;
+/** Styles of the day labels under a chart. */
+const AXIS = `
+  .axis {
+    position: relative;
+    height: 16px;
+    font: var(--mat-sys-label-small);
+    color: var(--mat-sys-on-surface-variant);
+  }
+  .axis span {
+    position: absolute;
+    transform: translateX(-50%);
+  }
+`;
 const H = 200;
 
 /** A month as year and zero-based month, like `Date`. */
@@ -75,20 +88,68 @@ export function pace(
   return { projected, full: projected >= 1 ? start + 1 / rate : null };
 }
 
-/** Hourly utilization (0..1) over `slots` hours, with gaps for null and a 90% line. */
+/** An SVG path through the non-null values over `slots` steps, bridging gaps. */
+export function linePath(values: (number | null)[], slots: number): string {
+  const step = W / Math.max(slots - 1, 1);
+  let d = '';
+  values.forEach((v, i) => {
+    if (v === null) return;
+    const y = H - Math.min(v, 1) * H;
+    d += `${d ? 'L' : 'M'}${(i * step).toFixed(1)} ${y.toFixed(1)}`;
+  });
+  return d;
+}
+
+/** Labels for every 7th day, at `x` percent of the width. */
+function dayTicks(days: number[], center: boolean): { x: number; label: number }[] {
+  const n = days.length - 1;
+  return Array.from({ length: Math.ceil(n / 7) }, (_, k) => ({
+    x: ((k * 7 + (center ? 0.5 : 0)) / n) * 100,
+    label: k * 7 + 1,
+  }));
+}
+
+/** A series of a line chart, hourly from the first day on. */
+export interface Series {
+  label: string;
+  values: (number | null)[];
+}
+
+/** Hourly utilization (0..1) of up to two series over the month, with a 90% line. */
 @Component({
   selector: 'app-line-chart',
   template: `
-    <svg [attr.viewBox]="'0 0 ' + W + ' ' + H" preserveAspectRatio="none" role="img">
-      <line class="limit" x1="0" [attr.x2]="W" [attr.y1]="H * 0.1" [attr.y2]="H * 0.1" />
-      <path [attr.d]="path()" />
-    </svg>
+    <div class="plot">
+      <svg [attr.viewBox]="'0 0 ' + W + ' ' + H" preserveAspectRatio="none" role="img">
+        <line class="limit" x1="0" [attr.x2]="W" [attr.y1]="H * 0.1" [attr.y2]="H * 0.1" />
+        @for (p of paths(); track $index) {
+          <path [attr.d]="p" [class.second]="$index > 0" />
+        }
+      </svg>
+      <span class="y top">100%</span>
+      <span class="y bottom">0%</span>
+    </div>
+    <div class="axis">
+      @for (t of ticks(); track t.label) {
+        <span [style.left.%]="t.x">{{ t.label }}</span>
+      }
+    </div>
+    <div class="legend">
+      @for (s of series(); track s.label) {
+        <span [class.second]="$index > 0">{{ s.label }}</span>
+      }
+    </div>
   `,
-  styles: `
+  styles:
+    `
+    .plot {
+      position: relative;
+    }
     svg {
       display: block;
       width: 100%;
       height: 96px;
+      border-bottom: 1px solid var(--mat-sys-outline-variant);
     }
     path,
     line {
@@ -98,34 +159,63 @@ export function pace(
     path {
       stroke: var(--mat-sys-primary);
       stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    path.second {
+      stroke: var(--mat-sys-tertiary);
     }
     .limit {
       stroke: var(--mat-sys-error);
       stroke-dasharray: 4 4;
     }
-  `,
+    .y {
+      position: absolute;
+      right: 0;
+      font: var(--mat-sys-label-small);
+      color: var(--mat-sys-on-surface-variant);
+    }
+    .top {
+      top: -14px;
+    }
+    .bottom {
+      bottom: 2px;
+    }
+    .legend {
+      display: flex;
+      gap: 12px;
+      font: var(--mat-sys-label-small);
+      color: var(--mat-sys-on-surface-variant);
+    }
+    .legend span::before {
+      content: '';
+      display: inline-block;
+      width: 12px;
+      height: 3px;
+      margin-right: 4px;
+      vertical-align: middle;
+      background: var(--mat-sys-primary);
+    }
+    .legend span.second::before {
+      background: var(--mat-sys-tertiary);
+    }
+  ` + AXIS,
 })
 export class LineChart {
-  readonly values = input.required<(number | null)[]>();
-  readonly slots = input.required<number>();
+  readonly series = input.required<Series[]>();
+  /** The n+1 day bounds. */
+  readonly days = input.required<number[]>();
   protected readonly W = W;
   protected readonly H = H;
 
-  protected readonly path = computed(() => {
-    const step = W / Math.max(this.slots() - 1, 1);
-    let d = '';
-    let pen = false;
-    this.values().forEach((v, i) => {
-      if (v === null) {
-        pen = false;
-        return;
-      }
-      const y = H - Math.min(v, 1) * H;
-      d += `${pen ? 'L' : 'M'}${(i * step).toFixed(1)} ${y.toFixed(1)}`;
-      pen = true;
-    });
-    return d;
+  private readonly slots = computed(() => {
+    const d = this.days();
+    return Math.round((d[d.length - 1] - d[0]) / HOUR);
   });
+  protected readonly paths = computed(() =>
+    this.series().map((s) => linePath(s.values, this.slots())),
+  );
+  protected readonly ticks = computed(() => dayTicks(this.days(), false));
 }
 
 /** One bar per day, weekends shaded. `days` are the n+1 day bounds. */
@@ -146,8 +236,14 @@ export class LineChart {
         />
       }
     </svg>
+    <div class="axis">
+      @for (t of ticks(); track t.label) {
+        <span [style.left.%]="t.x">{{ t.label }}</span>
+      }
+    </div>
   `,
-  styles: `
+  styles:
+    `
     svg {
       display: block;
       width: 100%;
@@ -159,7 +255,7 @@ export class LineChart {
     .bar {
       fill: var(--mat-sys-tertiary);
     }
-  `,
+  ` + AXIS,
 })
 export class BarChart {
   readonly values = input.required<number[]>();
@@ -176,6 +272,7 @@ export class BarChart {
       return { x: i * w, w, h: (v / max) * H, weekend: day === 0 || day === 6 };
     });
   });
+  protected readonly ticks = computed(() => dayTicks(this.days(), true));
 }
 
 /** A cell color from 0 (none) to 1 (the most). */
