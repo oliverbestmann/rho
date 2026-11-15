@@ -232,16 +232,16 @@ const cents = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'U
   template: `
     <div class="grid">
       <span></span>
+      @for (n of names; track n) {
+        <span class="day">{{ n }}</span>
+      }
       @for (h of hours; track h) {
         <span class="hour">{{ h % 3 === 0 ? (h < 10 ? '0' + h : h) : '' }}</span>
-      }
-      @for (row of grid(); track $index; let d = $index) {
-        <span class="day">{{ names[d] }}</span>
-        @for (v of row; track $index) {
+        @for (row of grid(); track $index; let d = $index) {
           <span
             class="cell"
-            [style.background]="shade(v / max())"
-            [title]="names[d] + ' ' + $index + ':00 · ' + cents.format(v)"
+            [style.background]="shade(row[h] / max())"
+            [title]="names[d] + ' ' + h + ':00 · ' + cents.format(row[h])"
           ></span>
         }
       }
@@ -250,19 +250,20 @@ const cents = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'U
   styles: `
     .grid {
       display: grid;
-      grid-template-columns: auto repeat(24, 1fr);
+      grid-template-columns: auto repeat(7, 1fr);
       gap: 2px;
       font: var(--mat-sys-label-small);
       color: var(--mat-sys-on-surface-variant);
     }
     .day {
-      padding-right: 6px;
+      text-align: center;
     }
     .hour {
-      white-space: nowrap;
+      padding-right: 6px;
+      line-height: 14px;
     }
     .cell {
-      aspect-ratio: 1;
+      height: 14px;
       border-radius: 3px;
     }
   `,
