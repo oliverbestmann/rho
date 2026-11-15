@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="glowTL" cx="0" cy="0" r="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6a2ae8" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#6a2ae8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowBR" cx="256" cy="256" r="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5a14e6" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#5a14e6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="stem" x1="620" y1="340" x2="340" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e262ff"/>
+      <stop offset="0.5" stop-color="#6e08f8"/>
+      <stop offset="1" stop-color="#3a00b4"/>
+    </linearGradient>
+    <linearGradient id="bowl" x1="780" y1="380" x2="840" y2="750" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5800ff"/>
+      <stop offset="0.5" stop-color="#a548ff"/>
+      <stop offset="1" stop-color="#f0b4ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="#07040f"/>
+  <rect width="256" height="256" rx="56" fill="url(#glowTL)"/>
+  <rect width="256" height="256" rx="56" fill="url(#glowBR)"/>
+
+  <!-- rho in the original trace coordinates, scaled and centered like in the source image -->
+  <g transform="translate(128 128) scale(0.27205) translate(-627.5 -633.5)">
+    <path fill="url(#stem)" d="M317 972C350 840 385 700 410 610C460 440 600 345 800 340C735 345 680 375 652 418C628 455 612 500 600 560L572 745C555 840 470 920 317 972Z"/>
+    <path fill="url(#bowl)" d="M800 340C905 345 965 420 965 520C965 660 855 760 715 760L575 760C700 725 815 630 815 520C815 450 770 410 712 410C690 410 668 412 652 418C680 375 735 345 800 340Z"/>
+  </g>
+</svg>
