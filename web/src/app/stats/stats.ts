@@ -7,7 +7,9 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, errorText } from '../acp';
 import {
   BarChart,
+  Calendar,
   HOUR,
+  Heatmap,
   LineChart,
   change,
   compareRange,
@@ -58,7 +60,27 @@ interface ProjectStats {
   path: string | null;
   requests: number;
   cost: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  inputCost: number;
+  outputCost: number;
+  cacheReadCost: number;
+  cacheWriteCost: number;
 }
+
+/** Tokens and cost per usage type of a project. */
+export const usageTypes = (p: ProjectStats) => [
+  { label: 'Input', tokens: p.inputTokens, cost: p.inputCost },
+  { label: 'Cache write', tokens: p.cacheWriteTokens, cost: p.cacheWriteCost },
+  { label: 'Cache read', tokens: p.cacheReadTokens, cost: p.cacheReadCost },
+  { label: 'Output', tokens: p.outputTokens, cost: p.outputCost },
+];
+
+/** Cost of requests without a known price per token type. */
+export const unpriced = (p: ProjectStats) =>
+  p.cost - usageTypes(p).reduce((sum, t) => sum + t.cost, 0);
 
 /** The last segment of a path. */
 export const projectName = (path: string) => path.replace(/\/+$/, '').split('/').pop() || path;
@@ -69,6 +91,8 @@ export interface StatsResponse {
   previous: Totals;
   providers: ProviderStats[];
   models: ModelStats[];
+  /** Cost per hour from the first day on. */
+  hourly: number[];
   projects: ProjectStats[];
   first: number | null;
   estimatedUntil: number | null;
@@ -106,6 +130,8 @@ const duration = (ms: number) => {
     MatProgressBarModule,
     MatToolbarModule,
     BarChart,
+    Calendar,
+    Heatmap,
     LineChart,
   ],
   template: `
@@ -160,6 +186,19 @@ const duration = (ms: number) => {
           }
         </section>
 
+        <div class="pair">
+          <section class="account">
+            <h2>When you work</h2>
+            <span class="sub">Cost per weekday and local hour</span>
+            <app-heatmap [hourly]="s.hourly" [start]="days()[0]" />
+          </section>
+          <section class="account">
+            <h2>Calendar</h2>
+            <span class="sub">Cost per day of the month</span>
+            <app-calendar [days]="days()" [costs]="dailyCost()" />
+          </section>
+        </div>
+
         @for (p of s.providers; track p.provider) {
           <section class="account">
             <h2>
@@ -187,22 +226,26 @@ const duration = (ms: number) => {
         @if (s.projects.length) {
           <section class="account">
             <h2>Projects</h2>
-            <table>
-              <tr>
-                <th>Project</th>
-                <th>Requests</th>
-                <th>Cost</th>
-              </tr>
-              @for (p of s.projects; track p.path) {
-                <tr>
-                  <td [title]="p.path ?? ''">
-                    {{ p.path ? projectName(p.path) : 'No session' }}
-                  </td>
-                  <td>{{ count.format(p.requests) }}</td>
-                  <td>{{ money.format(p.cost) }}</td>
-                </tr>
-              }
-            </table>
+            @for (p of s.projects; track p.path) {
+              <div class="project">
+                <div class="head">
+                  <b [title]="p.path ?? ''">{{ p.path ? projectName(p.path) : 'No session' }}</b>
+                  <span class="sub">{{ count.format(p.requests) }} requests</span>
+                  <b>{{ money.format(p.cost) }}</b>
+                </div>
+                <div class="types">
+                  @for (t of usageTypes(p); track t.label) {
+                    <div>
+                      <span class="sub">{{ t.label }}</span>
+                      <span>{{ compact.format(t.tokens) }} · {{ money.format(t.cost) }}</span>
+                    </div>
+                  }
+                </div>
+                @if (unpriced(p) > 0.005) {
+                  <span class="sub">{{ money.format(unpriced(p)) }} without a breakdown</span>
+                }
+              </div>
+            }
           </section>
         }
 
@@ -294,6 +337,37 @@ const duration = (ms: number) => {
       color: var(--mat-sys-on-secondary-container);
       font: var(--mat-sys-label-medium);
     }
+    .pair {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr));
+      gap: 0 16px;
+    }
+    .project {
+      padding: 8px 0;
+      border-top: 1px solid var(--mat-sys-outline-variant);
+    }
+    .project:first-of-type {
+      border-top: none;
+    }
+    .head {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .head .sub {
+      flex: 1;
+    }
+    .types {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 4px 12px;
+      margin-top: 4px;
+      font: var(--mat-sys-body-medium);
+    }
+    .types div {
+      display: flex;
+      flex-direction: column;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -321,6 +395,8 @@ export class Stats {
   protected readonly count = count;
   protected readonly compact = compact;
   protected readonly projectName = projectName;
+  protected readonly usageTypes = usageTypes;
+  protected readonly unpriced = unpriced;
   protected readonly zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   protected readonly today = date.format(new Date());
 
@@ -360,6 +436,13 @@ export class Stats {
       });
     },
   });
+
+  /** Cost per day over all providers. */
+  protected readonly dailyCost = computed(() =>
+    this.days()
+      .slice(1)
+      .map((_, i) => (this.stats.value()?.providers ?? []).reduce((sum, p) => sum + p.days[i], 0)),
+  );
 
   protected readonly estimated = computed(() => {
     const until = this.stats.value()?.estimatedUntil;

@@ -177,3 +177,206 @@ export class BarChart {
     });
   });
 }
+
+/** A cell color from 0 (none) to 1 (the most). */
+export const shade = (v: number) =>
+  v > 0
+    ? `color-mix(in oklch, var(--mat-sys-primary) ${Math.round(15 + v * 70)}%, var(--mat-sys-surface-container-high))`
+    : 'var(--mat-sys-surface-container-high)';
+
+/** Monday-first weekday, 0..6. */
+const weekday = (d: Date) => (d.getDay() + 6) % 7;
+
+/** Cost per local weekday (Monday first) and hour, from hourly costs since `start`. */
+export function weekHours(hourly: number[], start: number): number[][] {
+  const grid = Array.from({ length: 7 }, () => Array<number>(24).fill(0));
+  hourly.forEach((cost, i) => {
+    const d = new Date(start + i * HOUR);
+    grid[weekday(d)][d.getHours()] += cost;
+  });
+  return grid;
+}
+
+/** ISO 8601 week, like `2026-W44`. */
+export function isoWeek(at: number): string {
+  const d = new Date(at);
+  // The Thursday of the same week decides the year.
+  const thursday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - weekday(d) + 3);
+  const jan1 = new Date(thursday.getFullYear(), 0, 1);
+  const week = Math.floor(Math.round((thursday.getTime() - jan1.getTime()) / 86_400_000) / 7) + 1;
+  return `${thursday.getFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+/** Cost per ISO week of the given days, in order. */
+export function weekCosts(days: number[], costs: number[]): { week: string; cost: number }[] {
+  const out: { week: string; cost: number }[] = [];
+  costs.forEach((cost, i) => {
+    const week = isoWeek(days[i]);
+    const last = out[out.length - 1];
+    if (last?.week === week) last.cost += cost;
+    else out.push({ week, cost });
+  });
+  return out;
+}
+
+const whole = new Intl.NumberFormat(undefined, {
+  style: 'currency',
+  currency: 'USD',
+  maximumFractionDigits: 0,
+});
+const cents = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
+
+/** Cost per weekday and local hour. */
+@Component({
+  selector: 'app-heatmap',
+  template: `
+    <div class="grid">
+      <span></span>
+      @for (h of hours; track h) {
+        <span class="hour">{{ h % 3 === 0 ? (h < 10 ? '0' + h : h) : '' }}</span>
+      }
+      @for (row of grid(); track $index; let d = $index) {
+        <span class="day">{{ names[d] }}</span>
+        @for (v of row; track $index) {
+          <span
+            class="cell"
+            [style.background]="shade(v / max())"
+            [title]="names[d] + ' ' + $index + ':00 · ' + cents.format(v)"
+          ></span>
+        }
+      }
+    </div>
+  `,
+  styles: `
+    .grid {
+      display: grid;
+      grid-template-columns: auto repeat(24, 1fr);
+      gap: 2px;
+      font: var(--mat-sys-label-small);
+      color: var(--mat-sys-on-surface-variant);
+    }
+    .day {
+      padding-right: 6px;
+    }
+    .hour {
+      white-space: nowrap;
+    }
+    .cell {
+      aspect-ratio: 1;
+      border-radius: 3px;
+    }
+  `,
+})
+export class Heatmap {
+  /** Cost per hour from `start`. */
+  readonly hourly = input.required<number[]>();
+  readonly start = input.required<number>();
+  protected readonly hours = Array.from({ length: 24 }, (_, i) => i);
+  protected readonly names = Array.from({ length: 7 }, (_, i) =>
+    new Date(2024, 0, 1 + i).toLocaleDateString(undefined, { weekday: 'short' }),
+  );
+  protected readonly shade = shade;
+  protected readonly cents = cents;
+  protected readonly grid = computed(() => weekHours(this.hourly(), this.start()));
+  protected readonly max = computed(() => Math.max(...this.grid().flat()) || 1);
+}
+
+/** Cost per day as a month calendar, and per ISO week. `days` are the n+1 day bounds. */
+@Component({
+  selector: 'app-calendar',
+  template: `
+    <div class="month">
+      @for (n of names; track n) {
+        <span class="name">{{ n }}</span>
+      }
+      @for (b of blanks(); track b) {
+        <span></span>
+      }
+      @for (c of costs(); track $index) {
+        <span class="day" [style.background]="shade(c / max())" [class.strong]="c / max() > 0.5">
+          <b>{{ $index + 1 }}</b>
+          @if (c > 0) {
+            <small>{{ whole.format(c) }}</small>
+          }
+        </span>
+      }
+    </div>
+    <h4>Per ISO week</h4>
+    @for (w of weeks(); track w.week) {
+      <div class="week">
+        <span>{{ w.week }}</span>
+        <span class="track"><span [style.width.%]="(w.cost / weekMax()) * 100"></span></span>
+        <b>{{ whole.format(w.cost) }}</b>
+      </div>
+    }
+  `,
+  styles: `
+    .month {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+    }
+    .name {
+      text-align: center;
+      font: var(--mat-sys-label-small);
+      color: var(--mat-sys-on-surface-variant);
+    }
+    .day {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 44px;
+      padding: 4px 6px;
+      border-radius: var(--mat-sys-corner-small);
+      font: var(--mat-sys-label-medium);
+      overflow: hidden;
+    }
+    .day.strong {
+      color: var(--mat-sys-on-primary);
+    }
+    small {
+      font: var(--mat-sys-label-small);
+    }
+    h4 {
+      margin: 16px 0 4px;
+      font: var(--mat-sys-label-medium);
+      color: var(--mat-sys-on-surface-variant);
+      text-transform: uppercase;
+    }
+    .week {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 12px;
+      padding: 2px 0;
+      font: var(--mat-sys-body-medium);
+    }
+    .track {
+      height: 10px;
+      border-radius: 5px;
+      background: var(--mat-sys-surface-container-high);
+      overflow: hidden;
+    }
+    .track span {
+      display: block;
+      height: 100%;
+      background: var(--mat-sys-outline);
+    }
+  `,
+})
+export class Calendar {
+  readonly days = input.required<number[]>();
+  /** Cost per day. */
+  readonly costs = input.required<number[]>();
+  protected readonly names = Array.from({ length: 7 }, (_, i) =>
+    new Date(2024, 0, 1 + i).toLocaleDateString(undefined, { weekday: 'short' }),
+  );
+  protected readonly shade = shade;
+  protected readonly whole = whole;
+  protected readonly blanks = computed(() =>
+    Array.from({ length: weekday(new Date(this.days()[0])) }, (_, i) => i),
+  );
+  protected readonly max = computed(() => Math.max(...this.costs()) || 1);
+  protected readonly weeks = computed(() => weekCosts(this.days(), this.costs()));
+  protected readonly weekMax = computed(() => Math.max(...this.weeks().map((w) => w.cost)) || 1);
+}

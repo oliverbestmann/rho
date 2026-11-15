@@ -180,6 +180,19 @@ fn parse_turn(title: &str) -> Option<Turn> {
 /// Fills `requests` with one estimated row per turn note, for the time
 /// before requests were logged. Forked sessions copy notes, so equal notes
 /// count once. The model is the session's current one.
+/// Splits the cost of estimated Anthropic rows into per-type costs by the
+/// price ratios all Claude models share (5 minute cache writes).
+pub(super) const SPLIT_ESTIMATED_COSTS: &str = "
+UPDATE requests SET
+    input_cost = cost * input_tokens / w,
+    output_cost = cost * output_tokens * 5.0 / w,
+    cache_read_cost = cost * cache_read_tokens * 0.1 / w,
+    cache_write_cost = cost * cache_write_tokens * 1.25 / w
+FROM (SELECT id AS wid, input_tokens + output_tokens * 5.0 + cache_read_tokens * 0.1
+          + cache_write_tokens * 1.25 AS w FROM requests)
+WHERE id = wid AND w > 0 AND estimated AND provider = 'anthropic' AND input_cost IS NULL;
+";
+
 pub(super) fn backfill(c: &Connection) -> Result<()> {
     let mut select = c.prepare(
         "SELECT MIN(i.session_id), i.created_at, json_extract(i.block, '$.title'), s.model \
@@ -215,6 +228,7 @@ pub(super) fn backfill(c: &Connection) -> Result<()> {
             turn.cost,
         ])?;
     }
+    c.execute_batch(SPLIT_ESTIMATED_COSTS)?;
     Ok(())
 }
 
@@ -339,7 +353,8 @@ mod tests {
                                 r.get::<_, i64>(7)?,
                                 r.get::<_, i64>(8)?,
                                 r.get::<_, f64>(9)?,
-                                r.get::<_, Option<f64>>(10)?,
+                                r.get::<_, Option<f64>>(10)?
+                                    .map(|c| (c * 100.0).round() / 100.0),
                                 r.get::<_, Option<f64>>(11)?,
                                 r.get::<_, Option<i64>>(12)?,
                             )
@@ -353,7 +368,7 @@ mod tests {
         assert_eq!(
             rows,
             [
-                r#"(1000, Some("a"), "anthropic", "claude-x", 2, 1) (40, 50, 10, 0.5, None, None, None)"#,
+                r#"(1000, Some("a"), "anthropic", "claude-x", 2, 1) (40, 50, 10, 0.5, Some(0.15), None, None)"#,
                 r#"(3000, None, "anthropic", "claude-y", 1, 0) (1, 3, 4, 0.25, Some(0.1), Some(0.5), Some(9000))"#,
             ]
         );

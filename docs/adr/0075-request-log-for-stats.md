@@ -21,8 +21,10 @@ per session, without dates, and rho threw the limit headers away.
 - The migration fills the table once from the `Turn: ...` notes saved in
   `items` (from 2026-10-20 on), one row per turn with `estimated = 1` and
   `requests` the turn's count. These rows have the session's current model,
-  the cached tokens rounded from a percentage, and no per-type costs or
-  limits. Requests outside turns (compaction, titles) are missing from them.
+  the cached tokens rounded from a percentage, and no limits. For
+  Anthropic, the turn's cost is split into per-type costs by the price
+  ratios all Claude models share (input 1, output 5, cache read 0.1, cache
+  write 1.25); other providers get no per-type costs. Requests outside turns (compaction, titles) are missing from them.
 - `_rho/stats` returns the report for one month. The client sends the
   local day bounds, so days follow its time zone, DST included.
 - An account is a provider name.

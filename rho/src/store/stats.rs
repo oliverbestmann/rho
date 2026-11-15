@@ -21,6 +21,8 @@ pub struct Stats {
     pub previous: Totals,
     pub providers: Vec<ProviderStats>,
     pub models: Vec<ModelStats>,
+    /// Cost per hour from the first day on.
+    pub hourly: Vec<f64>,
     /// The working directories with the highest cost, at most ten.
     pub projects: Vec<ProjectStats>,
     /// The first request ever recorded, Unix milliseconds.
@@ -93,6 +95,15 @@ pub struct ProjectStats {
     pub path: Option<String>,
     pub requests: i64,
     pub cost: f64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    /// Per token type; requests of models without a known price add nothing.
+    pub input_cost: f64,
+    pub output_cost: f64,
+    pub cache_read_cost: f64,
+    pub cache_write_cost: f64,
 }
 
 impl Store {
@@ -161,6 +172,7 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
     // Running months end now, not at the end of the last day.
     let now = super::now_ms();
     let mut providers: BTreeMap<String, (ProviderStats, Window, Window)> = BTreeMap::new();
+    let mut hourly = vec![0.0; usize::try_from((to - from + HOUR_MS - 1) / HOUR_MS).unwrap_or(0)];
     let mut select = c.prepare(
         "SELECT created_at, provider, requests, cost, limit_5h, limit_5h_reset, limit_7d, \
          limit_7d_reset FROM requests WHERE created_at >= ?1 AND created_at < ?2 \
@@ -183,6 +195,7 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
         p.cost += cost;
         let day = days.partition_point(|&d| d <= at) - 1;
         p.days[day] += cost;
+        hourly[((at - from) / HOUR_MS) as usize] += cost;
         for (window, col) in [(five, 4), (seven, 6)] {
             if let (Some(utilization), Some(resets_at)) = (r.get(col)?, r.get(col + 1)?) {
                 window.0.push(Sample {
@@ -220,7 +233,10 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut select = c.prepare(
-        "SELECT s.cwd, SUM(r.requests), SUM(r.cost) FROM requests r \
+        "SELECT s.cwd, SUM(r.requests), SUM(r.cost), SUM(r.input_tokens), \
+         SUM(r.output_tokens), SUM(r.cache_read_tokens), SUM(r.cache_write_tokens), \
+         TOTAL(r.input_cost), TOTAL(r.output_cost), TOTAL(r.cache_read_cost), \
+         TOTAL(r.cache_write_cost) FROM requests r \
          LEFT JOIN sessions s ON s.id = r.session_id \
          WHERE r.created_at >= ?1 AND r.created_at < ?2 GROUP BY s.cwd \
          ORDER BY SUM(r.cost) DESC, SUM(r.requests) DESC LIMIT 10",
@@ -231,6 +247,14 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
                 path: r.get(0)?,
                 requests: r.get(1)?,
                 cost: r.get(2)?,
+                input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                cache_read_tokens: r.get(5)?,
+                cache_write_tokens: r.get(6)?,
+                input_cost: r.get(7)?,
+                output_cost: r.get(8)?,
+                cache_read_cost: r.get(9)?,
+                cache_write_cost: r.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -245,6 +269,7 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
         previous: totals(c, compare.0, compare.1)?,
         providers,
         models,
+        hourly,
         projects,
         first,
         estimated_until,
@@ -298,6 +323,7 @@ mod tests {
         let h = HOUR_MS;
         let in_session = RequestRecord {
             session_id: Some(crate::store::SessionId::from_static("s")),
+            costs: Some([0.1, 0.6, 0.2, 0.1]),
             ..record(h, "a/x", 1.0, Some((0.5, 100 * h)))
         };
         for r in [
@@ -343,6 +369,11 @@ mod tests {
             .map(|p| (p.path.as_deref(), p.cost))
             .collect();
         assert_eq!(projects, [(None, 6.5), (Some("/w/rho"), 1.0)]);
+        let rho = &stats.projects[1];
+        assert_eq!((rho.output_tokens, rho.output_cost), (10, 0.6));
+        assert_eq!(stats.projects[0].input_cost, 0.0);
+        assert_eq!(stats.hourly.len(), 48);
+        assert_eq!(stats.hourly[..3], [0.0, 1.0, 2.5]);
         assert!(store.stats(vec![1, 0], (0, 0)).await.is_err());
     }
 }

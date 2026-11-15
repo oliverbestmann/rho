@@ -213,6 +213,7 @@ CREATE TABLE requests (
 
 CREATE INDEX requests_by_time ON requests (created_at);
 "#,
+    requests::SPLIT_ESTIMATED_COSTS,
 ];
 
 /// The migration that adds `requests`; it is filled from turn notes once.

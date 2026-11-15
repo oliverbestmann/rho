@@ -2,7 +2,16 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { Acp } from '../acp';
-import { HOUR, compareRange, dayBounds, pace, parseMonth } from './charts';
+import {
+  HOUR,
+  compareRange,
+  dayBounds,
+  isoWeek,
+  pace,
+  parseMonth,
+  weekCosts,
+  weekHours,
+} from './charts';
 import { Stats, type StatsResponse } from './stats';
 
 describe('stats helpers', () => {
@@ -32,6 +41,25 @@ describe('stats helpers', () => {
     ]);
   });
 
+  it('groups costs by ISO week and by weekday and hour', () => {
+    expect(isoWeek(new Date(2026, 10, 1).getTime())).toBe('2026-W44');
+    expect(isoWeek(new Date(2027, 0, 1).getTime())).toBe('2026-W53');
+    expect(isoWeek(new Date(2026, 0, 1).getTime())).toBe('2026-W01');
+    const days = dayBounds({ year: 2026, month: 10 });
+    const weeks = weekCosts(
+      days,
+      days.slice(1).map(() => 1),
+    );
+    expect(weeks[0]).toEqual({ week: '2026-W44', cost: 1 });
+    expect(weeks[1]).toEqual({ week: '2026-W45', cost: 7 });
+    // 2026-11-01 is a Sunday; its 10:00 is the 11th hour.
+    const hourly = Array(24).fill(0);
+    hourly[10] = 5;
+    const grid = weekHours(hourly, days[0]);
+    expect(grid[6][10]).toBe(5);
+    expect(grid.flat().reduce((a, b) => a + b)).toBe(5);
+  });
+
   it('projects a window to its reset', () => {
     const resetsAt = 7 * 24 * HOUR;
     // A day in at 10%: 70% at reset.
@@ -57,6 +85,16 @@ describe('Stats', () => {
       cacheReadTokens: 800,
       cacheWriteTokens: 100,
     };
+    const usage = {
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3_000_000,
+      cacheWriteTokens: 4,
+      inputCost: 0,
+      outputCost: 0,
+      cacheReadCost: 0,
+      cacheWriteCost: 0,
+    };
     const response: StatsResponse = {
       totals,
       previous: { ...totals, cost: 100 },
@@ -65,7 +103,7 @@ describe('Stats', () => {
           provider: 'anthropic',
           cost: 120,
           requests: 1000,
-          days: [100, 20],
+          days: [100, 20, ...Array(26).fill(0)],
           fiveHour: null,
           sevenDay: {
             peak: 0.95,
@@ -85,9 +123,10 @@ describe('Stats', () => {
         },
       ],
       projects: [
-        { path: '/home/me/src/rho/', requests: 900, cost: 100 },
-        { path: null, requests: 100, cost: 20 },
+        { ...usage, path: '/home/me/src/rho/', requests: 900, cost: 100, cacheReadCost: 12.5 },
+        { ...usage, path: null, requests: 100, cost: 20 },
       ],
+      hourly: [1, 2, 3],
       first: 0,
       estimatedUntil: null,
     };
@@ -108,8 +147,12 @@ describe('Stats', () => {
     expect(text).toContain('7 d at 90%+ for 2 h 0 min');
     expect(text).toContain('claude-x');
     expect(text).toContain('Cache hit');
-    expect(text).toContain(' rho ');
+    expect(text).toContain('Projectsrho900 requests');
     expect(text).not.toContain('/home/me');
     expect(text).toContain('No session');
+    expect(text).toContain('Cache read');
+    expect(text).toContain('3M · $12.50');
+    expect(text).toContain('2026-W09');
+    expect(text).toContain('$87.50 without a breakdown');
   });
 });
