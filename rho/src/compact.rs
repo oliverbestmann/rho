@@ -63,8 +63,8 @@ const TOKEN_STEP: u64 = 100_000;
 const BYTES_STEP: u64 = 1_000_000;
 const BYTES_NOTE: u64 = 10 * BYTES_STEP;
 
-/// A note for the model on how large the session is: the context from 200k
-/// tokens (from 300k with a hint to compact), the history from 10 MB.
+/// A note for the model on how large the session is, with a hint to compact:
+/// the context from 200k tokens, the history from 10 MB.
 /// `window` is the model's context window, if known.
 /// `noted` holds the 100k token and 1 MB steps of the last call; without
 /// `force` there is only a note if one of them grew since.
@@ -81,28 +81,19 @@ pub(crate) fn size_note(
     if !force && !grew {
         return None;
     }
+    const LEAN: &str = "Long sessions are expensive, so keep context lean: compact or discard whenever you no longer need the earlier details verbatim, for example after finishing a sub-task or once results are written to a file. Don't wait for the context to fill up. Put anything that must stay exact into the Compact tool's `verbatim` field.";
     let mut note = vec![];
     if tokens >= 2 * TOKEN_STEP {
         note.push(match window {
-            Some(w) => format!(
-                "{}k of {}k tokens of context are used.",
-                tokens / 1000,
-                w / 1000
-            ),
-            None => format!("{}k tokens of context are used.", tokens / 1000),
+            Some(w) => format!("Context is at {}k of {}k tokens.", tokens / 1000, w / 1000),
+            None => format!("Context is at {}k tokens.", tokens / 1000),
         });
-    }
-    let hint = tokens >= 3 * TOKEN_STEP;
-    if hint {
-        note.push("If you no longer need the earlier conversation in full, for example because the previous task is done, use the Compact tool. Put anything that must stay exact into its `verbatim` field.".into());
     }
     if bytes >= BYTES_NOTE {
-        let mb = bytes / 1_000_000;
-        note.push(if hint {
-            format!("The session history is {mb} MB.")
-        } else {
-            format!("The session history is {mb} MB. Use the Compact tool at the next point where you no longer need the earlier conversation in full.")
-        });
+        note.push(format!("The session history is {} MB.", bytes / 1_000_000));
+    }
+    if !note.is_empty() {
+        note.push(LEAN.into());
     }
     (!note.is_empty()).then(|| note.join(" "))
 }
@@ -438,21 +429,26 @@ mod tests {
     fn size_note_from_200k_tokens_or_10_mb_and_on_each_step() {
         let mut noted = (0, 0);
         assert_eq!(size_note(199_000, None, 0, &mut noted, true), None);
-        assert_eq!(
-            size_note(250_000, None, 0, &mut noted, false).unwrap(),
-            "250k tokens of context are used."
+        let note = size_note(250_000, None, 0, &mut noted, false).unwrap();
+        assert!(
+            note.starts_with("Context is at 250k tokens. Long sessions"),
+            "{note}"
         );
-        assert_eq!(
-            size_note(250_000, Some(1_000_000), 0, &mut noted, true).unwrap(),
-            "250k of 1000k tokens of context are used."
+        assert!(note.contains("Compact tool"), "{note}");
+        let note = size_note(250_000, Some(1_000_000), 0, &mut noted, true).unwrap();
+        assert!(
+            note.starts_with("Context is at 250k of 1000k tokens."),
+            "{note}"
         );
         // Same step: only forced (run start).
         assert_eq!(size_note(290_000, None, 0, &mut noted, false), None);
         assert!(size_note(290_000, None, 0, &mut noted, true).is_some());
+        assert!(size_note(300_000, None, 0, &mut noted, false).is_some());
+        // The history alone.
+        let note = size_note(0, None, 11_000_000, &mut (0, 0), false).unwrap();
         assert!(
-            size_note(300_000, None, 0, &mut noted, false)
-                .unwrap()
-                .contains("Compact tool")
+            note.starts_with("The session history is 11 MB. Long"),
+            "{note}"
         );
         assert!(
             size_note(300_000, None, 12_000_000, &mut noted, false)

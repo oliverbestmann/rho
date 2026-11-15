@@ -195,8 +195,8 @@ does not need the earlier content, or if the user asked. It does nothing
 below 10% context use. The loop compacts after the response's tool calls and
 the run goes on from the summary (ADR 0061). Text the model puts in its
 `verbatim` field is appended to the summary unchanged. A hidden note tells
-the model the context size from 200k tokens (with a hint to compact from
-300k) and the history size from 10 MB: at the start of each run and whenever
+the model the context size from 200k tokens and the history size from 10 MB,
+with a hint to compact or discard as soon as earlier details are not needed: at the start of each run and whenever
 it crosses another 100k tokens or (from 10 MB) another MB.
 
 ## Models by path

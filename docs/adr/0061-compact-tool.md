@@ -18,8 +18,9 @@ may ask it to compact in a prompt.
   leave its content out) and appended unchanged to the summary under
   `## Notes`. The model uses it to keep important information exact.
 - A hidden system note (`compact::size_note`) tells the model the context
-  size from 200k tokens, and suggests the Compact tool from 300k. It also
-  says to compact soon once the history is over 10 MB. Absolute numbers, not
+  size from 200k tokens and the history size from 10 MB, and asks it to keep
+  the context lean: compact or discard once earlier details are not needed
+  verbatim, without waiting for the context to fill up. Absolute numbers, not
   a share of the window, so 1M-token models get it too. It comes at the start
   of each run, and before the next request whenever the context crosses a
   100k-token step or the history (from 10 MB) another MB. It is appended to the
