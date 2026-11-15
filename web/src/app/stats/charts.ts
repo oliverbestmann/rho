@@ -284,12 +284,23 @@ export const shade = (v: number) =>
 /** Monday-first weekday, 0..6. */
 const weekday = (d: Date) => (d.getDay() + 6) % 7;
 
-/** Cost per UTC weekday (Monday first) and hour, from hourly costs since `start`. */
+/** The time zone of the hour matrix. */
+export const MATRIX_ZONE = 'Europe/Berlin';
+const zoned = new Intl.DateTimeFormat('en-US', {
+  timeZone: MATRIX_ZONE,
+  weekday: 'short',
+  hour: 'numeric',
+  hourCycle: 'h23',
+});
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/** Cost per weekday (Monday first) and hour in `MATRIX_ZONE`, from hourly costs since `start`. */
 export function weekHours(hourly: number[], start: number): number[][] {
   const grid = Array.from({ length: 7 }, () => Array<number>(24).fill(0));
   hourly.forEach((cost, i) => {
-    const d = new Date(start + i * HOUR);
-    grid[(d.getUTCDay() + 6) % 7][d.getUTCHours()] += cost;
+    const parts = zoned.formatToParts(start + i * HOUR);
+    const part = (type: string) => parts.find((p) => p.type === type)!.value;
+    grid[WEEKDAYS.indexOf(part('weekday'))][+part('hour')] += cost;
   });
   return grid;
 }
@@ -323,7 +334,7 @@ const whole = new Intl.NumberFormat(undefined, {
 });
 const cents = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
 
-/** Cost per weekday and hour, UTC. */
+/** Cost per weekday and hour in `MATRIX_ZONE`. */
 @Component({
   selector: 'app-heatmap',
   template: `

@@ -192,7 +192,7 @@ const duration = (ms: number) => {
         <div class="pair">
           <section class="account">
             <h2>When you work</h2>
-            <span class="sub">Cost per weekday and hour, UTC</span>
+            <span class="sub">Cost per weekday and hour, Europe/Berlin</span>
             <app-heatmap [hourly]="s.hourly" [start]="days()[0]" />
           </section>
           <section class="account">
