@@ -263,8 +263,8 @@ const cents = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'U
       line-height: 14px;
     }
     .cell {
-      height: 14px;
       border-radius: 3px;
+      aspect-ratio: 2;
     }
   `,
 })
