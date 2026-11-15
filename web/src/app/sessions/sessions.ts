@@ -27,6 +27,7 @@ import { dir, hue, isRunning, listSessions } from './list';
     <mat-toolbar>
       <span class="title">Sessions</span>
       <a matIconButton routerLink="/new" aria-label="New session"><mat-icon>add</mat-icon></a>
+      <a matIconButton routerLink="/stats" aria-label="Stats"><mat-icon>bar_chart</mat-icon></a>
       <button matIconButton aria-label="Refresh" (click)="sessions.reload()">
         <mat-icon>refresh</mat-icon>
       </button>

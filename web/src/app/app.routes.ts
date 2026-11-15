@@ -15,6 +15,11 @@ export const routes: Routes = [
         path: 'new',
         loadComponent: () => import('./sessions/new-session').then((m) => m.NewSession),
       },
+      { path: 'stats', loadComponent: () => import('./stats/stats').then((m) => m.Stats) },
+      {
+        path: 'stats/:month',
+        loadComponent: () => import('./stats/stats').then((m) => m.Stats),
+      },
       {
         path: 'session/:id',
         loadComponent: () => import('./session/session').then((m) => m.Session),
