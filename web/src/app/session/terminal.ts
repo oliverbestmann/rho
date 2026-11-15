@@ -45,6 +45,8 @@ export class TerminalView {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
         import('@xterm/xterm'),
         import('@xterm/addon-fit'),
+        // xterm measures the cell size once, so the font must be there first.
+        document.fonts.load('13px Iosevka').catch(() => undefined),
       ]);
       if (destroyRef.destroyed) return;
       // Resolved colours of the host, since xterm takes no CSS variables.
@@ -54,7 +56,7 @@ export class TerminalView {
         convertEol: true,
         disableStdin: true,
         cursorInactiveStyle: 'none',
-        fontFamily: 'monospace',
+        fontFamily: 'Iosevka, monospace',
         fontSize: 13,
         scrollback: 10_000,
         tabStopWidth: 2,

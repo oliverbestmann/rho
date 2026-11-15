@@ -9,7 +9,7 @@ html {
         primary: mat.$violet-palette,
         tertiary: mat.$orange-palette,
       ),
-      typography: Roboto,
+      typography: Inter,
       density: 0,
     )
   );
@@ -63,6 +63,11 @@ app-root {
   }
 }
 
+code,
+pre {
+  font-family: Iosevka, ui-monospace, monospace;
+}
+
 .markdown {
   overflow-wrap: anywhere;
 
@@ -76,7 +81,6 @@ app-root {
   }
 
   code {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
     tab-size: 2;
   }
 
