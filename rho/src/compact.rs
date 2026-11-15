@@ -65,10 +65,12 @@ const BYTES_NOTE: u64 = 10 * BYTES_STEP;
 
 /// A note for the model on how large the session is: the context from 200k
 /// tokens (from 300k with a hint to compact), the history from 10 MB.
+/// `window` is the model's context window, if known.
 /// `noted` holds the 100k token and 1 MB steps of the last call; without
 /// `force` there is only a note if one of them grew since.
 pub(crate) fn size_note(
     tokens: u64,
+    window: Option<u64>,
     bytes: u64,
     noted: &mut (u64, u64),
     force: bool,
@@ -81,13 +83,26 @@ pub(crate) fn size_note(
     }
     let mut note = vec![];
     if tokens >= 2 * TOKEN_STEP {
-        note.push(format!("{}k tokens of context are used.", tokens / 1000));
+        note.push(match window {
+            Some(w) => format!(
+                "{}k of {}k tokens of context are used.",
+                tokens / 1000,
+                w / 1000
+            ),
+            None => format!("{}k tokens of context are used.", tokens / 1000),
+        });
     }
-    if tokens >= 3 * TOKEN_STEP {
-        note.push("If you do not need the full earlier conversation anymore (e.g. the previous task is done), use the Compact tool. Put anything that must stay exact into its `verbatim` field.".into());
+    let hint = tokens >= 3 * TOKEN_STEP;
+    if hint {
+        note.push("If you no longer need the earlier conversation in full, for example because the previous task is done, use the Compact tool. Put anything that must stay exact into its `verbatim` field.".into());
     }
     if bytes >= BYTES_NOTE {
-        note.push(format!("The session history is {} MB large. Compact soon, at the next point where the earlier conversation is not needed in full.", bytes / 1_000_000));
+        let mb = bytes / 1_000_000;
+        note.push(if hint {
+            format!("The session history is {mb} MB.")
+        } else {
+            format!("The session history is {mb} MB. Use the Compact tool at the next point where you no longer need the earlier conversation in full.")
+        });
     }
     (!note.is_empty()).then(|| note.join(" "))
 }
@@ -422,34 +437,41 @@ mod tests {
     #[test]
     fn size_note_from_200k_tokens_or_10_mb_and_on_each_step() {
         let mut noted = (0, 0);
-        assert_eq!(size_note(199_000, 0, &mut noted, true), None);
+        assert_eq!(size_note(199_000, None, 0, &mut noted, true), None);
         assert_eq!(
-            size_note(250_000, 0, &mut noted, false).unwrap(),
+            size_note(250_000, None, 0, &mut noted, false).unwrap(),
             "250k tokens of context are used."
         );
+        assert_eq!(
+            size_note(250_000, Some(1_000_000), 0, &mut noted, true).unwrap(),
+            "250k of 1000k tokens of context are used."
+        );
         // Same step: only forced (run start).
-        assert_eq!(size_note(290_000, 0, &mut noted, false), None);
-        assert!(size_note(290_000, 0, &mut noted, true).is_some());
+        assert_eq!(size_note(290_000, None, 0, &mut noted, false), None);
+        assert!(size_note(290_000, None, 0, &mut noted, true).is_some());
         assert!(
-            size_note(300_000, 0, &mut noted, false)
+            size_note(300_000, None, 0, &mut noted, false)
                 .unwrap()
                 .contains("Compact tool")
         );
         assert!(
-            size_note(300_000, 12_000_000, &mut noted, false)
+            size_note(300_000, None, 12_000_000, &mut noted, false)
                 .unwrap()
                 .contains("12 MB")
         );
         // Every MB from 10 MB on.
-        assert_eq!(size_note(300_000, 12_500_000, &mut noted, false), None);
+        assert_eq!(
+            size_note(300_000, None, 12_500_000, &mut noted, false),
+            None
+        );
         assert!(
-            size_note(300_000, 13_000_000, &mut noted, false)
+            size_note(300_000, None, 13_000_000, &mut noted, false)
                 .unwrap()
                 .contains("13 MB")
         );
         // After a compaction the steps start low again.
-        assert_eq!(size_note(0, 0, &mut noted, false), None);
-        assert!(size_note(210_000, 0, &mut noted, false).is_some());
+        assert_eq!(size_note(0, None, 0, &mut noted, false), None);
+        assert!(size_note(210_000, None, 0, &mut noted, false).is_some());
     }
 
     #[test]

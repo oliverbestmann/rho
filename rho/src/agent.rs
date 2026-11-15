@@ -252,8 +252,13 @@ impl Session {
     /// Hidden from the user like all system notes.
     fn push_size_note(&mut self, force: bool) {
         let tokens = self.last_usage.prompt() + self.last_usage.output;
+        let window = (self.provider.model_info(self.model.id()))
+            .map(|m| m.context_window)
+            .filter(|&w| w > 0);
         let bytes = self.history_bytes();
-        if let Some(note) = crate::compact::size_note(tokens, bytes, &mut self.size_noted, force) {
+        if let Some(note) =
+            crate::compact::size_note(tokens, window, bytes, &mut self.size_noted, force)
+        {
             push_user(&mut self.history, vec![Content::system_note(note)]);
         }
     }
