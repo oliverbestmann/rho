@@ -53,10 +53,10 @@ describe('stats helpers', () => {
     );
     expect(weeks[0]).toEqual({ week: '2026-W44', cost: 1 });
     expect(weeks[1]).toEqual({ week: '2026-W45', cost: 7 });
-    // 2026-11-01 is a Sunday; its 10:00 is the 11th hour.
+    // 2026-11-01 is a Sunday; its 10:00 UTC is the 11th hour.
     const hourly = Array(24).fill(0);
     hourly[10] = 5;
-    const grid = weekHours(hourly, days[0]);
+    const grid = weekHours(hourly, Date.UTC(2026, 10, 1));
     expect(grid[6][10]).toBe(5);
     expect(grid.flat().reduce((a, b) => a + b)).toBe(5);
   });
@@ -134,7 +134,6 @@ describe('Stats', () => {
       ],
       hourly: [1, 2, 3],
       first: 0,
-      estimatedUntil: null,
     };
     const request = vi.fn(async () => response);
     TestBed.configureTestingModule({

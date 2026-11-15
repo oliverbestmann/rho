@@ -284,12 +284,12 @@ export const shade = (v: number) =>
 /** Monday-first weekday, 0..6. */
 const weekday = (d: Date) => (d.getDay() + 6) % 7;
 
-/** Cost per local weekday (Monday first) and hour, from hourly costs since `start`. */
+/** Cost per UTC weekday (Monday first) and hour, from hourly costs since `start`. */
 export function weekHours(hourly: number[], start: number): number[][] {
   const grid = Array.from({ length: 7 }, () => Array<number>(24).fill(0));
   hourly.forEach((cost, i) => {
     const d = new Date(start + i * HOUR);
-    grid[weekday(d)][d.getHours()] += cost;
+    grid[(d.getUTCDay() + 6) % 7][d.getUTCHours()] += cost;
   });
   return grid;
 }
@@ -323,7 +323,7 @@ const whole = new Intl.NumberFormat(undefined, {
 });
 const cents = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
 
-/** Cost per weekday and local hour. */
+/** Cost per weekday and hour, UTC. */
 @Component({
   selector: 'app-heatmap',
   template: `

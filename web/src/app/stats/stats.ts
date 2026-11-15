@@ -96,7 +96,6 @@ export interface StatsResponse {
   hourly: number[];
   projects: ProjectStats[];
   first: number | null;
-  estimatedUntil: number | null;
 }
 
 const money = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
@@ -169,9 +168,6 @@ const duration = (ms: number) => {
           Running · data up to {{ today }} ·
         }
         {{ zone }}
-        @if (estimated(); as until) {
-          <br />Estimated from turn notes before {{ until }}
-        }
       </p>
       @if (stats.error(); as error) {
         <p class="error">{{ errorText(error) }}</p>
@@ -196,7 +192,7 @@ const duration = (ms: number) => {
         <div class="pair">
           <section class="account">
             <h2>When you work</h2>
-            <span class="sub">Cost per weekday and local hour</span>
+            <span class="sub">Cost per weekday and hour, UTC</span>
             <app-heatmap [hourly]="s.hourly" [start]="days()[0]" />
           </section>
           <section class="account">
@@ -451,11 +447,6 @@ export class Stats {
       .slice(1)
       .map((_, i) => (this.stats.value()?.providers ?? []).reduce((sum, p) => sum + p.days[i], 0)),
   );
-
-  protected readonly estimated = computed(() => {
-    const until = this.stats.value()?.estimatedUntil;
-    return until != null && until >= this.days()[0] ? date.format(until) : null;
-  });
 
   protected readonly cards = computed(() => {
     const s = this.stats.value();

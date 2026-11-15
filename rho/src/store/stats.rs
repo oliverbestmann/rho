@@ -27,8 +27,6 @@ pub struct Stats {
     pub projects: Vec<ProjectStats>,
     /// The first request ever recorded, Unix milliseconds.
     pub first: Option<i64>,
-    /// The last row estimated from turn notes.
-    pub estimated_until: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -258,12 +256,7 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let (first, estimated_until) = c.query_row(
-        "SELECT MIN(created_at), (SELECT MAX(created_at) FROM requests WHERE estimated) \
-         FROM requests",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let first = c.query_row("SELECT MIN(created_at) FROM requests", [], |r| r.get(0))?;
     Ok(Stats {
         totals: totals(c, from, to)?,
         previous: totals(c, compare.0, compare.1)?,
@@ -272,7 +265,6 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
         hourly,
         projects,
         first,
-        estimated_until,
     })
 }
 
@@ -345,7 +337,6 @@ mod tests {
         assert_eq!(stats.totals.output_tokens, 40);
         assert_eq!(stats.previous.cost, 9.0);
         assert_eq!(stats.first, Some(-h));
-        assert_eq!(stats.estimated_until, None);
 
         let a = &stats.providers[0];
         assert_eq!((a.provider.as_str(), a.requests, a.cost), ("a", 3, 3.5));
