@@ -950,6 +950,71 @@ fn prompts(provider: &Scripted) -> Vec<String> {
         .collect()
 }
 
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[request(method = "_rho/stats", response = StatsResponse)]
+struct StatsRequest {
+    days: Vec<i64>,
+    compare: (i64, i64),
+}
+
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcResponse,
+)]
+struct StatsResponse(serde_json::Value);
+
+#[tokio::test]
+async fn stats_report_the_recorded_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sessions.db");
+    let store = rho::store::Store::open(&db).unwrap();
+    for (at, cost) in [(500, 1.5), (1500, 2.0)] {
+        store
+            .record_request(rho::store::RequestRecord {
+                created_at: at,
+                session_id: None,
+                model: ModelSpec::new("p", "m"),
+                usage: Default::default(),
+                cost,
+                costs: None,
+                limits: Default::default(),
+            })
+            .await
+            .unwrap();
+    }
+    let agent = agent(Scripted::new(vec![]), &db);
+    let stats = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client.builder().connect_with(
+            rho::acp::agent_in(agent, Arc::default(), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let bad = StatsRequest {
+                    days: vec![1000],
+                    compare: (0, 0),
+                };
+                assert!(cx.send_request(bad).block_task().await.is_err());
+                let req = StatsRequest {
+                    days: vec![1000, 2000],
+                    compare: (0, 1000),
+                };
+                Ok(cx.send_request(req).block_task().await?.0)
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stats["totals"]["cost"], 2.0);
+    assert_eq!(stats["previous"]["requests"], 1);
+    assert_eq!(stats["providers"][0]["days"], serde_json::json!([2.0]));
+    assert_eq!(stats["models"][0]["model"], "m");
+    assert_eq!(stats["first"], 500);
+}
+
 async fn wait_for(what: impl Fn() -> bool) {
     while !what() {
         tokio::time::sleep(Duration::from_millis(10)).await;

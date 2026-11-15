@@ -25,7 +25,9 @@ use crate::feature::FeatureId;
 use crate::provider::{Content, Message, ModelSpec, Role, Thinking, ToolCallId, Usage};
 
 mod requests;
+mod stats;
 pub use requests::RequestRecord;
+pub use stats::Stats;
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
 const MIGRATIONS: &[&str] = &[
