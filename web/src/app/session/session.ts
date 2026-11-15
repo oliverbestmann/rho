@@ -12,9 +12,9 @@ import {
   resource,
   signal,
   untracked,
+  viewChild,
 } from '@angular/core';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Router, RouterLink, Scroll } from '@angular/router';
+import { RouterLink } from '@angular/router';
 import * as acp from '@agentclientprotocol/sdk';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -184,20 +184,17 @@ export class Session {
     () => this.acp.prompting().has(this.id()) || !!this.opened()?.state.running(),
   );
 
-  /**
-   * Shows the jump button when false. While true, the page follows new output,
-   * a growing composer and a resize to its end; else the browser's scroll
-   * anchoring holds the reading position.
-   */
+  /** Shows the jump button when false. */
   protected readonly atBottom = signal(true);
+  /**
+   * A `column-reverse` list: the browser keeps it pinned to the end (scrollTop 0)
+   * when output arrives or it shrinks, and holds the reading position when
+   * scrolled up. scrollTop counts negative from the end.
+   */
+  private readonly scroller = viewChild.required<ElementRef<HTMLElement>>('scroller');
 
   constructor() {
     const destroyRef = inject(DestroyRef);
-    const host = inject<ElementRef<HTMLElement>>(ElementRef).nativeElement;
-    // After the router's own scroll, which restores or resets the position.
-    inject(Router)
-      .events.pipe(takeUntilDestroyed())
-      .subscribe((e) => e instanceof Scroll && jumpToEnd());
     effect(() => {
       const [key, draft] = [draftKey(this.id()), this.draft()];
       if (draft) localStorage.setItem(key, draft);
@@ -206,21 +203,15 @@ export class Session {
     // The switcher keeps this component: start the next session at its end.
     afterRenderEffect(() => {
       this.id();
-      untracked(jumpToEnd);
+      untracked(() => (this.scroller().nativeElement.scrollTop = 0));
     });
     afterNextRender(() => {
       void loadHighlighter(); // in the background, not waited for
-      const root = document.documentElement;
-      const onScroll = () => this.atBottom.set(scrollY + innerHeight > root.scrollHeight - 80);
-      const follow = () => untracked(this.atBottom) && jumpToEnd();
-      const resized = new ResizeObserver(follow);
-      resized.observe(host);
-      addEventListener('scroll', onScroll, { passive: true });
-      addEventListener('resize', follow);
+      const el = this.scroller().nativeElement;
+      const onScroll = () => this.atBottom.set(el.scrollTop > -80);
+      el.addEventListener('scroll', onScroll, { passive: true });
       destroyRef.onDestroy(() => {
-        resized.disconnect();
-        removeEventListener('scroll', onScroll);
-        removeEventListener('resize', follow);
+        el.removeEventListener('scroll', onScroll);
       });
     });
   }
@@ -231,11 +222,12 @@ export class Session {
 
   /** Jumps to the end, which then follows new output by itself. */
   protected scrollToEnd() {
-    // Wait a few frames so a closing keyboard has resized the page first.
+    // Wait a few frames so a closing keyboard has resized the list first.
+    const el = this.scroller().nativeElement;
     const wait = (frames: number) =>
       frames
         ? requestAnimationFrame(() => wait(frames - 1))
-        : scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+        : el.scrollTo({ top: 0, behavior: 'smooth' });
     wait(3);
   }
 
@@ -296,10 +288,6 @@ export class Session {
  */
 export function keepShown(opened: Opened | undefined, old: Opened | undefined) {
   return opened && !(opened.loading() && old && !old.loading()) ? opened : old;
-}
-
-function jumpToEnd() {
-  scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
 }
 
 /** Entries per chunk of the chat, see `Session.chunks`. */
