@@ -376,19 +376,22 @@ async fn cache_control(req: Request, next: Next) -> Response {
     res
 }
 
-/// Angular's `outputHashing` names: `<name>-<8 characters>.js` or `.css`.
+/// Angular's `outputHashing` names: `<name>-<8 characters>.js`, `.css`
+/// or `.woff2` (fonts in `media/`). The hash may contain `-` itself.
 fn is_hashed(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or_default();
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
-    let hashed = stem.split_once('-').is_some_and(|(_, hash)| {
-        hash.len() == 8
-            && hash
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    });
-    hashed && matches!(ext, "js" | "css")
+    let hashed = stem.len() > 9
+        && stem.is_char_boundary(stem.len() - 9)
+        && stem[stem.len() - 9..]
+            .strip_prefix('-')
+            .is_some_and(|hash| {
+                hash.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            });
+    hashed && matches!(ext, "js" | "css" | "woff2")
 }
 
 /// The OpenAI API key: `api.token`, else the ACP token.
@@ -466,6 +469,7 @@ mod tests {
             "/chunk-BuJJfRT-.js",
             "/chunk-pYaf--lm.js",
             "/styles-CCIXP5GJ.css",
+            "/media/iosevka-bold-italic-V6XYEWVI.woff2",
         ] {
             assert!(is_hashed(path), "{path}");
         }
@@ -477,6 +481,8 @@ mod tests {
             "/chunk-short.js",
             "/main.js",
             "/main-TW4DQLKJ.map",
+            "/media/iosevka.woff2",
+            "/icon-192.png",
         ] {
             assert!(!is_hashed(path), "{path}");
         }

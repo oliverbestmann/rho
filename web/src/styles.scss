@@ -1,5 +1,31 @@
 @use '@angular/material' as mat;
 
+// Served by rho, from scripts/fonts.sh; the build adds a hash to the names.
+@font-face {
+  font-family: Inter;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter.woff2') format('woff2');
+}
+@font-face {
+  font-family: Inter;
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter-italic.woff2') format('woff2');
+}
+@each $name, $weight, $style in (iosevka, 400, normal), (iosevka-italic, 400, italic),
+  (iosevka-bold, 700, normal), (iosevka-bold-italic, 700, italic)
+{
+  @font-face {
+    font-family: Iosevka;
+    font-weight: $weight;
+    font-style: $style;
+    font-display: swap;
+    src: url('./fonts/#{$name}.woff2') format('woff2');
+  }
+}
+
 html {
   height: 100%;
   color-scheme: light dark;
