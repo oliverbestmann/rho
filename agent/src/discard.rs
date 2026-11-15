@@ -108,6 +108,9 @@ fn bytes(n: usize) -> String {
 struct DiscardInput {
     /// the N of the `[output N, ...]` labels to discard
     outputs: Vec<usize>,
+    /// discard from the next request on, even though the prompt cache breaks there
+    #[serde(default)]
+    now: bool,
 }
 
 struct Discard;
@@ -116,7 +119,7 @@ impl Tool for Discard {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: DISCARD,
-            description: "Remove old tool outputs from your context, by the N of their `[output N, size]` label: large file reads, logs or images you no longer need. Each is replaced by `[output N discarded]`; the user still sees it. If you need one again, run its tool again. Only worth it for large outputs. Takes effect once the prompt cache has expired, so the cache is not lost.".into(),
+            description: "Remove old tool outputs from your context, by the N of their `[output N, size]` label: large file reads, logs or images you no longer need. Each is replaced by `[output N discarded]`; the user still sees it. If you need one again, run its tool again. Only worth it for large outputs. Takes effect once the prompt cache has expired, so the cache is not lost. Set `now` to discard from the next request on, for example in a long run without pauses; the cache is then rebuilt from the first discarded output on.".into(),
             input_schema: input_schema::<DiscardInput>(),
         }
     }
@@ -143,6 +146,13 @@ impl Tool for Discard {
             );
         }
         inner.pending.extend(ids);
+        if i.now {
+            // The cache breaks anyway, so the other pending discards go too.
+            let mut discarded = discarded;
+            discarded.append(&mut inner.pending);
+            ctx.set_stored(IDS, discarded);
+            return Ok("Discarded from the next request on.".into());
+        }
         Ok(if inner.cache_cold() {
             "Discarded from the next request on."
         } else {
@@ -240,6 +250,24 @@ mod tests {
         // After a compaction the id is gone, and with it the stored entry.
         send(&ctx, vec![result("c", "new")]).await;
         assert_eq!(ctx.stored::<Vec<ToolCallId>>(IDS).unwrap(), []);
+    }
+
+    #[tokio::test]
+    async fn now_discards_while_the_cache_is_warm() {
+        let ctx = ctx();
+        let results = || vec![result("a", "x"), result("b", "y")];
+        send(&ctx, results()).await;
+        Discard.run(json!({"outputs": [2]}), &ctx).await.unwrap();
+        let out = Discard
+            .run(json!({"outputs": [1], "now": true}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.output, "Discarded from the next request on.");
+        // The pending one goes along.
+        assert_eq!(
+            send(&ctx, results()).await,
+            ["[output 1 discarded]", "[output 2 discarded]"]
+        );
     }
 
     #[tokio::test]

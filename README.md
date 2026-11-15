@@ -478,7 +478,7 @@ the window.
 `Discards` labels every tool result in a request `[output N, size]` and adds
 `Discard`, which drops outputs by number from later requests (ADR 0071). Only
 the requests change; the user still sees the outputs. Discards wait until the
-prompt cache has expired.
+prompt cache has expired, unless the model passes `now`.
 
 `AskUser` adds `AskUserQuestion` (pi's ask-user-question): up to four
 questions in one form, each a pick list with a text field for an answer of

@@ -27,6 +27,9 @@ instead of read at 0.1x.
   provider's). Then they move to the session's stored state (ids, saved with
   the session), and every later request replaces those results with
   `[output N discarded]` and drops their images.
+- With `now: true` they, and all pending discards, apply from the next
+  request on. The cache breaks at the first discarded output; this is for
+  long runs without a pause, where a discard would otherwise never apply.
 - Only requests change. The history, the store, the replay and the user's
   transcript keep the full outputs.
 - Stored ids not in the request anymore (after a compaction) are dropped.
@@ -39,6 +42,6 @@ instead of read at 0.1x.
 - The first request after this change has a cold cache: every tool result
   got a label.
 - In a busy run a discard only takes effect after a pause of more than five
-  and a half minutes. Pending discards are lost on a daemon restart, which
+  and a half minutes, unless the model passes `now`. Pending discards are lost on a daemon restart, which
   costs nothing.
 - The model can misjudge what it needs later; it can run the tool again.
