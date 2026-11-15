@@ -35,91 +35,6 @@ const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude
 const BETAS: &str = "claude-code-20250219,oauth-2025-04-20";
 const BILLING_SALT: &str = "59cf53e54c78";
 
-/// Models with adaptive thinking (Claude 4.6+): id, name, context window and
-/// USD per million tokens (input, output, cache read, cache write), plus
-/// the price for prompts above 100k tokens where it differs. Prices are from
-/// pi's model list; update them with new models.
-type ModelRow = (&'static str, &'static str, u64, [f64; 4], Option<[f64; 4]>);
-const MODELS: &[ModelRow] = &[
-    (
-        "claude-opus-5-5",
-        "Claude Opus 5.5",
-        1_000_000,
-        [4.0, 20.0, 0.2, 5.0],
-        None,
-    ),
-    (
-        "claude-opus-5",
-        "Claude Opus 5",
-        1_000_000,
-        [5.0, 25.0, 0.5, 6.25],
-        None,
-    ),
-    (
-        "claude-opus-4-8",
-        "Claude Opus 4.8",
-        1_000_000,
-        [5.0, 25.0, 0.5, 6.25],
-        None,
-    ),
-    (
-        "claude-opus-4-7",
-        "Claude Opus 4.7",
-        1_000_000,
-        [5.0, 25.0, 0.5, 6.25],
-        None,
-    ),
-    (
-        "claude-opus-4-6",
-        "Claude Opus 4.6",
-        1_000_000,
-        [5.0, 25.0, 0.5, 6.25],
-        None,
-    ),
-    (
-        "claude-sonnet-5-5",
-        "Claude Sonnet 5.5",
-        1_000_000,
-        [2.0, 10.0, 0.1, 2.5],
-        None,
-    ),
-    (
-        "claude-sonnet-5",
-        "Claude Sonnet 5",
-        1_000_000,
-        [2.0, 10.0, 0.2, 2.5],
-        None,
-    ),
-    (
-        "claude-sonnet-4-6",
-        "Claude Sonnet 4.6",
-        1_000_000,
-        [3.0, 15.0, 0.3, 3.75],
-        None,
-    ),
-    (
-        "claude-haiku-5-5",
-        "Claude Haiku 5.5",
-        1_000_000,
-        [0.1, 0.5, 0.01, 0.125],
-        Some([0.5, 2.5, 0.05, 0.625]),
-    ),
-    (
-        "claude-fable-5-1",
-        "Claude Fable 5.1",
-        1_000_000,
-        [10.0, 50.0, 0.25, 12.5],
-        None,
-    ),
-    (
-        "claude-fable-5",
-        "Claude Fable 5",
-        1_000_000,
-        [10.0, 50.0, 1.0, 12.5],
-        None,
-    ),
-];
-
 #[derive(Clone)]
 pub struct Anthropic {
     http: reqwest::Client,
@@ -175,16 +90,7 @@ impl Provider for Anthropic {
     }
 
     fn models(&self) -> Vec<ModelInfo> {
-        MODELS
-            .iter()
-            .map(|&(id, name, context_window, prices, above)| ModelInfo {
-                id: ModelId::from_static(id),
-                name: name.into(),
-                context_window,
-                price: Some(prices.into()),
-                price_above: above.map(|p| (100_000, p.into())),
-            })
-            .collect()
+        crate::provider::embedded_models(&NAME)
     }
 
     /// Unlisted models get the 1M window of the current ones.

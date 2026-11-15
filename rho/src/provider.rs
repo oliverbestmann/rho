@@ -4,7 +4,7 @@
 //! directly; other providers translate from them.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
 use futures::stream::BoxStream;
@@ -407,6 +407,40 @@ impl From<[f64; 4]> for Price {
     }
 }
 
+/// The models of `provider` in `models.json`, newest first. Run
+/// `scripts/models.sh` to update it.
+pub fn embedded_models(provider: &ProviderName) -> Vec<ModelInfo> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        id: String,
+        name: String,
+        context_window: u64,
+        price: [f64; 4],
+        price_above: Option<(u64, [f64; 4])>,
+    }
+    static MODELS: LazyLock<HashMap<String, Vec<ModelInfo>>> = LazyLock::new(|| {
+        let rows: HashMap<String, Vec<Row>> =
+            serde_json::from_str(include_str!("models.json")).expect("models.json is valid");
+        rows.into_iter()
+            .map(|(provider, rows)| {
+                let models = rows
+                    .into_iter()
+                    .map(|r| ModelInfo {
+                        id: ModelId::new(r.id),
+                        name: r.name,
+                        context_window: r.context_window,
+                        price: Some(r.price.into()),
+                        price_above: r.price_above.map(|(tokens, p)| (tokens, p.into())),
+                    })
+                    .collect();
+                (provider, models)
+            })
+            .collect()
+    });
+    MODELS.get(provider.as_str()).cloned().unwrap_or_default()
+}
+
 /// A model a provider offers, for model pickers and usage reporting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInfo {
@@ -646,6 +680,20 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::provider::ModelId;
+
+    #[test]
+    fn embedded_models_parse_for_each_provider() {
+        for name in ["anthropic", "github-copilot"] {
+            let models = embedded_models(&ProviderName::new(name));
+            assert!(!models.is_empty(), "{name}");
+            assert!(
+                models
+                    .iter()
+                    .all(|m| m.context_window > 0 && m.price.is_some())
+            );
+        }
+        assert!(embedded_models(&ProviderName::new("none")).is_empty());
+    }
 
     #[test]
     fn for_model_sends_system_notes_as_text_and_drops_user_notes() {

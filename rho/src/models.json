@@ -1,0 +1,482 @@
+{
+  "anthropic": [
+    {
+      "id": "claude-fable-5-2",
+      "name": "Claude Fable 5.2",
+      "contextWindow": 1000000,
+      "price": [
+        8,
+        40,
+        0.2,
+        10
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "contextWindow": 1000000,
+      "price": [
+        0.1,
+        0.5,
+        0.01,
+        0.125
+      ],
+      "priceAbove": [
+        100000,
+        [
+          0.5,
+          2.5,
+          0.05,
+          0.625
+        ]
+      ]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "contextWindow": 1000000,
+      "price": [
+        2,
+        10,
+        0.1,
+        2.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "contextWindow": 1000000,
+      "price": [
+        4,
+        20,
+        0.2,
+        5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "contextWindow": 1000000,
+      "price": [
+        10,
+        50,
+        0.25,
+        12.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "Claude Opus 5",
+      "contextWindow": 1000000,
+      "price": [
+        5,
+        25,
+        0.5,
+        6.25
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "contextWindow": 1000000,
+      "price": [
+        2,
+        10,
+        0.2,
+        2.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "contextWindow": 1000000,
+      "price": [
+        10,
+        50,
+        1,
+        12.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-4-8",
+      "name": "Claude Opus 4.8",
+      "contextWindow": 1000000,
+      "price": [
+        5,
+        25,
+        0.5,
+        6.25
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-4-7",
+      "name": "Claude Opus 4.7",
+      "contextWindow": 1000000,
+      "price": [
+        5,
+        25,
+        0.5,
+        6.25
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "name": "Claude Sonnet 4.6",
+      "contextWindow": 1000000,
+      "price": [
+        3,
+        15,
+        0.3,
+        3.75
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-4-6",
+      "name": "Claude Opus 4.6",
+      "contextWindow": 1000000,
+      "price": [
+        5,
+        25,
+        0.5,
+        6.25
+      ],
+      "priceAbove": null
+    }
+  ],
+  "github-copilot": [
+    {
+      "id": "claude-fable-5.2",
+      "name": "Claude Fable 5.2",
+      "contextWindow": 1000000,
+      "price": [
+        8,
+        40,
+        0.2,
+        10
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "name": "GPT-6.1 Terra",
+      "contextWindow": 1050000,
+      "price": [
+        1,
+        5,
+        0.05,
+        1.25
+      ],
+      "priceAbove": [
+        272000,
+        [
+          2,
+          7.5,
+          0.1,
+          2.5
+        ]
+      ]
+    },
+    {
+      "id": "claude-haiku-5.5",
+      "name": "Claude Haiku 5.5",
+      "contextWindow": 1000000,
+      "price": [
+        0.1,
+        0.5,
+        0.01,
+        0.125
+      ],
+      "priceAbove": [
+        100000,
+        [
+          0.5,
+          2.5,
+          0.05,
+          0.625
+        ]
+      ]
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol",
+      "contextWindow": 1050000,
+      "price": [
+        2,
+        10,
+        0.1,
+        2.5
+      ],
+      "priceAbove": [
+        272000,
+        [
+          4,
+          15,
+          0.2,
+          5
+        ]
+      ]
+    },
+    {
+      "id": "claude-sonnet-5.5",
+      "name": "Claude Sonnet 5.5",
+      "contextWindow": 1000000,
+      "price": [
+        2,
+        10,
+        0.1,
+        2.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gpt-6-sol",
+      "name": "GPT-6 Sol",
+      "contextWindow": 1050000,
+      "price": [
+        2,
+        10,
+        0.2,
+        2.5
+      ],
+      "priceAbove": [
+        272000,
+        [
+          4,
+          15,
+          0.4,
+          5
+        ]
+      ]
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "contextWindow": 1050000,
+      "price": [
+        0.1,
+        0.5,
+        0.01,
+        0.125
+      ],
+      "priceAbove": [
+        272000,
+        [
+          0.2,
+          0.75,
+          0.02,
+          0.25
+        ]
+      ]
+    },
+    {
+      "id": "claude-opus-5.5",
+      "name": "Claude Opus 5.5",
+      "contextWindow": 1000000,
+      "price": [
+        4,
+        20,
+        0.2,
+        5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra",
+      "contextWindow": 1050000,
+      "price": [
+        10,
+        50,
+        1,
+        12.5
+      ],
+      "priceAbove": [
+        272000,
+        [
+          20,
+          75,
+          2,
+          25
+        ]
+      ]
+    },
+    {
+      "id": "claude-fable-5.1",
+      "name": "Claude Fable 5.1",
+      "contextWindow": 1000000,
+      "price": [
+        10,
+        50,
+        0.25,
+        12.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "Claude Opus 5",
+      "contextWindow": 1000000,
+      "price": [
+        5,
+        25,
+        0.5,
+        6.25
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6 Terra",
+      "contextWindow": 1050000,
+      "price": [
+        2,
+        12,
+        0.2,
+        2.5
+      ],
+      "priceAbove": [
+        272000,
+        [
+          4,
+          18,
+          0.4,
+          5
+        ]
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6 Sol",
+      "contextWindow": 1050000,
+      "price": [
+        4,
+        20,
+        0.4,
+        5
+      ],
+      "priceAbove": [
+        272000,
+        [
+          8,
+          30,
+          0.8,
+          10
+        ]
+      ]
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6 Luna",
+      "contextWindow": 1050000,
+      "price": [
+        0.2,
+        1.2,
+        0.02,
+        0.25
+      ],
+      "priceAbove": [
+        200000,
+        [
+          0.4,
+          1.8,
+          0.04,
+          0.5
+        ]
+      ]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "contextWindow": 1000000,
+      "price": [
+        2,
+        10,
+        0.2,
+        2.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "contextWindow": 1000000,
+      "price": [
+        10,
+        50,
+        1,
+        12.5
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-opus-4.8",
+      "name": "Claude Opus 4.8",
+      "contextWindow": 200000,
+      "price": [
+        5,
+        25,
+        0.5,
+        6.25
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "name": "GPT-5.4 nano",
+      "contextWindow": 400000,
+      "price": [
+        0.2,
+        1.25,
+        0.02,
+        0
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-sonnet-4.6",
+      "name": "Claude Sonnet 4.6",
+      "contextWindow": 200000,
+      "price": [
+        3,
+        15,
+        0.3,
+        3.75
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "name": "GPT-5.3 Codex",
+      "contextWindow": 400000,
+      "price": [
+        1.75,
+        14,
+        0.175,
+        0
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "name": "Claude Haiku 4.5 (latest)",
+      "contextWindow": 200000,
+      "price": [
+        1,
+        5,
+        0.1,
+        1.25
+      ],
+      "priceAbove": null
+    }
+  ]
+}
