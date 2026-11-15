@@ -22,70 +22,66 @@
     (opened)="sessions.reload()"
   />
 </mat-toolbar>
-<div class="stream">
-  <div class="scroller" #scroller>
-    <main>
-      @if (shown()?.error(); as error) {
-        <p class="error">{{ error }}</p>
-      }
+<main>
+  @if (shown()?.error(); as error) {
+    <p class="error">{{ error }}</p>
+  }
 
-      <!-- Hidden until loaded, so the replayed history does not fly by; the browser's copy shows at once. -->
-      @if (shown()?.loading() && !chunks().length) {
-        <mat-spinner class="loading" diameter="40" aria-label="Loading" />
-      } @else {
-        @if (shown()?.state.earlier()) {
-          <button matButton class="earlier" (click)="showEarlier()">Show earlier</button>
-        }
-        @for (chunk of chunks(); track chunk.key) {
-          @defer (on viewport; when chunk.eager) {
-            @for (entry of chunk.entries; track $index) {
-              @switch (entry.kind) {
-                @case ('user') {
-                  <app-message from="user" [text]="entry.text()" />
-                }
-                @case ('agent') {
-                  <app-message from="agent" [text]="entry.text()" />
-                }
-                @case ('note') {
-                  <app-message from="note" [text]="entry.text()" />
-                }
-                @case ('thought') {
-                  <app-thought-card [text]="entry.text()" [done]="!newest().has(entry)" />
-                }
-                @case ('tool') {
-                  <app-tool-card
-                    [call]="entry.call()"
-                    [terminal]="entry.terminal()"
-                    [sessionId]="id()"
-                  />
-                }
-              }
+  <!-- Hidden until loaded, so the replayed history does not fly by; the browser's copy shows at once. -->
+  @if (shown()?.loading() && !chunks().length) {
+    <mat-spinner class="loading" diameter="40" aria-label="Loading" />
+  } @else {
+    @if (shown()?.state.earlier()) {
+      <button matButton class="earlier" (click)="showEarlier()">Show earlier</button>
+    }
+    @for (chunk of chunks(); track chunk.key) {
+      @defer (on viewport; when chunk.eager) {
+        @for (entry of chunk.entries; track $index) {
+          @switch (entry.kind) {
+            @case ('user') {
+              <app-message from="user" [text]="entry.text()" />
             }
-          } @placeholder {
-            <div class="chunk-placeholder"></div>
+            @case ('agent') {
+              <app-message from="agent" [text]="entry.text()" />
+            }
+            @case ('note') {
+              <app-message from="note" [text]="entry.text()" />
+            }
+            @case ('thought') {
+              <app-thought-card [text]="entry.text()" [done]="!newest().has(entry)" />
+            }
+            @case ('tool') {
+              <app-tool-card
+                [call]="entry.call()"
+                [terminal]="entry.terminal()"
+                [sessionId]="id()"
+              />
+            }
           }
         }
-        <!-- An open question is what the turn waits for, so it shows instead. -->
-        @if (reconnecting()) {
-          <app-working>{{ acp.reconnectText() }}</app-working>
-        } @else if (running() && !asks().length) {
-          <app-working />
-        }
+      } @placeholder {
+        <div class="chunk-placeholder"></div>
       }
+    }
+    <!-- An open question is what the turn waits for, so it shows instead. -->
+    @if (reconnecting()) {
+      <app-working>{{ acp.reconnectText() }}</app-working>
+    } @else if (running() && !asks().length) {
+      <app-working />
+    }
+  }
 
-      @for (ask of asks(); track ask.id) {
-        <app-ask-card [ask]="ask" [call]="askedCall(ask)" />
-      }
-    </main>
-  </div>
+  @for (ask of asks(); track ask.id) {
+    <app-ask-card [ask]="ask" [call]="askedCall(ask)" />
+  }
+</main>
+
+<footer>
   @if (!atBottom()) {
     <button matFab class="to-end" aria-label="Jump to end" (click)="scrollToEnd()">
       <mat-icon>arrow_downward</mat-icon>
     </button>
   }
-</div>
-
-<footer>
   @if (showOptions()) {
     <div class="options" id="session-options">
       @for (option of shown()?.state?.options(); track option.id) {

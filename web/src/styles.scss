@@ -49,17 +49,15 @@ body {
   height: 100%;
 }
 
-// App shell: the page never scrolls, each view scrolls inside itself.
+// App shell: the page itself scrolls, so mobile browsers hide their URL bar.
 app-root {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  min-height: 100dvh;
 
   // The routed view: router-outlet inserts it as the last child.
   > :last-child {
     flex: 1;
-    min-height: 0;
-    overflow-y: auto;
   }
 }
 

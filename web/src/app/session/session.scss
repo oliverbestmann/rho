@@ -1,28 +1,20 @@
 @use '@angular/material' as mat;
 
-// A fixed column: only the message list scrolls, so the composer growing or
-// the keyboard opening shrinks the list instead of covering it.
+// The page scrolls, so mobile browsers hide their URL bar; the toolbar and
+// the composer stick to the edges. `Session` keeps the end in view.
 :host {
   display: flex;
   flex-direction: column;
 }
 
-.stream {
-  position: relative;
+main {
   flex: 1;
-  min-height: 0;
-}
-
-// Reversed, so the browser keeps it at the end; see `Session.scroller`.
-.scroller {
-  display: flex;
-  flex-direction: column-reverse;
-  height: 100%;
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .top {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   gap: 8px;
 }
 
@@ -77,15 +69,17 @@ main {
   margin: 48px 0;
 }
 
-// Floats over the end of the list, right-aligned.
+// Floats above the composer, right-aligned.
 .to-end {
   position: absolute;
   right: 16px;
-  bottom: 16px;
-  z-index: 2;
+  bottom: calc(100% + 16px);
 }
 
 footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
   display: flex;
   flex-direction: column;
   // Like the gap between the options, so both rows read as one grid.
