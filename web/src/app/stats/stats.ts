@@ -53,12 +53,23 @@ interface ModelStats {
   outputTokens: number;
 }
 
+interface ProjectStats {
+  /** Null for API proxy requests and deleted sessions. */
+  path: string | null;
+  requests: number;
+  cost: number;
+}
+
+/** The last segment of a path. */
+export const projectName = (path: string) => path.replace(/\/+$/, '').split('/').pop() || path;
+
 /** `_rho/stats`: a month's usage, see rho/src/acp/stats.rs. */
 export interface StatsResponse {
   totals: Totals;
   previous: Totals;
   providers: ProviderStats[];
   models: ModelStats[];
+  projects: ProjectStats[];
   first: number | null;
   estimatedUntil: number | null;
 }
@@ -171,6 +182,28 @@ const duration = (ms: number) => {
           </section>
         } @empty {
           <p class="note">No requests this month.</p>
+        }
+
+        @if (s.projects.length) {
+          <section class="account">
+            <h2>Projects</h2>
+            <table>
+              <tr>
+                <th>Project</th>
+                <th>Requests</th>
+                <th>Cost</th>
+              </tr>
+              @for (p of s.projects; track p.path) {
+                <tr>
+                  <td [title]="p.path ?? ''">
+                    {{ p.path ? projectName(p.path) : 'No session' }}
+                  </td>
+                  <td>{{ count.format(p.requests) }}</td>
+                  <td>{{ money.format(p.cost) }}</td>
+                </tr>
+              }
+            </table>
+          </section>
         }
 
         @if (s.models.length) {
@@ -287,6 +320,7 @@ export class Stats {
   protected readonly money = money;
   protected readonly count = count;
   protected readonly compact = compact;
+  protected readonly projectName = projectName;
   protected readonly zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   protected readonly today = date.format(new Date());
 

@@ -84,6 +84,10 @@ describe('Stats', () => {
           outputTokens: 50_000,
         },
       ],
+      projects: [
+        { path: '/home/me/src/rho/', requests: 900, cost: 100 },
+        { path: null, requests: 100, cost: 20 },
+      ],
       first: 0,
       estimatedUntil: null,
     };
@@ -104,5 +108,8 @@ describe('Stats', () => {
     expect(text).toContain('7 d at 90%+ for 2 h 0 min');
     expect(text).toContain('claude-x');
     expect(text).toContain('Cache hit');
+    expect(text).toContain(' rho ');
+    expect(text).not.toContain('/home/me');
+    expect(text).toContain('No session');
   });
 });

@@ -21,6 +21,8 @@ pub struct Stats {
     pub previous: Totals,
     pub providers: Vec<ProviderStats>,
     pub models: Vec<ModelStats>,
+    /// The working directories with the highest cost, at most ten.
+    pub projects: Vec<ProjectStats>,
     /// The first request ever recorded, Unix milliseconds.
     pub first: Option<i64>,
     /// The last row estimated from turn notes.
@@ -82,6 +84,15 @@ pub struct ModelStats {
     pub requests: i64,
     pub cost: f64,
     pub output_tokens: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectStats {
+    /// `None` for API proxy requests and deleted sessions.
+    pub path: Option<String>,
+    pub requests: i64,
+    pub cost: f64,
 }
 
 impl Store {
@@ -208,6 +219,21 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let mut select = c.prepare(
+        "SELECT s.cwd, SUM(r.requests), SUM(r.cost) FROM requests r \
+         LEFT JOIN sessions s ON s.id = r.session_id \
+         WHERE r.created_at >= ?1 AND r.created_at < ?2 GROUP BY s.cwd \
+         ORDER BY SUM(r.cost) DESC, SUM(r.requests) DESC LIMIT 10",
+    )?;
+    let projects = select
+        .query_map([from, to], |r| {
+            Ok(ProjectStats {
+                path: r.get(0)?,
+                requests: r.get(1)?,
+                cost: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
     let (first, estimated_until) = c.query_row(
         "SELECT MIN(created_at), (SELECT MAX(created_at) FROM requests WHERE estimated) \
          FROM requests",
@@ -219,6 +245,7 @@ fn stats(c: &Connection, days: &[i64], compare: (i64, i64)) -> Result<Stats> {
         previous: totals(c, compare.0, compare.1)?,
         providers,
         models,
+        projects,
         first,
         estimated_until,
     })
@@ -257,10 +284,25 @@ mod tests {
     #[tokio::test]
     async fn sums_days_providers_models_and_limits() {
         let store = Store::memory().unwrap();
+        store
+            .call(|c| {
+                c.execute(
+                    "INSERT INTO sessions (id, cwd, model, thinking, created_at, updated_at) \
+                     VALUES ('s', '/w/rho', 'a/x', 'off', 0, 0)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let h = HOUR_MS;
+        let in_session = RequestRecord {
+            session_id: Some(crate::store::SessionId::from_static("s")),
+            ..record(h, "a/x", 1.0, Some((0.5, 100 * h)))
+        };
         for r in [
             record(-h, "a/x", 9.0, None), // the day before, compared
-            record(h, "a/x", 1.0, Some((0.5, 100 * h))),
+            in_session,
             record(2 * h, "a/x", 2.0, Some((0.95, 100 * h))),
             record(2 * h + 1, "a/y", 0.5, Some((0.92, 100 * h))),
             record(26 * h, "b/z", 4.0, None),
@@ -295,6 +337,12 @@ mod tests {
 
         let models: Vec<_> = stats.models.iter().map(|m| m.model.as_str()).collect();
         assert_eq!(models, ["z", "x", "y"]);
+        let projects: Vec<_> = stats
+            .projects
+            .iter()
+            .map(|p| (p.path.as_deref(), p.cost))
+            .collect();
+        assert_eq!(projects, [(None, 6.5), (Some("/w/rho"), 1.0)]);
         assert!(store.stats(vec![1, 0], (0, 0)).await.is_err());
     }
 }
