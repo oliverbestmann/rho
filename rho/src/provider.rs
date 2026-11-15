@@ -354,6 +354,22 @@ impl Usage {
     }
 }
 
+/// A subscription's usage limits as a response reports them (Anthropic's
+/// `anthropic-ratelimit-unified-*` headers).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Limits {
+    pub five_hour: Option<LimitWindow>,
+    pub seven_day: Option<LimitWindow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LimitWindow {
+    /// Share used, 1.0 is the limit.
+    pub utilization: f64,
+    /// Unix milliseconds.
+    pub resets_at: i64,
+}
+
 /// USD per million tokens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Price {
@@ -365,11 +381,17 @@ pub struct Price {
 
 impl Price {
     pub fn cost(&self, usage: &Usage) -> f64 {
-        (usage.input as f64 * self.input
-            + usage.output as f64 * self.output
-            + usage.cache_read as f64 * self.cache_read
-            + usage.cache_write as f64 * self.cache_write)
-            / 1e6
+        self.costs(usage).iter().sum()
+    }
+
+    /// USD for input, output, cache read and cache write.
+    pub fn costs(&self, usage: &Usage) -> [f64; 4] {
+        [
+            usage.input as f64 * self.input / 1e6,
+            usage.output as f64 * self.output / 1e6,
+            usage.cache_read as f64 * self.cache_read / 1e6,
+            usage.cache_write as f64 * self.cache_write / 1e6,
+        ]
     }
 }
 
@@ -400,11 +422,15 @@ pub struct ModelInfo {
 impl ModelInfo {
     /// USD for one request, `None` if the price is unknown.
     pub fn cost(&self, usage: &Usage) -> Option<f64> {
-        let price = match self.price_above {
-            Some((tokens, above)) if usage.prompt() > tokens => above,
-            _ => self.price?,
-        };
-        Some(price.cost(usage))
+        Some(self.price_for(usage)?.cost(usage))
+    }
+
+    /// The price that applies to a request with this usage.
+    pub fn price_for(&self, usage: &Usage) -> Option<Price> {
+        match self.price_above {
+            Some((tokens, above)) if usage.prompt() > tokens => Some(above),
+            _ => self.price,
+        }
     }
 }
 

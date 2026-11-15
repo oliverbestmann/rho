@@ -24,6 +24,9 @@ use crate::extension::{Diff, ProfileId};
 use crate::feature::FeatureId;
 use crate::provider::{Content, Message, ModelSpec, Role, Thinking, ToolCallId, Usage};
 
+mod requests;
+pub use requests::RequestRecord;
+
 /// Schema migrations; `PRAGMA user_version` is the number applied.
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -177,7 +180,41 @@ CREATE TABLE transcript_entries (
 ALTER TABLE sessions ADD COLUMN epoch_requests INTEGER NOT NULL DEFAULT 0
     CHECK (epoch_requests >= 0);
 "#,
+    r#"
+-- Model requests, for stats (ADR 0075). Rows `estimated` from turn notes
+-- are one per turn, with `requests` the turn's count.
+CREATE TABLE requests (
+    id INTEGER PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    -- NULL for API proxy requests.
+    session_id TEXT REFERENCES sessions (id) ON DELETE SET NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 1 CHECK (requests >= 1),
+    estimated INTEGER NOT NULL DEFAULT 0 CHECK (estimated IN (0, 1)),
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+    cache_write_tokens INTEGER NOT NULL CHECK (cache_write_tokens >= 0),
+    -- USD in total, and per token type when the price is known.
+    cost REAL NOT NULL CHECK (cost >= 0),
+    input_cost REAL,
+    output_cost REAL,
+    cache_read_cost REAL,
+    cache_write_cost REAL,
+    -- Subscription limits the response reported: share used and reset time.
+    limit_5h REAL,
+    limit_5h_reset INTEGER,
+    limit_7d REAL,
+    limit_7d_reset INTEGER
+) STRICT;
+
+CREATE INDEX requests_by_time ON requests (created_at);
+"#,
 ];
+
+/// The migration that adds `requests`; it is filled from turn notes once.
+const REQUESTS_MIGRATION: usize = 12;
 
 /// Edit diffs and streamed outputs older than this are deleted; the call
 /// then shows its output for the model only.
@@ -471,6 +508,9 @@ impl Store {
             tx.execute_batch(sql)
                 .with_context(|| format!("migrating {} to {}", path.display(), i + 1))?;
             tx.pragma_update(None, "user_version", i as i64 + 1)?;
+        }
+        if version < REQUESTS_MIGRATION {
+            requests::backfill(&tx).context("filling requests from turn notes")?;
         }
         tx.commit()?;
         Ok(Store {
