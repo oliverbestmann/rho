@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::Store;
+use super::{SessionId, Store};
 
 const HOUR_MS: i64 = 3_600_000;
 /// Limits at or above this count as "near the limit".
@@ -104,7 +104,29 @@ pub struct ProjectStats {
     pub cache_write_cost: f64,
 }
 
+/// All recorded requests of one session, over all epochs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsage {
+    #[serde(flatten)]
+    pub totals: ProjectStats,
+    /// First and last request, Unix milliseconds.
+    pub first: Option<i64>,
+    pub last: Option<i64>,
+    /// Hours (UTC) with at least one request.
+    pub active_hours: i64,
+    /// Some rows are estimated from turn notes (ADR 0075).
+    pub estimated: bool,
+    /// Compactions and clears.
+    pub epochs: i64,
+    pub models: Vec<ModelStats>,
+}
+
 impl Store {
+    pub async fn session_usage(&self, id: SessionId) -> Result<SessionUsage> {
+        self.call(move |c| session_usage(c, &id)).await
+    }
+
     /// The report for `days` (the bounds of each day, ascending, Unix
     /// milliseconds), compared with `[compare.0, compare.1)`.
     pub async fn stats(&self, days: Vec<i64>, compare: (i64, i64)) -> Result<Stats> {
@@ -113,6 +135,64 @@ impl Store {
         }
         self.call(move |c| stats(c, &days, compare)).await
     }
+}
+
+fn session_usage(c: &Connection, id: &SessionId) -> Result<SessionUsage> {
+    let mut usage = c.query_row(
+        "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(cost), 0), \
+         COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+         COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), \
+         TOTAL(input_cost), TOTAL(output_cost), TOTAL(cache_read_cost), \
+         TOTAL(cache_write_cost), MIN(created_at), MAX(created_at), \
+         COUNT(DISTINCT created_at / 3600000), COALESCE(MAX(estimated), 0) \
+         FROM requests WHERE session_id = ?1",
+        [id],
+        |r| {
+            Ok(SessionUsage {
+                totals: ProjectStats {
+                    path: None,
+                    requests: r.get(0)?,
+                    cost: r.get(1)?,
+                    input_tokens: r.get(2)?,
+                    output_tokens: r.get(3)?,
+                    cache_read_tokens: r.get(4)?,
+                    cache_write_tokens: r.get(5)?,
+                    input_cost: r.get(6)?,
+                    output_cost: r.get(7)?,
+                    cache_read_cost: r.get(8)?,
+                    cache_write_cost: r.get(9)?,
+                },
+                first: r.get(10)?,
+                last: r.get(11)?,
+                active_hours: r.get(12)?,
+                estimated: r.get::<_, i64>(13)? == 1,
+                ..Default::default()
+            })
+        },
+    )?;
+    usage.epochs = c
+        .query_row("SELECT epoch FROM sessions WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or(0);
+    let mut select = c.prepare(
+        "SELECT provider, model, SUM(requests), SUM(cost), SUM(output_tokens) FROM requests \
+         WHERE session_id = ?1 GROUP BY provider, model \
+         ORDER BY SUM(cost) DESC, SUM(requests) DESC",
+    )?;
+    usage.models = select
+        .query_map([id], |r| {
+            Ok(ModelStats {
+                provider: r.get(0)?,
+                model: r.get(1)?,
+                requests: r.get(2)?,
+                cost: r.get(3)?,
+                output_tokens: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(usage)
 }
 
 fn totals(c: &Connection, from: i64, to: i64) -> Result<Totals> {
@@ -366,5 +446,25 @@ mod tests {
         assert_eq!(stats.hourly.len(), 48);
         assert_eq!(stats.hourly[..3], [0.0, 1.0, 2.5]);
         assert!(store.stats(vec![1, 0], (0, 0)).await.is_err());
+
+        let s = store
+            .session_usage(crate::store::SessionId::from_static("s"))
+            .await
+            .unwrap();
+        assert_eq!((s.totals.requests, s.totals.cost), (1, 1.0));
+        assert_eq!(
+            (s.totals.output_cost, s.first, s.last),
+            (0.6, Some(h), Some(h))
+        );
+        assert_eq!((s.active_hours, s.estimated, s.epochs), (1, false, 0));
+        assert_eq!(s.models.len(), 1);
+        let none = store
+            .session_usage(crate::store::SessionId::from_static("t"))
+            .await
+            .unwrap();
+        assert_eq!(
+            (none.totals.requests, none.first, none.models.len()),
+            (0, None, 0)
+        );
     }
 }

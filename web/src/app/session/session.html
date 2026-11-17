@@ -13,7 +13,7 @@
     </div>
   </mat-menu>
   @if (usage(); as usage) {
-    <app-context-usage [usage]="usage" />
+    <app-context-usage [usage]="usage" [sessionId]="id()" />
   }
   <app-session-switcher
     [sessions]="recent()"

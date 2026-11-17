@@ -27,7 +27,7 @@ use crate::provider::{Content, Message, ModelSpec, Role, Thinking, ToolCallId, U
 mod requests;
 mod stats;
 pub use requests::RequestRecord;
-pub use stats::Stats;
+pub use stats::{SessionUsage, Stats};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
 const MIGRATIONS: &[&str] = &[
@@ -214,6 +214,10 @@ CREATE TABLE requests (
 CREATE INDEX requests_by_time ON requests (created_at);
 "#,
     requests::SPLIT_ESTIMATED_COSTS,
+    r#"
+-- For a session's usage, and the ON DELETE SET NULL of sessions.
+CREATE INDEX requests_by_session ON requests (session_id);
+"#,
 ];
 
 /// The migration that adds `requests`; it is filled from turn notes once.

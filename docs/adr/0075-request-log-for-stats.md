@@ -28,6 +28,8 @@ per session, without dates, and rho threw the limit headers away.
 - `_rho/stats` returns the report for one month. The client sends the
   local day bounds, so days follow its time zone, DST included.
 - An account is a provider name.
+- `_rho/session_usage` returns one session's rows over all epochs, for the
+  web client's usage popup (index `requests_by_session`).
 
 ## Consequences
 

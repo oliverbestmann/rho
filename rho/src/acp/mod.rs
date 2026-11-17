@@ -125,7 +125,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
     );
     let (load_state, resume_state, list_state) = (state.clone(), state.clone(), state.clone());
     let (queue_state, unqueue_state, image_state) = (state.clone(), state.clone(), state.clone());
-    let stats_state = state.clone();
+    let (stats_state, usage_state) = (state.clone(), state.clone());
     let close_state = state;
 
     agent_client_protocol::Agent
@@ -477,6 +477,26 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                     };
                     match stats {
                         Ok(s) => responder.respond(s.into()),
+                        Err(e) => responder
+                            .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
+                    }
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: stats::SessionUsageRequest,
+                        responder: Responder<stats::StatsResponse>,
+                        cx| {
+                let agent = usage_state.agent.clone();
+                cx.spawn(async move {
+                    let usage = match agent.open_store(std::path::Path::new("/")).await {
+                        Ok(Some(store)) => store.session_usage(req.session_id).await,
+                        Ok(None) => Err(anyhow::anyhow!("sessions are not saved")),
+                        Err(e) => Err(e),
+                    };
+                    match usage {
+                        Ok(u) => responder.respond(u.into()),
                         Err(e) => responder
                             .respond_with_error(Error::invalid_params().data(format!("{e:#}"))),
                     }
