@@ -88,14 +88,19 @@ export function pace(
   return { projected, full: projected >= 1 ? start + 1 / rate : null };
 }
 
-/** An SVG path through the non-null values over `slots` steps, bridging gaps. */
+/**
+ * An SVG path through the non-null values over `slots` steps, bridging missing hours.
+ * A drop (a window reset) starts a new segment instead of drawing down.
+ */
 export function linePath(values: (number | null)[], slots: number): string {
   const step = W / Math.max(slots - 1, 1);
   let d = '';
+  let last: number | null = null;
   values.forEach((v, i) => {
     if (v === null) return;
     const y = H - Math.min(v, 1) * H;
-    d += `${d ? 'L' : 'M'}${(i * step).toFixed(1)} ${y.toFixed(1)}`;
+    d += `${last !== null && v >= last ? 'L' : 'M'}${(i * step).toFixed(1)} ${y.toFixed(1)}`;
+    last = v;
   });
   return d;
 }
@@ -158,7 +163,7 @@ export interface Series {
     }
     path {
       stroke: var(--mat-sys-primary);
-      stroke-width: 2;
+      stroke-width: 1;
       stroke-linecap: round;
       stroke-linejoin: round;
     }

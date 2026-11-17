@@ -66,6 +66,10 @@ describe('stats helpers', () => {
     expect(linePath([null, null], 5)).toBe('');
   });
 
+  it('leaves a gap where a line drops', () => {
+    expect(linePath([0.5, 1, 0, 0.5], 5)).toBe('M0.0 100.0L250.0 0.0M500.0 200.0L750.0 100.0');
+  });
+
   it('projects a window to its reset', () => {
     const resetsAt = 7 * 24 * HOUR;
     // A day in at 10%: 70% at reset.
