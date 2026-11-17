@@ -108,15 +108,21 @@ import { Speech } from './speech';
       width: 18px;
       height: 18px;
     }
+    /* Ends 4px above the bubble's edge, like the speaker button. */
     .player {
-      margin: 4px 0 8px;
+      margin: 4px 0 2px;
     }
     .player audio {
       display: block;
       width: 100%;
+      margin-bottom: 6px;
     }
+    /* As tall as the speaker button, so the text sits where it was. */
     .status {
-      font-size: 0.9em;
+      display: flex;
+      align-items: center;
+      min-height: 26px;
+      font-size: 0.8em;
       opacity: 0.7;
     }
     /* A notice from rho, e.g. a slash command's reply: not a chat bubble. */
