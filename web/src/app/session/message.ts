@@ -37,6 +37,8 @@ import { Speech } from './speech';
             (loadedmetadata)="takeOver($any($event.target), s)"
             (play)="s.stopStream()"
           ></audio>
+        } @else if (!s.received()) {
+          <span class="status">Preparing audio…</span>
         } @else {
           <span class="status">Streaming, {{ s.received().toFixed(0) }} s so far…</span>
         }
@@ -146,9 +148,11 @@ export class ChatMessage {
       this.speech.set(undefined);
       return;
     }
-    // The rendered text without code blocks, which make no sense spoken.
+    // The rendered text, with code blocks fenced: rho has them described.
     const text = this.body().nativeElement.cloneNode(true) as HTMLElement;
-    text.querySelectorAll('pre').forEach((pre) => pre.remove());
+    text
+      .querySelectorAll('pre')
+      .forEach((pre) => pre.replaceWith(`\n\`\`\`\n${pre.textContent}\n\`\`\`\n`));
     this.speech.set(new Speech(server, text.textContent?.trim() ?? ''));
   }
 

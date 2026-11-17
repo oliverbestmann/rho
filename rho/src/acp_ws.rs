@@ -365,7 +365,12 @@ async fn tts(State(server): State<Arc<Server>>, headers: HeaderMap, text: String
     let Some(config) = &server.agent.tts else {
         return (StatusCode::NOT_FOUND, "no \"tts\" in the config").into_response();
     };
-    match crate::tts::speak(&server.http, config, &text).await {
+    let spoken = crate::tts::describe_code(&server.agent, &text).await;
+    let audio = match spoken {
+        Ok(text) => crate::tts::speak(&server.http, config, &text).await,
+        Err(e) => Err(e),
+    };
+    match audio {
         Ok(audio) => {
             let audio = audio.inspect(|r| {
                 if let Err(e) = r {

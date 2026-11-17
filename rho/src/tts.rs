@@ -6,7 +6,8 @@
 //! ```
 //!
 //! The audio streams as it is generated: raw PCM, 16 bit little endian,
-//! 24 kHz, mono.
+//! 24 kHz, mono. Code blocks are not read out: a model first replaces them
+//! with a description (`describe_code`).
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -15,7 +16,49 @@ use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::provider::sse;
+use std::path::Path;
+
+use crate::agent::Agent;
+use crate::provider::{Content, Event, Message, Request, Role, Thinking, sse};
+
+const DESCRIBE: &str = "You prepare text to be read aloud. Replace every fenced code block \
+(between ``` lines) with a short spoken description of what it shows or does, one or two \
+sentences, in the language of the surrounding text. Leave all other text exactly as it is. \
+Reply with the resulting text only.";
+
+/// `text` with its ``` code blocks described in words by the compaction
+/// model (else the default model). Unchanged without code blocks.
+pub async fn describe_code(agent: &Agent, text: &str) -> Result<String> {
+    if !text.contains("```") {
+        return Ok(text.to_string());
+    }
+    let model = agent.compact_model.as_ref().unwrap_or(&agent.model);
+    let provider = agent.registry.resolve(model)?;
+    let request = Request {
+        model: model.id().clone(),
+        system: DESCRIBE.into(),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![Content::text(text)],
+        }],
+        tools: vec![],
+        max_tokens: 8192,
+        thinking: Thinking::Off,
+    };
+    let info = provider.model_info(&request.model);
+    let mut events = provider.stream(request, &|_| {});
+    // Recorded like the API's requests, so the stats include it.
+    if let Ok(Some(store)) = agent.open_store(Path::new("/")).await {
+        events = store.recorded(events, None, model.clone(), info);
+    }
+    let mut out = String::new();
+    while let Some(event) = events.next().await {
+        if let Event::TextDelta(t) = event? {
+            out.push_str(&t);
+        }
+    }
+    Ok(out)
+}
 
 pub const KEY: &str = "tts";
 
