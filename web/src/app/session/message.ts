@@ -44,15 +44,16 @@ import { Speech } from './speech';
         }
       </div>
     }
-    @if (from() === 'agent') {
+    <!-- Hidden while the player shows; after an error it tries again. -->
+    @if (from() === 'agent' && (!speech() || speech()?.error())) {
       <button
         class="speak"
         type="button"
-        [title]="speech() ? 'Stop reading' : 'Read aloud'"
-        [attr.aria-label]="speech() ? 'Stop reading' : 'Read response aloud'"
-        (click)="toggleSpeech()"
+        title="Read aloud"
+        aria-label="Read response aloud"
+        (click)="speak()"
       >
-        <mat-icon>{{ speech() ? 'volume_off' : 'volume_up' }}</mat-icon>
+        <mat-icon>volume_up</mat-icon>
       </button>
     }
   `,
@@ -140,14 +141,10 @@ export class ChatMessage {
     inject(DestroyRef).onDestroy(() => this.speech()?.close());
   }
 
-  protected toggleSpeech() {
-    const speech = this.speech();
+  protected speak() {
     const server = this.settings.server();
-    speech?.close();
-    if (speech || !server) {
-      this.speech.set(undefined);
-      return;
-    }
+    this.speech()?.close();
+    if (!server) return;
     // The rendered text, with code blocks fenced: rho has them described.
     const text = this.body().nativeElement.cloneNode(true) as HTMLElement;
     text
