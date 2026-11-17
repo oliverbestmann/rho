@@ -6,13 +6,15 @@
 //! ```
 //!
 //! The audio streams as it is generated: raw PCM, 16 bit little endian,
-//! 24 kHz, mono. Code blocks are not read out: a model first replaces them
+//! 24 kHz, mono. Long text is spoken in chunks, one request each, as one
+//! request is limited (8000 bytes in, about 655 s out) and drifts after a
+//! few minutes. Code blocks are not read out: a model first replaces them
 //! with a description (`describe_code`).
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -76,16 +78,63 @@ pub struct Config {
 }
 
 fn default_model() -> String {
-    "gemini-3.1-flash-tts-preview".into()
+    "gemini-3.8-flash-tts".into()
 }
 
 fn default_voice() -> String {
     "Charon".into()
 }
 
-/// The audio of `text`, as PCM chunks while Gemini generates them. Fails
-/// before the first chunk if the request does.
+/// Bytes of text per request.
+const CHUNK: usize = 2000;
+
+/// `text` in pieces of at most `CHUNK` bytes, cut at a paragraph, else a
+/// sentence, else a space, else anywhere.
+fn chunks(mut text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    while text.len() > CHUNK {
+        let mut end = CHUNK;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let window = &text[..end];
+        // Cuts in the first third would make needlessly short chunks.
+        let cut = ["\n\n", "\n", ". ", "! ", "? ", " "]
+            .iter()
+            .filter_map(|sep| window.rfind(sep).map(|i| i + sep.len()))
+            .find(|&i| i > CHUNK / 3)
+            .unwrap_or(end);
+        out.push(text[..cut].trim());
+        text = &text[cut..];
+    }
+    out.push(text.trim());
+    out.retain(|c| !c.is_empty());
+    out
+}
+
+/// The audio of `text`, as PCM chunks while Gemini generates them, one
+/// request per `chunks` piece after the other. Fails before the first chunk
+/// if the first request does.
 pub async fn speak(
+    http: &reqwest::Client,
+    config: &Config,
+    text: &str,
+) -> Result<impl Stream<Item = Result<Vec<u8>>> + use<>> {
+    let mut pieces = chunks(text).into_iter().map(str::to_owned);
+    let head = speak_one(http, config, &pieces.next().unwrap_or_default()).await?;
+    // Generation is faster than playback, so the client has audio buffered
+    // while the next request starts.
+    let (http, config) = (http.clone(), config.clone());
+    let rest = stream::iter(pieces.collect::<Vec<_>>())
+        .then(move |piece| {
+            let (http, config) = (http.clone(), config.clone());
+            async move { speak_one(&http, &config, &piece).await }
+        })
+        .try_flatten();
+    Ok(head.chain(rest))
+}
+
+async fn speak_one(
     http: &reqwest::Client,
     config: &Config,
     text: &str,
@@ -141,7 +190,23 @@ fn pcm(data: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::pcm;
+    use super::{CHUNK, chunks, pcm};
+
+    #[test]
+    fn long_text_is_cut_at_paragraphs_then_sentences() {
+        assert_eq!(chunks("Hi."), ["Hi."]);
+        assert!(chunks("  ").is_empty());
+
+        let para = "word ".repeat(300); // 1500 bytes
+        let text = format!("{para}\n\n{para}\n\n{para}");
+        let out = chunks(&text);
+        assert_eq!(out, [para.trim(); 3]);
+
+        let sentences = "Ä short sentence. ".repeat(500);
+        let out = chunks(&sentences);
+        assert!(out.iter().all(|c| c.len() <= CHUNK && c.ends_with('.')));
+        assert_eq!(out.join(" "), sentences.trim());
+    }
 
     #[test]
     fn chunks_give_their_audio() {
