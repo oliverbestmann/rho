@@ -65,61 +65,72 @@ const ROWS: [string, (c: Counts) => number][] = [
     </button>
     <mat-menu #details xPosition="before">
       <div class="details">
-        <div>{{ tokens(usage().used) }} of {{ tokens(usage().size) }} tokens, {{ percent() }}%</div>
+        <h4>Context</h4>
+        <span>Used</span>
+        <b>{{ tokens(usage().used) }} / {{ tokens(usage().size) }} · {{ percent() }}%</b>
         @if (cache(); as cache) {
-          <div>{{ cache }}</div>
-        }
-        @if (table(); as rows) {
-          <table>
-            <tr>
-              <th></th>
-              <th>Last request</th>
-              <th>Session</th>
-            </tr>
-            @for (r of rows; track r.label) {
-              <tr>
-                <td>{{ r.label }}</td>
-                <td>{{ r.last }}</td>
-                <td>{{ r.session }}</td>
-              </tr>
-            }
-          </table>
+          <span>Cache</span>
+          <b>{{ cache }}</b>
         }
         @if (epochRequests() !== undefined) {
-          <div>Requests since compaction or clear: {{ epochRequests() }}</div>
-        }
-        @if (cost(); as cost) {
-          <div>Cost: {{ cost }}</div>
+          <span>Requests</span>
+          <b>{{ epochRequests() }}</b>
         }
         @if (sizes(); as s) {
-          <div>History in memory: ~{{ s.history }}</div>
+          <span>History</span>
+          <b>{{ s.history }}</b>
           @if (s.request) {
-            <div>Last request: ~{{ s.request }}</div>
+            <span>Last request</span>
+            <b>{{ s.request }}</b>
           }
         }
-        @if (all(); as a) {
-          <h4>All epochs</h4>
-          <div>
-            {{ count(a.requests) }} requests in {{ a.activeHours }} active hours,
-            {{ a.epochs }} compactions or clears
-          </div>
-          @if (a.first !== null && a.last !== null) {
-            <div>{{ date(a.first) }} – {{ date(a.last) }}</div>
+
+        @if (table(); as rows) {
+          <h4 class="cols"><span>Tokens</span><span>Last</span><span>Session</span></h4>
+          @for (r of rows; track r.label) {
+            <span>{{ r.label }}</span>
+            <i>{{ r.last }}</i>
+            <i>{{ r.session }}</i>
           }
+        }
+
+        <h4>Cost</h4>
+        @if (cost(); as cost) {
+          <span>Session</span>
+          <b>{{ cost }}</b>
+        }
+        @if (all(); as a) {
           @if (a.inputCost + a.outputCost + a.cacheReadCost + a.cacheWriteCost > 0) {
-            <div>
-              Input {{ usd(a.inputCost) }} · Cache read {{ usd(a.cacheReadCost) }} · Cache write
-              {{ usd(a.cacheWriteCost) }} · Output {{ usd(a.outputCost) }}
-            </div>
+            @for (t of costTypes(a); track t.label) {
+              <span class="sub">{{ t.label }}</span>
+              <b>{{ usd(t.cost) }}</b>
+            }
           }
           @for (m of a.models; track m.provider + m.model) {
-            <div>{{ m.model }}: {{ count(m.requests) }} requests, {{ usd(m.cost) }}</div>
+            <span class="sub" [class.gap]="$first" [title]="count(m.requests) + ' requests'">{{
+              m.model
+            }}</span>
+            <b [class.gap]="$first">{{ usd(m.cost) }}</b>
+          }
+
+          <h4>All epochs</h4>
+          <span>Requests</span>
+          <b>{{ count(a.requests) }}</b>
+          <span>Compactions</span>
+          <b>{{ a.epochs }}</b>
+          <span>Active hours</span>
+          <b>{{ a.activeHours }}</b>
+          @if (a.first !== null && a.last !== null) {
+            <span>First</span>
+            <b>{{ date(a.first) }}</b>
+            <span>Last</span>
+            <b>{{ date(a.last) }}</b>
           }
           @if (a.estimated) {
-            <div class="note">Partly estimated from turn notes</div>
+            <p>Older requests are estimated from turn notes.</p>
           }
         } @else if (allError()) {
-          <div class="note">{{ allError() }}</div>
+          <p>{{ allError() }}</p>
         }
       </div>
     </mat-menu>
@@ -150,31 +161,61 @@ const ROWS: [string, (c: Counts) => number][] = [
       stroke: light-dark(#cf222e, #f85149);
     }
     .details {
-      padding: 8px 16px;
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      column-gap: 16px;
+      row-gap: 2px;
+      width: 248px;
+      padding: 0 16px 8px;
       font: var(--mat-sys-body-medium);
+    }
+    .details > * {
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
-    table {
-      margin: 4px 0;
-      border-spacing: 12px 0;
-      margin-left: -12px;
-    }
-    th {
-      font: var(--mat-sys-label-medium);
+    h4 {
+      grid-column: 1 / -1;
+      margin: 12px -16px 4px;
+      padding: 8px 16px 0;
+      border-top: 1px solid var(--mat-sys-outline-variant);
+      font: var(--mat-sys-label-small);
       color: var(--mat-sys-on-surface-variant);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    h4:first-child {
+      margin-top: 0;
+      border-top: 0;
+    }
+    h4.cols {
+      display: grid;
+      grid-template-columns: subgrid;
+    }
+    h4.cols span + span {
       text-align: right;
     }
-    td + td {
+    b,
+    i {
+      font-style: normal;
+      font-weight: normal;
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
-    h4 {
-      margin: 12px 0 2px;
-      font: var(--mat-sys-label-medium);
-      color: var(--mat-sys-on-surface-variant);
-      text-transform: uppercase;
+    b {
+      grid-column: 2 / -1;
     }
-    .note {
+    .gap {
+      margin-top: 8px;
+    }
+    .sub {
+      padding-left: 12px;
+      color: var(--mat-sys-on-surface-variant);
+    }
+    p {
+      grid-column: 1 / -1;
+      margin: 8px 0 0;
+      white-space: normal;
       font: var(--mat-sys-body-small);
       color: var(--mat-sys-on-surface-variant);
     }
@@ -226,8 +267,8 @@ export class ContextUsage {
     if (!last || !session) return undefined;
     const rows = ROWS.map(([label, f]) => ({
       label,
-      last: this.count(f(last)),
-      session: this.count(f(session)),
+      last: compact.format(f(last)),
+      session: compact.format(f(session)),
     }));
     rows.push({ label: 'Cache hit', last: hitRate(last), session: hitRate(session) });
     return rows;
@@ -239,8 +280,8 @@ export class ContextUsage {
     const ttl = rhoMeta(this.usage()._meta)?.['cacheTtlSecs'];
     if (last == null || typeof ttl !== 'number') return undefined;
     const left = Math.round((last + ttl * 1000 - this.now()) / 1000);
-    if (left <= 0) return `Cache: cold (no request in the last ${Math.round(ttl / 60)}m)`;
-    return `Cache: warm, expires in ${Math.floor(left / 60)}m ${String(left % 60).padStart(2, '0')}s`;
+    if (left <= 0) return 'cold';
+    return `warm · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
   });
 
   /** rho's approximate history and last request sizes, from `_meta.rho`. */
@@ -274,7 +315,16 @@ export class ContextUsage {
   }
 
   protected tokens(n: number) {
-    return `${Math.round(n / 1000)}k`;
+    return compact.format(n);
+  }
+
+  protected costTypes(a: SessionUsage) {
+    return [
+      { label: 'Input', cost: a.inputCost },
+      { label: 'Cache read', cost: a.cacheReadCost },
+      { label: 'Cache write', cost: a.cacheWriteCost },
+      { label: 'Output', cost: a.outputCost },
+    ];
   }
 
   protected count(n: number) {
@@ -286,9 +336,20 @@ export class ContextUsage {
   }
 
   protected date(ms: number) {
-    return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    return new Date(ms).toLocaleString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   }
 }
+
+/** 207566626 -> "208M". */
+const compact = new Intl.NumberFormat(undefined, {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
 
 /** Share of the prompt read from cache, like rho's `/usage`. */
 function hitRate(c: Counts) {
