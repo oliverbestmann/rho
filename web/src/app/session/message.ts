@@ -1,8 +1,10 @@
 import { ClipboardModule } from '@angular/cdk/clipboard';
-import { Component, input, signal } from '@angular/core';
+import { Component, DestroyRef, ElementRef, inject, input, signal, viewChild } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { HighlightCode } from '../highlight';
 import { MarkdownPipe } from '../markdown';
+import { Settings } from '../settings';
+import { Speech } from './speech';
 
 /** A chat bubble, right for the user and left for the agent; a note is plain text. */
 @Component({
@@ -23,7 +25,34 @@ import { MarkdownPipe } from '../markdown';
         <mat-icon>{{ done() ? 'check' : 'content_copy' }}</mat-icon>
       </button>
     }
-    <div class="markdown" [innerHTML]="html" [appHighlight]="html"></div>
+    <div #body class="markdown" [innerHTML]="html" [appHighlight]="html"></div>
+    @if (speech(); as s) {
+      <div class="player">
+        @if (s.error(); as error) {
+          <span class="status">Cannot read aloud: {{ error }}</span>
+        } @else if (s.url(); as url) {
+          <audio
+            controls
+            [src]="url"
+            (loadedmetadata)="takeOver($any($event.target), s)"
+            (play)="s.stopStream()"
+          ></audio>
+        } @else {
+          <span class="status">Streaming, {{ s.received().toFixed(0) }} s so far…</span>
+        }
+      </div>
+    }
+    @if (from() === 'agent') {
+      <button
+        class="speak"
+        type="button"
+        [title]="speech() ? 'Stop reading' : 'Read aloud'"
+        [attr.aria-label]="speech() ? 'Stop reading' : 'Read response aloud'"
+        (click)="toggleSpeech()"
+      >
+        <mat-icon>{{ speech() ? 'volume_off' : 'volume_up' }}</mat-icon>
+      </button>
+    }
   `,
   styles: `
     :host {
@@ -41,12 +70,15 @@ import { MarkdownPipe } from '../markdown';
     :host(.agent) {
       position: relative;
       padding-right: 36px;
+      /* Room for the copy and speaker buttons. */
+      min-height: 64px;
       align-self: flex-start;
       max-width: 100%;
       background: var(--mat-sys-tertiary-container);
       color: var(--mat-sys-on-tertiary-container);
     }
-    .copy {
+    .copy,
+    .speak {
       position: absolute;
       top: 4px;
       right: 4px;
@@ -59,13 +91,30 @@ import { MarkdownPipe } from '../markdown';
       opacity: 0.5;
       cursor: pointer;
     }
-    .copy:hover {
+    .speak {
+      top: auto;
+      bottom: 4px;
+    }
+    .copy:hover,
+    .speak:hover {
       opacity: 1;
     }
-    .copy mat-icon {
+    .copy mat-icon,
+    .speak mat-icon {
       font-size: 18px;
       width: 18px;
       height: 18px;
+    }
+    .player {
+      margin: 4px 0 8px;
+    }
+    .player audio {
+      display: block;
+      width: 100%;
+    }
+    .status {
+      font-size: 0.9em;
+      opacity: 0.7;
     }
     /* A notice from rho, e.g. a slash command's reply: not a chat bubble. */
     :host(.note) {
@@ -81,6 +130,36 @@ export class ChatMessage {
   readonly from = input.required<'user' | 'agent' | 'note'>();
   readonly text = input.required<string>();
   protected readonly done = signal(false);
+  protected readonly speech = signal<Speech | undefined>(undefined);
+  private readonly settings = inject(Settings);
+  private readonly body = viewChild.required<ElementRef<HTMLElement>>('body');
+
+  constructor() {
+    inject(DestroyRef).onDestroy(() => this.speech()?.close());
+  }
+
+  protected toggleSpeech() {
+    const speech = this.speech();
+    const server = this.settings.server();
+    speech?.close();
+    if (speech || !server) {
+      this.speech.set(undefined);
+      return;
+    }
+    // The rendered text without code blocks, which make no sense spoken.
+    const text = this.body().nativeElement.cloneNode(true) as HTMLElement;
+    text.querySelectorAll('pre').forEach((pre) => pre.remove());
+    this.speech.set(new Speech(server, text.textContent?.trim() ?? ''));
+  }
+
+  /** The whole audio is there: the player goes on where the stream is. */
+  protected takeOver(audio: HTMLAudioElement, speech: Speech) {
+    const at = speech.position();
+    // Played to the end already; starting would begin again from the top.
+    if (at >= audio.duration - 0.1) return speech.stopStream();
+    audio.currentTime = at;
+    audio.play().catch(() => {});
+  }
 
   protected copied(ok: boolean) {
     if (!ok) return;

@@ -138,6 +138,8 @@ pub struct Agent {
     pub features: Vec<Feature>,
     /// The OpenAI-compatible endpoints, from the `api` config.
     pub api: crate::api::Config,
+    /// Text to speech for the web client, from the `tts` config.
+    pub tts: Option<crate::tts::Config>,
     /// Where sessions are saved, by cwd. Each session opens its own
     /// connection. `None`: sessions are not saved and cannot be resumed.
     pub sessions_db: Option<SessionsDb>,
@@ -384,6 +386,7 @@ impl Agent {
             sandbox: Default::default(),
             features: vec![],
             api: Default::default(),
+            tts: None,
             sessions_db: None,
         }
     }

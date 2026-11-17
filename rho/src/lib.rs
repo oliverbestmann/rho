@@ -21,6 +21,7 @@ pub mod provider;
 pub mod sandbox;
 pub mod store;
 pub mod tools;
+pub mod tts;
 
 use std::path::PathBuf;
 

@@ -17,6 +17,8 @@
 //! `/share/<session>/<mac>/<path>` serves a file shared with `ShareFile`:
 //! the mac stands in for the token, and the file is opened under the open
 //! session's sandbox.
+//!
+//! `POST /tts` reads its body aloud (`crate::tts`), with the token.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,7 +34,7 @@ use axum::handler::HandlerWithoutStateExt;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::serve::Listener;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -62,6 +64,7 @@ struct Server {
     token: Option<String>,
     /// The web client's files, see `web_dir`.
     web: Option<PathBuf>,
+    http: reqwest::Client,
 }
 
 /// The built web client: `RHO_WEB_DIR`, else the one the build was given
@@ -88,7 +91,8 @@ where
 {
     let mut app = Router::new()
         .route("/", get(upgrade))
-        .route("/share/{sid}/{mac}/{*path}", get(shared_file));
+        .route("/share/{sid}/{mac}/{*path}", get(shared_file))
+        .route("/tts", post(tts));
     if agent.api.enabled {
         app = app.merge(api_router(agent.clone(), token.as_deref()));
     }
@@ -112,6 +116,7 @@ where
         hub,
         token,
         web,
+        http: reqwest::Client::new(),
     }));
     axum::serve(listener, app).await.context("acp websocket")
 }
@@ -348,6 +353,33 @@ async fn shared_file(
         body,
     )
         .into_response()
+}
+
+/// The body read aloud, streamed as it is generated.
+async fn tts(State(server): State<Arc<Server>>, headers: HeaderMap, text: String) -> Response {
+    if let Some(token) = &server.token
+        && !authorized(&headers, token)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(config) = &server.agent.tts else {
+        return (StatusCode::NOT_FOUND, "no \"tts\" in the config").into_response();
+    };
+    match crate::tts::speak(&server.http, config, &text).await {
+        Ok(audio) => {
+            let audio = audio.inspect(|r| {
+                if let Err(e) = r {
+                    eprintln!("rho tts: {e:#}");
+                }
+            });
+            let body = axum::body::Body::from_stream(audio);
+            ([(header::CONTENT_TYPE, crate::tts::CONTENT_TYPE)], body).into_response()
+        }
+        Err(e) => {
+            eprintln!("rho tts: {e:#}");
+            (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()
+        }
+    }
 }
 
 /// The web client's `index.html`.
