@@ -155,6 +155,30 @@
   ],
   "github-copilot": [
     {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen",
+      "contextWindow": 1048576,
+      "price": [
+        1.5,
+        7.5,
+        0.075,
+        0
+      ],
+      "priceAbove": null
+    },
+    {
+      "id": "gemini-4-carbon",
+      "name": "Gemini 4 Carbon",
+      "contextWindow": 1048576,
+      "price": [
+        2,
+        10,
+        0.1,
+        0
+      ],
+      "priceAbove": null
+    },
+    {
       "id": "claude-fable-5.2",
       "name": "Claude Fable 5.2",
       "contextWindow": 1000000,
@@ -185,6 +209,18 @@
           2.5
         ]
       ]
+    },
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "contextWindow": 1048576,
+      "price": [
+        2,
+        10,
+        0.1,
+        0
+      ],
+      "priceAbove": null
     },
     {
       "id": "claude-haiku-5.5",
@@ -309,6 +345,18 @@
           25
         ]
       ]
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash",
+      "contextWindow": 1000000,
+      "price": [
+        0.75,
+        3.75,
+        0.075,
+        0
+      ],
+      "priceAbove": null
     },
     {
       "id": "claude-fable-5.1",

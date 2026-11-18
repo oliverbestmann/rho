@@ -424,7 +424,7 @@ async fn remote_rho_round_trip() {
         tools: vec![rho::provider::ToolSpec {
             name: ToolName::new("f"),
             description: "d".into(),
-            input_schema: json!({"type": "object"}),
+            input_schema: json!({"type": "object", "properties": {}}),
         }],
         max_tokens: 123,
         thinking: Thinking::XHigh,

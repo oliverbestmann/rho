@@ -5,7 +5,7 @@
 # price is USD per million tokens [input, output, cache read, cache write];
 # priceAbove is [prompt tokens, price] for longer prompts, or null.
 # Newest first. Left out: deprecated models, Claude before 4.6 (no adaptive
-# thinking) on Anthropic, and anything but GPT and Claude on Copilot.
+# thinking) on Anthropic, and anything but GPT, Claude and Gemini on Copilot.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,6 +25,6 @@ curl -fsS https://models.dev/api.json | jq '
     });
   {
     anthropic: (.anthropic | models(.release_date >= "2026-02-04" and (.id | test("-[0-9]{8}$") | not))),
-    "github-copilot": (."github-copilot" | models(.id | test("^(gpt|claude)-")))
+    "github-copilot": (."github-copilot" | models(.id | test("^(gpt|claude|gemini)-")))
   }
 ' > rho/src/models.json

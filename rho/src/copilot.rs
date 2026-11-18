@@ -2,8 +2,9 @@
 //! `github-copilot` provider.
 //!
 //! Copilot serves Claude over the Anthropic Messages API (`anthropic`
-//! module) and GPT over the OpenAI Responses API (`openai` module); the
-//! model id picks the API. Differences to the direct APIs:
+//! module), Gemini over OpenAI Chat Completions (`openai_chat` module) and
+//! GPT over the OpenAI Responses API (`openai` module); the model id picks
+//! the API. Differences to the direct APIs:
 //! - Auth: a GitHub OAuth token from the device flow (`rho login
 //!   github-copilot`) is exchanged for a short-lived Copilot token, stored as
 //!   `access` with the GitHub token as `refresh` (pi's `auth.json` layout).
@@ -12,8 +13,8 @@
 //! - VS Code Copilot Chat headers, plus `X-Initiator`, which tells Copilot
 //!   whether the user or the agent started a request.
 //!
-//! Not supported: Gemini and Kimi (OpenAI Chat Completions API), GitHub
-//! Enterprise Server domains, enabling model policies at login.
+//! Not supported: Kimi, GitHub Enterprise Server domains, enabling model
+//! policies at login.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,9 +26,25 @@ use serde_json::Value;
 
 use crate::auth::{AuthStore, ClientId, CredentialKind, Credentials, Secret};
 use crate::provider::{
-    Content, Event, ModelId, ModelInfo, Provider, ProviderName, Request, Role, sse,
+    Content, Event, ModelId, ModelInfo, Provider, ProviderName, Request, Role, Thinking, sse,
 };
-use crate::{anthropic, openai};
+use crate::{anthropic, openai, openai_chat};
+
+/// The API Copilot serves a model over.
+#[derive(Clone, Copy, PartialEq)]
+enum Api {
+    Messages,
+    Chat,
+    Responses,
+}
+
+fn api(model: &ModelId) -> Api {
+    match model.as_str() {
+        m if m.starts_with("claude") => Api::Messages,
+        m if m.starts_with("gemini") => Api::Chat,
+        _ => Api::Responses,
+    }
+}
 
 /// Key in the credential file and `rho login` argument.
 pub const KEY: ProviderName = ProviderName::from_static("github-copilot");
@@ -62,12 +79,13 @@ impl Copilot {
             .fresh(async |http, creds| copilot_token(http, &creds.refresh).await)
             .await?;
         let base = base_url(creds.access.expose());
-        let req = if is_claude(&request.model) {
-            self.http
+        let req = match api(&request.model) {
+            Api::Messages => self
+                .http
                 .post(format!("{base}/v1/messages"))
-                .header("anthropic-version", "2023-06-01")
-        } else {
-            self.http.post(format!("{base}/responses"))
+                .header("anthropic-version", "2023-06-01"),
+            Api::Chat => self.http.post(format!("{base}/chat/completions")),
+            Api::Responses => self.http.post(format!("{base}/responses")),
         };
         let mut req = req
             .json(&body)
@@ -99,20 +117,33 @@ impl Provider for Copilot {
         request: Request,
         before_send: &dyn Fn(&mut Value),
     ) -> BoxStream<'static, Result<Event>> {
-        let claude = is_claude(&request.model);
-        let mut body = if claude {
-            serde_json::to_value(anthropic::build_body(&request)).expect("body is JSON")
-        } else {
-            openai::build_body(&request)
+        let api = api(&request.model);
+        let mut body = match api {
+            Api::Messages => {
+                serde_json::to_value(anthropic::build_body(&request)).expect("body is JSON")
+            }
+            Api::Chat => {
+                let mut body = openai_chat::build_body(&request);
+                body["reasoning_effort"] = chat_effort(request.thinking).into();
+                body
+            }
+            Api::Responses => openai::build_body(&request),
         };
         before_send(&mut body);
         let send = self.clone().send(request, body);
-        if claude {
-            let mut parser = anthropic::SseParser::default();
-            sse::events(send, move |b| parser.feed(b))
-        } else {
-            let mut parser = openai::SseParser::default();
-            sse::events(send, move |b| parser.feed(b))
+        match api {
+            Api::Messages => {
+                let mut parser = anthropic::SseParser::default();
+                sse::events(send, move |b| parser.feed(b))
+            }
+            Api::Chat => {
+                let mut parser = openai_chat::SseParser::default();
+                sse::events(send, move |b| parser.feed(b))
+            }
+            Api::Responses => {
+                let mut parser = openai::SseParser::default();
+                sse::events(send, move |b| parser.feed(b))
+            }
         }
     }
 
@@ -121,9 +152,14 @@ impl Provider for Copilot {
     }
 }
 
-/// Claude models use the Messages API, everything else the Responses API.
-fn is_claude(model: &ModelId) -> bool {
-    model.as_str().starts_with("claude")
+/// Copilot's Gemini models take only low, medium and high (some also
+/// xhigh); thinking cannot be turned off.
+fn chat_effort(thinking: Thinking) -> &'static str {
+    match thinking {
+        Thinking::Off | Thinking::Low => "low",
+        Thinking::Medium => "medium",
+        Thinking::High | Thinking::XHigh | Thinking::Max => "high",
+    }
 }
 
 /// API host from the token's `proxy-ep=proxy.<host>` field, like pi.

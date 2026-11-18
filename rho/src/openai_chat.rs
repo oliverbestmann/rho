@@ -172,10 +172,15 @@ pub fn build_body(request: &Request) -> Value {
             .tools
             .iter()
             .map(|t| {
+                let mut parameters = t.input_schema.clone();
+                // Copilot's Gemini rejects an object schema without properties.
+                if parameters["type"] == "object" && parameters.get("properties").is_none() {
+                    parameters["properties"] = json!({});
+                }
                 json!({"type": "function", "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.input_schema,
+                    "parameters": parameters,
                 }})
             })
             .collect();
@@ -227,14 +232,19 @@ fn assistant(content: &[Content]) -> Value {
     let mut texts = vec![];
     let mut reasoning = vec![];
     let mut calls = vec![];
+    let mut copilot = None;
     for c in content {
         match c {
             Content::Text { text } => texts.push(json!({"type": "text", "text": text})),
             Content::Thinking {
                 thinking,
                 signature,
-            } => reasoning
-                .push(json!({"type": "reasoning.text", "text": thinking, "signature": signature})),
+            } => match opaque(signature) {
+                Some(o) => copilot = Some((thinking, o)),
+                None => reasoning.push(
+                    json!({"type": "reasoning.text", "text": thinking, "signature": signature}),
+                ),
+            },
             Content::RedactedThinking { data } => {
                 reasoning.push(json!({"type": "reasoning.encrypted", "data": data}))
             }
@@ -258,6 +268,10 @@ fn assistant(content: &[Content]) -> Value {
     if !reasoning.is_empty() {
         message["reasoning_details"] = json!(reasoning);
     }
+    if let Some((text, opaque)) = copilot {
+        message["reasoning_text"] = json!(text);
+        message["reasoning_opaque"] = json!(opaque);
+    }
     if !calls.is_empty() {
         message["tool_calls"] = json!(calls);
     }
@@ -269,12 +283,26 @@ fn image(source: &ImageSource) -> Value {
     json!({"type": "image_url", "image_url": {"url": format!("data:{media_type};base64,{data}")}})
 }
 
+/// Copilot's Gemini reasoning signature, kept as the signature
+/// `{"reasoning_opaque": ...}` of a thinking block. Starting with `{`, the
+/// Anthropic API skips it like OpenAI reasoning items (`openai::is_reasoning`).
+fn opaque(signature: &str) -> Option<String> {
+    if !signature.starts_with('{') {
+        return None;
+    }
+    let v: Value = serde_json::from_str(signature).ok()?;
+    v["reasoning_opaque"].as_str().map(String::from)
+}
+
 /// Incremental parser for `chat.completion.chunk` server-sent events.
 #[derive(Default)]
 pub struct SseParser {
     buf: Vec<u8>,
     /// Tool calls by index: id, name, arguments so far.
     calls: Vec<(String, String, String)>,
+    /// Copilot's reasoning summary and signature (Gemini).
+    reasoning_text: String,
+    reasoning_opaque: Option<String>,
 }
 
 impl SseParser {
@@ -298,6 +326,13 @@ impl SseParser {
             let delta = &choice["delta"];
             if let Some(t) = text(&delta["reasoning"]) {
                 out.push(Ok(Event::ThinkingDelta(t)));
+            }
+            if let Some(t) = text(&delta["reasoning_text"]) {
+                self.reasoning_text.push_str(&t);
+                out.push(Ok(Event::ThinkingDelta(t)));
+            }
+            if let Some(o) = text(&delta["reasoning_opaque"]) {
+                self.reasoning_opaque = Some(o);
             }
             if let Some(t) = text(&delta["content"]) {
                 out.push(Ok(Event::TextDelta(t)));
@@ -328,6 +363,12 @@ impl SseParser {
                 args.push_str(f["arguments"].as_str().unwrap_or_default());
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
+                if let Some(o) = self.reasoning_opaque.take() {
+                    out.push(Ok(Event::Block(Content::Thinking {
+                        thinking: std::mem::take(&mut self.reasoning_text),
+                        signature: json!({"reasoning_opaque": o}).to_string(),
+                    })));
+                }
                 let tool_use = !self.calls.is_empty();
                 for (id, name, args) in self.calls.drain(..) {
                     let args = if args.trim().is_empty() { "{}" } else { &args };
@@ -402,6 +443,67 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn copilot_reasoning_round_trips() {
+        let chunks = [
+            json!({"choices": [{"index": 0, "delta": {"reasoning_text": "Hm."}}]}),
+            json!({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{}"}}], "reasoning_opaque": "SIG"}}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ];
+        let sse: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+        let out: Vec<Event> = SseParser::default()
+            .feed(sse.as_bytes())
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(out[0], Event::ThinkingDelta("Hm.".into()));
+        let Event::Block(thinking) = &out[1] else {
+            panic!("{out:?}")
+        };
+        assert!(matches!(&out[2], Event::Block(Content::ToolUse { .. })));
+        // Neither the Anthropic nor the Responses API sends it.
+        assert!(crate::openai::is_reasoning(thinking));
+        let Event::Block(call) = &out[2] else {
+            unreachable!()
+        };
+        let message = assistant(&[thinking.clone(), call.clone()]);
+        assert_eq!(
+            (&message["reasoning_text"], &message["reasoning_opaque"]),
+            (&json!("Hm."), &json!("SIG"))
+        );
+        assert!(message.get("reasoning_details").is_none());
+        let responses = crate::openai::build_body(&Request {
+            model: ModelId::new("gpt"),
+            system: String::new(),
+            messages: vec![crate::provider::Message {
+                role: Role::Assistant,
+                content: vec![thinking.clone()],
+            }],
+            tools: vec![],
+            max_tokens: 1,
+            thinking: crate::provider::Thinking::Off,
+        });
+        assert_eq!(responses["input"], json!([]));
+    }
+
+    #[test]
+    fn object_schemas_get_properties() {
+        let body = build_body(&Request {
+            model: ModelId::new("gemini"),
+            system: String::new(),
+            messages: vec![],
+            tools: vec![crate::provider::ToolSpec {
+                name: crate::provider::ToolName::new("List"),
+                description: "d".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            max_tokens: 1,
+            thinking: crate::provider::Thinking::Off,
+        });
+        let parameters = &body["tools"][0]["function"]["parameters"];
+        assert_eq!(parameters, &json!({"type": "object", "properties": {}}));
     }
 
     #[test]

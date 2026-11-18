@@ -76,7 +76,10 @@ pub fn build_body(request: &Request) -> Value {
                     "arguments": args.to_string(),
                 })),
                 (Role::Assistant, Content::Thinking { signature, .. }) if is_reasoning(c) => {
-                    if let Ok(item) = serde_json::from_str::<Value>(signature) {
+                    // Not Copilot's Gemini signatures (`openai_chat`).
+                    if let Ok(item) = serde_json::from_str::<Value>(signature)
+                        && item["type"] == "reasoning"
+                    {
                         input.push(item);
                     }
                 }
