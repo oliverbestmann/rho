@@ -589,6 +589,12 @@ Approve or "Skip, let me add something". Approved: from `plan` back to
 run stops, so the next message can add to the plan. Picking `write` in the
 selector needs no approval (ADRs 0047, 0054).
 
+`PresentDiff { path }` asks the user to review a diff that the model wrote
+to a file, for example before a push. It asks Approve or "Request changes"
+like `PresentPlan`. The web client shows the diff on its own review page
+with syntax highlighting and line comments, and lets you comment on the
+blocks of a plan. Comments come back as the next prompt (ADR 0076).
+
 ## Images
 
 rho advertises `promptCapabilities.image`, so ACP clients can attach images

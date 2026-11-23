@@ -4,5 +4,9 @@
     "ws": true,
     "changeOrigin": true,
     "pathRewrite": { "^/dev/acp/?": "/" }
+  },
+  "/share": {
+    "target": "http://localhost:8766",
+    "changeOrigin": true
   }
 }

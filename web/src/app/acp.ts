@@ -260,18 +260,46 @@ export class Acp {
     if (!state) return;
     await this.unqueue(sessionId, id);
     this.cancel(sessionId);
+    await this.idle(sessionId);
+    await this.prompt(sessionId, text);
+  }
+
+  /**
+   * Answers a permission request with its reject option and sends `text`
+   * once the turn ended: review comments that go with "Request changes".
+   */
+  async rejectWith(ask: Extract<Ask, { kind: 'permission' }>, text: string) {
+    const reject = ask.request.options.find((o) => o.kind.startsWith('reject'));
+    ask.answer({
+      outcome: reject
+        ? { outcome: 'selected', optionId: reject.optionId }
+        : { outcome: 'cancelled' },
+    });
+    await this.idle(ask.sessionId);
+    await this.prompt(ask.sessionId, text);
+  }
+
+  /** Sends a prompt, or queues it in rho while a turn runs. */
+  async send(sessionId: string, text: string) {
+    const state = this.opened.get(sessionId)?.state;
+    if (this.prompting().has(sessionId) || state?.running()) await this.enqueue(sessionId, text);
+    else await this.prompt(sessionId, text);
+  }
+
+  /** Resolves when no turn of the session runs. */
+  private idle(sessionId: string) {
+    const state = this.opened.get(sessionId)?.state;
     // shortcut: waits forever if the connection drops first, the prompt is then lost.
-    await new Promise<void>((done) => {
+    return new Promise<void>((done) => {
       const ref = effect(
         () => {
-          if (this.prompting().has(sessionId) || state.running()) return;
+          if (this.prompting().has(sessionId) || state?.running()) return;
           ref.destroy();
           done();
         },
         { injector: this.injector },
       );
     });
-    await this.prompt(sessionId, text);
   }
 
   /** The data of a tool call image that rho sent as a `rho-image:` uri. */

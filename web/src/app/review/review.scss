@@ -1,0 +1,258 @@
+// A fixed column: only the files scroll, the toolbar and the answer bar stay.
+:host {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden !important;
+  // Lets `expand` animate to and from `height: auto` (Chromium; elsewhere it only fades).
+  interpolate-size: allow-keywords;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+// `animate.enter` / `animate.leave` classes: Angular removes a leaving
+// element when its animation ends.
+.expand-enter {
+  overflow: clip;
+  animation: expand 200ms var(--ease) both;
+}
+
+.expand-leave {
+  overflow: clip;
+  animation: expand 150ms var(--ease) reverse both;
+}
+
+.fade-enter {
+  animation: fade 200ms var(--ease) both;
+}
+
+.rise-enter {
+  animation: rise 250ms var(--ease) both;
+}
+
+@keyframes expand {
+  from {
+    height: 0;
+    padding-block: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+.chevron {
+  transition: transform 200ms var(--ease);
+
+  &.closed {
+    transform: rotate(-90deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .expand-enter,
+  .expand-leave,
+  .fade-enter,
+  .rise-enter {
+    animation: none;
+  }
+
+  .chevron,
+  .line,
+  .no {
+    transition: none;
+  }
+}
+
+.top {
+  gap: 8px;
+}
+
+.title {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.sub {
+  font: var(--mat-sys-label-medium);
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.adds {
+  color: light-dark(#1a7f37, #3fb950);
+}
+
+.dels {
+  color: var(--mat-sys-error);
+}
+
+main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+main > * {
+  width: 100%;
+  max-width: 1100px;
+  margin-inline: auto;
+  box-sizing: border-box;
+}
+
+.loading {
+  margin: 32px auto;
+}
+
+.error {
+  color: var(--mat-sys-on-surface-variant);
+  text-align: center;
+}
+
+.file {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: var(--mat-sys-corner-medium);
+  // Not hidden: the sticky header must stick to the scrolling `main`.
+  overflow: clip;
+}
+
+// Sticks at the top of `main`'s padding box: minus its padding.
+// A scroll-state container, so the bar can tell when it is stuck.
+header {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  container-type: scroll-state;
+  cursor: pointer;
+  // The page colour behind the bar's top corners, so scrolled lines do not show
+  // there; the bottom corners float over the lines.
+  background: linear-gradient(var(--mat-sys-surface) 50%, transparent 50%);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--mat-sys-corner-medium) var(--mat-sys-corner-medium) 0 0;
+  background: var(--mat-sys-surface-container);
+  font: var(--mat-sys-label-large);
+  transition:
+    border-radius 150ms var(--ease),
+    box-shadow 150ms var(--ease);
+
+  .path {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-family: Iosevka, ui-monospace, monospace;
+  }
+
+  .status {
+    color: var(--mat-sys-on-surface-variant);
+  }
+}
+
+// Stuck over the lines: a floating bar with all corners round (Chromium only).
+@container scroll-state(stuck: top) {
+  .bar {
+    border-radius: var(--mat-sys-corner-medium);
+    box-shadow: var(--mat-sys-level2);
+  }
+}
+
+.code {
+  font-family: Iosevka, ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.hunk,
+.note {
+  padding: 2px 8px;
+  color: var(--mat-sys-on-surface-variant);
+  background: color-mix(in srgb, var(--mat-sys-primary) 8%, transparent);
+  overflow-wrap: anywhere;
+}
+
+// Numbers, sign and text; long lines wrap, so phones need no sideways scrolling.
+.line {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+  transition: outline-color 150ms var(--ease);
+
+  &.add {
+    background: color-mix(in srgb, #2e7d32 18%, transparent);
+  }
+
+  &.del {
+    background: color-mix(in srgb, var(--mat-sys-error) 18%, transparent);
+  }
+
+  &.commented .no {
+    color: var(--mat-sys-tertiary);
+    font-weight: bold;
+  }
+
+  &.selected {
+    outline-color: var(--mat-sys-tertiary);
+  }
+}
+
+.no {
+  min-width: 3ch;
+  padding: 0 4px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--mat-sys-outline);
+  user-select: none;
+  transition: color 150ms var(--ease);
+}
+
+.text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0 8px 0 6px;
+  // Keeps empty lines one line high.
+  min-height: 1lh;
+}
+
+// A comment or its box: a full-width band under the line, like on GitHub.
+.thread {
+  padding: 8px 12px;
+  border-block: 1px solid var(--mat-sys-outline-variant);
+  background: var(--mat-sys-surface-container-low);
+}
+
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--mat-sys-outline-variant);
+  background: var(--mat-sys-surface-container-low);
+}
+
+.answered {
+  flex: 1;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-medium);
+}

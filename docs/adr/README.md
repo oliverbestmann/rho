@@ -83,3 +83,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0073](0073-share-file-links.md) | ShareFile links | Accepted |
 | [0074](0074-transcripts-kept-in-indexeddb.md) | Transcripts kept in IndexedDB, saved transcripts in rho | Accepted |
 | [0075](0075-request-log-for-stats.md) | Request log for stats | Accepted |
+| [0076](0076-review-comments-on-plans-and-diffs.md) | Review comments on plans and diffs | Accepted |

@@ -1,0 +1,139 @@
+<mat-toolbar class="top">
+  <a matIconButton routerLink="../.." queryParamsHandling="preserve" aria-label="Back">
+    <mat-icon>arrow_back</mat-icon>
+  </a>
+  <span class="title">
+    <span>Review</span>
+    @if (files().length) {
+      <span class="sub">
+        {{ files().length }} {{ files().length === 1 ? 'file' : 'files' }}
+        <span class="adds">+{{ totals().adds }}</span>
+        <span class="dels">−{{ totals().dels }}</span>
+      </span>
+    }
+  </span>
+</mat-toolbar>
+
+<main>
+  @if (diff.error(); as error) {
+    <p class="error">Diff not available: {{ error.message }}</p>
+  } @else if (diff.isLoading() || (!link() && loading())) {
+    <mat-spinner class="loading" diameter="40" aria-label="Loading" />
+  } @else if (!link()) {
+    <p class="error">This review is not in the session.</p>
+  } @else if (!files().length) {
+    <p class="error">The diff is empty.</p>
+  }
+
+  @for (f of files(); track $index; let fi = $index) {
+    <section class="file">
+      <header (click)="toggle(fi)">
+        <div class="bar">
+          <mat-icon class="chevron" [class.closed]="collapsed().has(fi)">expand_more</mat-icon>
+          <span class="path">
+            @if (f.status === 'renamed') {
+              {{ f.oldPath }} →
+            }
+            {{ f.path }}
+          </span>
+          @if (f.status !== 'modified' && f.status !== 'renamed') {
+            <span class="status">{{ f.status }}</span>
+          }
+          <span class="adds">+{{ f.adds }}</span>
+          <span class="dels">−{{ f.dels }}</span>
+          <mat-checkbox
+            [checked]="viewed().has(fi)"
+            (click)="$event.stopPropagation()"
+            (change)="setViewed(fi, $event.checked)"
+          >
+            Viewed
+          </mat-checkbox>
+        </div>
+      </header>
+      @if (!collapsed().has(fi)) {
+        <div class="code markdown" animate.enter="expand-enter" animate.leave="expand-leave">
+          @if (f.binary) {
+            <div class="note">Binary file</div>
+          }
+          @defer (on viewport) {
+            @let lines = html(f);
+            @for (h of f.hunks; track $index; let hi = $index) {
+              <div class="hunk">{{ h.header }}</div>
+              @for (l of h.lines; track $index; let li = $index) {
+                @let k = key(fi, hi, li);
+                @let comment = comments()[k];
+                <div
+                  class="line"
+                  [class]="l.kind"
+                  [class.selected]="selected() === k"
+                  [class.commented]="!!comment?.trim()"
+                  (click)="select(k)"
+                >
+                  <span class="no">{{ l.old }}</span>
+                  <span class="no">{{ l.new }}</span>
+                  <span class="text" [innerHTML]="lines[hi][li]"></span>
+                </div>
+                @if (selected() === k) {
+                  <div class="thread" animate.enter="expand-enter" animate.leave="expand-leave">
+                    <textarea
+                      class="comment-input"
+                      placeholder="Comment"
+                      aria-label="Comment"
+                      cdkTextareaAutosize
+                      cdkAutosizeMinRows="2"
+                      [value]="comment ?? ''"
+                      (input)="set(k, $any($event.target).value)"
+                    ></textarea>
+                    <div class="comment-actions">
+                      <button matButton (click)="set(k, ''); selected.set(undefined)">
+                        Delete
+                      </button>
+                      <button matButton="tonal" (click)="selected.set(undefined)">Done</button>
+                    </div>
+                  </div>
+                } @else if (comment?.trim()) {
+                  <div class="thread" animate.enter="fade-enter">
+                    <div class="comment-text" (click)="selected.set(k)">{{ comment }}</div>
+                  </div>
+                }
+              }
+            }
+          } @placeholder {
+            <div [style.height.px]="estimate(f)"></div>
+          }
+        </div>
+      }
+    </section>
+  }
+
+  @if (files().length) {
+    <textarea
+      class="comment-input"
+      placeholder="Overall comment"
+      aria-label="Overall comment"
+      cdkTextareaAutosize
+      cdkAutosizeMinRows="2"
+      [value]="comments()[OVERALL] ?? ''"
+      (input)="set(OVERALL, $any($event.target).value)"
+    ></textarea>
+  }
+</main>
+
+@if (files().length) {
+  <footer animate.enter="rise-enter">
+    @if (ask()) {
+      <button matButton="outlined" (click)="send()">
+        Request changes
+        @if (count()) {
+          ({{ count() }})
+        }
+      </button>
+      <button matButton="filled" (click)="approve()">Approve</button>
+    } @else {
+      <span class="answered">Already answered</span>
+      <button matButton="filled" [disabled]="!count()" (click)="send()">
+        Send comments ({{ count() }})
+      </button>
+    }
+  </footer>
+}

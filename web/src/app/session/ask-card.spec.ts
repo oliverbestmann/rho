@@ -1,6 +1,9 @@
 import { TestBed } from '@angular/core/testing';
 import type * as acp from '@agentclientprotocol/sdk';
 import { Ask } from '../acp';
+import { provideRouter } from '@angular/router';
+import { parseDiff } from '../review/diff';
+import { Diffs } from '../review/diffs';
 import { AskCard } from './ask-card';
 
 async function render(ask: Ask, call?: acp.ToolCall) {
@@ -64,6 +67,94 @@ describe('AskCard', () => {
     );
     expect(el.textContent).toContain('Commit the fix');
     expect(el.querySelector('code')?.textContent).toBe('git commit');
+  });
+
+  it('turns plan comments into Request changes', async () => {
+    localStorage.clear();
+    const answer = vi.fn();
+    const { el, stable } = await render(
+      {
+        kind: 'permission',
+        id: 1,
+        sessionId: 's',
+        answer,
+        request: {
+          sessionId: 's',
+          toolCall: { toolCallId: 'p', title: 'Plan' },
+          options: [
+            { optionId: 'allow', name: 'Approve', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Skip', kind: 'reject_once' },
+          ],
+        },
+      },
+      {
+        toolCallId: 'p',
+        title: 'Plan',
+        rawInput: { plan: '# Plan\n\n1. one\n2. two' },
+        _meta: { rho: { tool: 'PresentPlan' } },
+      },
+    );
+    const blocks = [...el.querySelectorAll<HTMLElement>('.block')];
+    expect(blocks.map((b) => b.textContent?.trim())).toEqual(['Plan', 'one', 'two']);
+    expect(blocks[2].querySelector('ol')?.getAttribute('start')).toBe('2');
+    blocks[2].click();
+    await stable();
+    const area = el.querySelector('textarea')!;
+    area.value = 'why?';
+    area.dispatchEvent(new Event('input'));
+    await stable();
+    const request = buttons(el).find((b) => b.textContent?.includes('Request changes (1)'))!;
+    request.click();
+    expect(answer).toHaveBeenCalledWith({ outcome: { outcome: 'selected', optionId: 'reject' } });
+  });
+
+  it('summarizes a pending review with one link to it', async () => {
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter([]),
+        {
+          provide: Diffs,
+          useValue: {
+            get: () =>
+              Promise.resolve(parseDiff('--- a/x.rs\n+++ b/x.rs\n@@ -1 +1,2 @@\n-a\n+b\n+c\n')),
+          },
+        },
+      ],
+    });
+    const { el, stable } = await render(
+      {
+        kind: 'permission',
+        id: 1,
+        sessionId: 's',
+        answer: vi.fn(),
+        request: {
+          sessionId: 's',
+          toolCall: { toolCallId: 'r', title: 'Approve these changes?' },
+          options: [
+            { optionId: 'allow', name: 'Approve', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Request changes', kind: 'reject_once' },
+          ],
+        },
+      },
+      {
+        toolCallId: 'r',
+        title: 'Review the fix',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'resource_link', name: 'x.patch', uri: '/share/x.patch' },
+          },
+        ],
+        _meta: { rho: { tool: 'PresentDiff' } },
+      },
+    );
+    await stable();
+    expect(el.querySelector('mat-card-title')?.textContent).toContain('Review the fix');
+    expect(el.querySelector('.summary')?.textContent).toMatch(/1 file .*\+2.*−1/s);
+    const links = [...el.querySelectorAll('a')].filter((a) =>
+      a.textContent?.includes('Open review'),
+    );
+    expect(links.length).toBe(1);
   });
 
   it('submits a form once the required fields are filled', async () => {

@@ -207,6 +207,9 @@ pub(super) enum Shown {
     },
     /// A `ShareFile` call: the file, linked once the call succeeded.
     Link(PathBuf),
+    /// A `PresentDiff` call: the diff file, linked from the start, as the
+    /// user reviews it while the call waits (ADR 0076).
+    Review(PathBuf),
 }
 
 impl Shown {
@@ -220,6 +223,11 @@ impl Shown {
             && let (Some(cwd), Some(path)) = (cwd, input["path"].as_str())
         {
             return Some(Self::Link(tools::share_file::shared_path(cwd, path)));
+        }
+        if *name == tools::share_file::PRESENT_DIFF
+            && let (Some(cwd), Some(path)) = (cwd, input["path"].as_str())
+        {
+            return Some(Self::Review(tools::share_file::shared_path(cwd, path)));
         }
         if let Some(text) = description {
             return Some(Self::Text(text.into()));
@@ -421,6 +429,9 @@ pub(super) fn to_update(
                 Some(Shown::Text(text)) => {
                     ToolCall::new(id.to_string(), title()).content(vec![text.as_str().into()])
                 }
+                Some(Shown::Review(path)) => {
+                    ToolCall::new(id.to_string(), title()).content(vec![link_block(path).into()])
+                }
                 Some(Shown::Link(_)) | None => ToolCall::new(id.to_string(), title()),
             };
             // Lets the client follow along to the file.
@@ -480,6 +491,7 @@ pub(super) fn to_update(
             match shown {
                 Some(Shown::Text(text)) => content.push(text.as_str().into()),
                 Some(Shown::Link(path)) if !is_error => content.push(link_block(path).into()),
+                Some(Shown::Review(path)) => content.push(link_block(path).into()),
                 _ => {}
             }
             if let Some(d) = diff {
@@ -771,6 +783,33 @@ mod tests {
             Shown::of(&ToolName::new("Bash"), &input, None, None),
             Some(Shown::Text(_))
         ));
+    }
+    #[test]
+    fn review_calls_link_the_diff_from_start_to_end() {
+        let name = tools::share_file::PRESENT_DIFF;
+        let input = json!({"path": "x.patch", "description": "Review the fix"});
+        let shown = Shown::of(&name, &input, None, Some(Path::new("/w"))).unwrap();
+        let start = AgentEvent::ToolStart {
+            id: &ToolCallId::new("t1"),
+            name: &name,
+            input: &input,
+            description: None,
+            kind: tools::ToolKind::Other,
+            titled: true,
+        };
+        assert_eq!(update(start, Some(&shown))["title"], "Review the fix");
+        let link = json!({"type": "resource_link", "name": "x.patch", "uri": "file:///w/x.patch"});
+        assert_eq!(update(start, Some(&shown))["content"][0]["content"], link);
+        // Still linked when the user requested changes, which fails the call.
+        let end = AgentEvent::ToolEnd {
+            id: &ToolCallId::new("t1"),
+            output: "blocked",
+            is_error: true,
+            diff: None,
+            images: &[],
+            shown: &[],
+        };
+        assert_eq!(update(end, Some(&shown))["content"][0]["content"], link);
     }
     #[test]
     fn exit_codes() {

@@ -1,4 +1,5 @@
-import { Component, computed, input, signal } from '@angular/core';
+import { Component, computed, inject, input, resource, signal } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import type * as acp from '@agentclientprotocol/sdk';
 import { TextFieldModule } from '@angular/cdk/text-field';
 import { MatButtonModule } from '@angular/material/button';
@@ -7,9 +8,12 @@ import { MatCheckboxModule } from '@angular/material/checkbox';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatRadioModule } from '@angular/material/radio';
-import { Ask } from '../acp';
+import { Acp, Ask } from '../acp';
 import { MarkdownPipe } from '../markdown';
-import { blockText } from './session-state';
+import { drafts, written } from '../review/drafts';
+import { diffLink, Diffs, totals } from '../review/diffs';
+import { PlanComments, planBlocks, planMessage } from './plan-comments';
+import { blockText, rhoTool } from './session-state';
 import { toolBody } from './tool-body';
 
 type Value = string | string[] | boolean;
@@ -29,6 +33,8 @@ interface Field {
   selector: 'app-ask-card',
   imports: [
     MarkdownPipe,
+    PlanComments,
+    RouterLink,
     TextFieldModule,
     MatButtonModule,
     MatCardModule,
@@ -42,19 +48,71 @@ interface Field {
     <mat-card appearance="outlined">
       @if (a.kind === 'permission') {
         <mat-card-header>
-          <mat-card-title>{{ a.request.toolCall.title }}</mat-card-title>
+          @if (review()) {
+            <div class="heading">
+              <mat-card-subtitle>Review requested</mat-card-subtitle>
+              <mat-card-title>{{ call()?.title }}</mat-card-title>
+            </div>
+          } @else {
+            <mat-card-title>{{ a.request.toolCall.title }}</mat-card-title>
+          }
         </mat-card-header>
-        @if (details(); as details) {
+        @let callId = a.request.toolCall.toolCallId;
+        @if (plan(); as plan) {
+          <mat-card-content class="markdown">
+            <app-plan-comments [plan]="plan" [(comments)]="planComments" />
+          </mat-card-content>
+        } @else if (review()) {
+          <mat-card-content class="review">
+            @if (diff.value(); as files) {
+              @let t = totals(files);
+              <div class="summary">
+                {{ files.length }} {{ files.length === 1 ? 'file' : 'files' }} ·
+                <span class="adds">+{{ t.adds }}</span>
+                <span class="dels">−{{ t.dels }}</span>
+              </div>
+              @for (f of files.slice(0, 5); track $index) {
+                <div class="file">
+                  <span class="path">{{ f.path }}</span>
+                  <span class="adds">+{{ f.adds }}</span>
+                  <span class="dels">−{{ f.dels }}</span>
+                </div>
+              }
+              @if (files.length > 5) {
+                <div class="more">and {{ files.length - 5 }} more</div>
+              }
+            } @else if (diff.error()) {
+              <div class="more">Diff not available</div>
+            }
+          </mat-card-content>
+        } @else if (details(); as details) {
           <mat-card-content class="markdown" [innerHTML]="details | markdown" />
         }
         <mat-card-actions align="end">
-          @for (o of a.request.options; track o.optionId) {
-            <button
-              [matButton]="o.kind.startsWith('allow') ? 'filled' : 'outlined'"
-              (click)="a.answer({ outcome: { outcome: 'selected', optionId: o.optionId } })"
+          @let commented = plan() ? planCount() : 0;
+          @if (review()) {
+            <a
+              class="open"
+              matButton="filled"
+              [routerLink]="['review', callId]"
+              queryParamsHandling="preserve"
             >
-              {{ o.name }}
-            </button>
+              Open review
+            </a>
+          }
+          @for (o of a.request.options; track o.optionId) {
+            @if (commented && o.kind.startsWith('reject')) {
+              <button matButton="outlined" (click)="sendPlanComments()">
+                Request changes ({{ commented }})
+              </button>
+            } @else {
+              <button
+                [matButton]="o.kind.startsWith('allow') && !review() ? 'filled' : 'outlined'"
+                (click)="a.answer({ outcome: { outcome: 'selected', optionId: o.optionId } })"
+              >
+                {{ o.name }}
+              </button>
+            }
           }
         </mat-card-actions>
       } @else {
@@ -162,6 +220,51 @@ interface Field {
       color: var(--mat-sys-on-surface-variant);
       font: var(--mat-sys-body-small);
     }
+    .review {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding-top: 8px;
+      font: var(--mat-sys-body-medium);
+    }
+    .heading {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .summary {
+      font: var(--mat-sys-title-small);
+      margin-bottom: 4px;
+    }
+    .summary .adds {
+      margin-right: 6px;
+    }
+    .file {
+      display: flex;
+      gap: 8px;
+    }
+    .path {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: Iosevka, ui-monospace, monospace;
+    }
+    .adds {
+      color: light-dark(#1a7f37, #3fb950);
+    }
+    .dels {
+      color: var(--mat-sys-error);
+    }
+    .more {
+      color: var(--mat-sys-on-surface-variant);
+    }
+    /* Main action first; the answers follow on the right. */
+    .open {
+      margin-right: auto;
+    }
   `,
 })
 export class AskCard {
@@ -169,6 +272,45 @@ export class AskCard {
   /** The tool call the permission request is about, if it is in the transcript. */
   readonly call = input<acp.ToolCall>();
   protected readonly values = signal<Record<string, Value>>({});
+  private readonly acp = inject(Acp);
+  /** Comments on the plan's blocks, by block index. */
+  protected readonly planComments = drafts(
+    () => `rho.plan-comments.${this.ask().sessionId}.${this.askedId()}`,
+  );
+  protected readonly planCount = computed(() => written(this.planComments()).length);
+  private readonly askedId = computed(() => {
+    const a = this.ask();
+    return a.kind === 'permission' ? a.request.toolCall.toolCallId : '';
+  });
+
+  /** The plan of a `PresentPlan` call, which gets comments per block. */
+  protected readonly plan = computed(() => {
+    const call = this.call();
+    const plan = (call?.rawInput as { plan?: unknown } | undefined)?.plan;
+    return call && rhoTool(call) === 'PresentPlan' && typeof plan === 'string' ? plan : '';
+  });
+
+  /** A `PresentDiff` call: the diff is reviewed on its own page. */
+  protected readonly review = computed(() => {
+    const call = this.call();
+    return !!call && rhoTool(call) === 'PresentDiff';
+  });
+
+  private readonly diffs = inject(Diffs);
+  /** The review's files, for the summary. */
+  protected readonly diff = resource({
+    params: () => (this.review() ? diffLink(this.call()) : undefined),
+    loader: ({ params: link }) => this.diffs.get(link),
+  });
+  protected readonly totals = totals;
+
+  protected sendPlanComments() {
+    const a = this.ask();
+    if (a.kind !== 'permission') return;
+    const text = planMessage(planBlocks(this.plan()), this.planComments());
+    this.planComments.set({});
+    void this.acp.rejectWith(a, text);
+  }
 
   /** The permission request's tool call content, else that of the call it is about. */
   protected readonly details = computed(() => {

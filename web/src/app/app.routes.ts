@@ -24,6 +24,10 @@ export const routes: Routes = [
         path: 'session/:id',
         loadComponent: () => import('./session/session').then((m) => m.Session),
       },
+      {
+        path: 'session/:id/review/:callId',
+        loadComponent: () => import('./review/review').then((m) => m.Review),
+      },
     ],
   },
   { path: '**', redirectTo: '' },

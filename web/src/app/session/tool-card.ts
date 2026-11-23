@@ -1,5 +1,8 @@
-import { Component, input } from '@angular/core';
+import { Component, inject, input } from '@angular/core';
+import { Acp } from '../acp';
 import type * as acp from '@agentclientprotocol/sdk';
+import { RouterLink } from '@angular/router';
+import { MatButtonModule } from '@angular/material/button';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
@@ -18,6 +21,8 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
     LazyImage,
     MarkdownPipe,
     ToolBodyPipe,
+    RouterLink,
+    MatButtonModule,
     MatExpansionModule,
     MatIconModule,
     MatProgressSpinnerModule,
@@ -47,6 +52,19 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
             <mat-icon class="status">{{ icon(c) }}</mat-icon>
           }
           <span class="tool-title">{{ c.title }}</span>
+          @if (isReview(c) && !asked(c)) {
+            <a
+              class="review"
+              matIconButton
+              aria-label="Open review"
+              title="Open review"
+              [routerLink]="['review', c.toolCallId]"
+              queryParamsHandling="preserve"
+              (click)="$event.stopPropagation()"
+            >
+              <mat-icon>rate_review</mat-icon>
+            </a>
+          }
         </mat-panel-title>
       </mat-expansion-panel-header>
       <ng-template matExpansionPanelContent>
@@ -74,6 +92,20 @@ export class ToolCard {
   protected readonly logo = toolLogo;
   protected readonly hasBody = hasBody;
   protected readonly imageRefs = imageRefs;
+
+  private readonly acp = inject(Acp);
+
+  /** A `PresentDiff` call: its diff has its own page (ADR 0076). */
+  protected isReview(c: acp.ToolCall) {
+    return rhoTool(c) === 'PresentDiff';
+  }
+
+  /** Its approval waits: the approval card links the review then. */
+  protected asked(c: acp.ToolCall) {
+    return this.acp
+      .asks()
+      .some((a) => a.kind === 'permission' && a.request.toolCall.toolCallId === c.toolCallId);
+  }
 
   /** ShowImage and ShareFile are there to be seen: open once they have the image or link. */
   protected opened(c: acp.ToolCall) {

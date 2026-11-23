@@ -48,3 +48,9 @@
     color: var(--mat-sys-error);
   }
 }
+
+// The link to a PresentDiff review page, at the end of the title row.
+.review {
+  margin: -8px -8px -8px auto;
+  flex-shrink: 0;
+}

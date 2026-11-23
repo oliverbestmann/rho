@@ -18,6 +18,10 @@ use super::{Tool, ToolKind, input_schema, parse};
 
 pub const SHARE_FILE: ToolName = ToolName::from_static("ShareFile");
 
+/// The review tool of the agent crate (ADR 0076). Its call links the diff
+/// file like a shared file, from the start.
+pub const PRESENT_DIFF: ToolName = ToolName::from_static("PresentDiff");
+
 /// Starts the web links, see `web_link`.
 pub const SHARE_PREFIX: &str = "/share/";
 
@@ -69,7 +73,7 @@ impl Tool for ShareFile {
 /// `path` against `cwd`, with `.` and `..` resolved by name: a browser
 /// would resolve them in the link, which then no longer matches its
 /// signature.
-pub(crate) fn shared_path(cwd: &Path, path: &str) -> PathBuf {
+pub fn shared_path(cwd: &Path, path: &str) -> PathBuf {
     let mut out = PathBuf::new();
     for c in cwd.join(path).components() {
         match c {
