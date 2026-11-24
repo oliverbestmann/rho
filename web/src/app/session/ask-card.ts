@@ -105,6 +105,10 @@ interface Field {
               <button matButton="outlined" (click)="sendPlanComments()">
                 Request changes ({{ commented }})
               </button>
+            } @else if (commented && o.kind.startsWith('allow')) {
+              <button matButton="filled" (click)="approvePlan(o.optionId)">
+                {{ o.name }} with comments
+              </button>
             } @else {
               <button
                 [matButton]="o.kind.startsWith('allow') && !review() ? 'filled' : 'outlined'"
@@ -303,6 +307,21 @@ export class AskCard {
     loader: ({ params: link }) => this.diffs.get(link),
   });
   protected readonly totals = totals;
+
+  /** Approves; the comments reach the model with the approval, as small additions. */
+  protected async approvePlan(optionId: string) {
+    const a = this.ask();
+    if (a.kind !== 'permission') return;
+    const text = planMessage(
+      planBlocks(this.plan()),
+      this.planComments(),
+      'I approved the plan. Take these comments into account while implementing it:',
+    );
+    this.planComments.set({});
+    // Sent first, so they are in the inbox when the approved call ends.
+    await this.acp.steer(a.sessionId, text);
+    a.answer({ outcome: { outcome: 'selected', optionId } });
+  }
 
   protected sendPlanComments() {
     const a = this.ask();

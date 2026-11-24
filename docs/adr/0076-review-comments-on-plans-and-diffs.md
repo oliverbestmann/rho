@@ -15,7 +15,12 @@ comments with a permission answer.
 - Comments go back as the user's next prompt. The web client answers the
   pending permission request with its reject option, waits for the turn to
   end, and sends one markdown message that quotes each commented block or
-  line with its comment. The daemon gets no new method for it.
+  line with its comment.
+- Approve with comments: the client first sends them with
+  `_rho/queue {steer: true}`, then approves. The daemon shows them as a
+  "Comment" note and puts them into the session's inbox (`Context::send`),
+  so the model gets them with the approved call's result, before it starts
+  on the work.
 - Plans: the web client renders the plan of a `PresentPlan` call block by
   block (paragraphs, headings, list items). Tapping a block opens a comment
   box under it.

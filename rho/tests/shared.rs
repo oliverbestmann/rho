@@ -884,6 +884,7 @@ async fn two_connections_opening_a_stored_session_at_once_share_it() {
 struct Queue {
     session_id: SessionId,
     text: String,
+    steer: bool,
 }
 
 #[derive(
@@ -905,6 +906,7 @@ fn queue(sid: &SessionId, text: &str) -> Queue {
     Queue {
         session_id: sid.clone(),
         text: text.into(),
+        steer: false,
     }
 }
 
@@ -1111,6 +1113,63 @@ async fn queued_prompts_run_after_the_turn_without_the_client() {
         ["user: one", "agent: One.", "user: two", "agent: Two."]
     );
     assert!(queued(&b_updates).is_none_or(|q| q.is_empty()));
+}
+
+#[tokio::test]
+async fn a_steered_comment_rides_along_with_the_next_tool_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let (started, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let inner = Scripted::new(vec![
+        vec![Event::Block(Content::ToolUse {
+            id: ToolCallId::new("t0"),
+            name: ToolName::new("Nope"),
+            input: serde_json::json!({}),
+        })],
+        answer("Done."),
+    ]);
+    let provider = Arc::new(Gated {
+        inner: inner.clone(),
+        started: started.clone(),
+        go: go.clone(),
+    });
+    let agent = agent(provider, &dir.path().join("sessions.db"));
+    let updates = Updates::default();
+    let seen = updates.clone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client!(updates).connect_with(
+            rho::acp::agent_in(agent, Arc::new(Hub::default()), false),
+            async |cx: ConnectionTo<_>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let sid = cx
+                    .send_request(NewSessionRequest::new(cwd))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let pending = cx.send_request(prompt(&sid, "one"));
+                started.notified().await;
+                let steer = Queue {
+                    steer: true,
+                    ..queue(&sid, "note")
+                };
+                cx.send_request(steer).block_task().await?;
+                go.notify_one();
+                started.notified().await;
+                go.notify_one();
+                pending.block_task().await?;
+                wait_for(|| chunks(&seen).iter().any(|c| c.contains("note"))).await;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // One turn: the comment came with the tool result, not as a new prompt.
+    assert_eq!(prompts(&inner), ["one", "note"]);
 }
 
 #[tokio::test]

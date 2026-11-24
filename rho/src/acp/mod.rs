@@ -418,6 +418,16 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         responder: Responder<queue::QueueResponse>,
                         _cx| {
                 let (hub, sid) = (&queue_state.hub, &req.session_id);
+                if req.steer {
+                    let Some((_, ctx, _)) = hub.session(sid, queue_state.conn) else {
+                        return responder
+                            .respond_with_error(Error::invalid_params().data("unknown session"));
+                    };
+                    // Shown, since the model gets it outside of a prompt.
+                    ctx.notify(NoteType::Text, "Comment", &req.text, false);
+                    ctx.send(req.text, true);
+                    return responder.respond(queue::QueueResponse {});
+                }
                 if !hub.enqueue(sid, queue_state.conn, req.text) {
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));

@@ -125,11 +125,15 @@ export function planBlocks(plan: string): Block[] {
   return out;
 }
 
-export function planMessage(blocks: Block[], comments: Comments) {
+export function planMessage(
+  blocks: Block[],
+  comments: Comments,
+  heading = 'Comments on the plan:',
+) {
   const parts = written(comments)
     .sort(([a], [b]) => +a - +b)
     .map(([i, text]) => `${quote(blocks[+i]?.raw ?? '')}\n\n${text.trim()}`);
-  return `Comments on the plan:\n\n${parts.join('\n\n')}`;
+  return `${heading}\n\n${parts.join('\n\n')}`;
 }
 
 const quote = (text: string) =>

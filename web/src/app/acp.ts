@@ -246,6 +246,14 @@ export class Acp {
     await this.extRequest('_rho/queue', { sessionId, text });
   }
 
+  /**
+   * Sends `text` into the running turn: the model gets it with the next tool
+   * results. Starts a turn if the session is idle.
+   */
+  async steer(sessionId: string, text: string) {
+    await this.extRequest('_rho/queue', { sessionId, text, steer: true });
+  }
+
   /** Removes a queued prompt; one that started already is not an error. */
   async unqueue(sessionId: string, id: number) {
     await this.extRequest('_rho/unqueue', { sessionId, id });

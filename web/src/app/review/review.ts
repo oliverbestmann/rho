@@ -130,13 +130,18 @@ export class Review {
     this.collapsed.update((s) => flip(s, file, on));
   }
 
-  protected approve() {
+  protected async approve() {
     const ask = this.ask();
     const allow = ask?.request.options.find((o) => o.kind.startsWith('allow'));
     if (!ask || !allow) return;
+    // Sent first, so the model gets them with the approval.
+    if (this.count()) {
+      await this.acp.steer(
+        this.id(),
+        `I approved the changes, with comments:\n\n${this.message()}`,
+      );
+    }
     ask.answer({ outcome: { outcome: 'selected', optionId: allow.optionId } });
-    // Comments still reach the agent, after the approval.
-    if (this.count()) void this.acp.send(this.id(), this.message());
     this.done();
   }
 

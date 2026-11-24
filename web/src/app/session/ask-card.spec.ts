@@ -4,6 +4,7 @@ import { Ask } from '../acp';
 import { provideRouter } from '@angular/router';
 import { parseDiff } from '../review/diff';
 import { Diffs } from '../review/diffs';
+import { Acp } from '../acp';
 import { AskCard } from './ask-card';
 
 async function render(ask: Ask, call?: acp.ToolCall) {
@@ -106,6 +107,50 @@ describe('AskCard', () => {
     const request = buttons(el).find((b) => b.textContent?.includes('Request changes (1)'))!;
     request.click();
     expect(answer).toHaveBeenCalledWith({ outcome: { outcome: 'selected', optionId: 'reject' } });
+  });
+
+  it('steers plan comments in before an approval', async () => {
+    localStorage.clear();
+    const steer = vi.fn(() => Promise.resolve());
+    TestBed.configureTestingModule({ providers: [{ provide: Acp, useValue: { steer } }] });
+    const answer = vi.fn();
+    const { el, stable } = await render(
+      {
+        kind: 'permission',
+        id: 1,
+        sessionId: 's',
+        answer,
+        request: {
+          sessionId: 's',
+          toolCall: { toolCallId: 'p', title: 'Plan' },
+          options: [
+            { optionId: 'allow', name: 'Approve', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Skip', kind: 'reject_once' },
+          ],
+        },
+      },
+      {
+        toolCallId: 'p',
+        title: 'Plan',
+        rawInput: { plan: 'Do it.' },
+        _meta: { rho: { tool: 'PresentPlan' } },
+      },
+    );
+    el.querySelector<HTMLElement>('.block')!.click();
+    await stable();
+    const area = el.querySelector('textarea')!;
+    area.value = 'carefully';
+    area.dispatchEvent(new Event('input'));
+    await stable();
+    buttons(el)
+      .find((b) => b.textContent?.includes('Approve with comments'))!
+      .click();
+    await stable();
+    expect(steer).toHaveBeenCalledWith(
+      's',
+      expect.stringMatching(/approved[\s\S]*> Do it\.\n\ncarefully$/),
+    );
+    expect(answer).toHaveBeenCalledWith({ outcome: { outcome: 'selected', optionId: 'allow' } });
   });
 
   it('summarizes a pending review with one link to it', async () => {

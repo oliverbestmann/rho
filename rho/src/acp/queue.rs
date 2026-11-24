@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 pub(super) struct QueueRequest {
     pub session_id: SessionId,
     pub text: String,
+    /// Into the running turn instead, with the next tool results, e.g. a
+    /// comment on an approved plan (ADR 0076). Starts a turn when idle.
+    #[serde(default)]
+    pub steer: bool,
 }
 
 /// Removes a queued prompt; one that started or is gone already is fine.
