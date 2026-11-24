@@ -25,9 +25,10 @@ impl Extension for SessionTitle {
         session.tools.push(Arc::new(SetSessionTitle));
     }
 
-    /// After the first turn, every input reminds the model until it sets a title.
+    /// After the first turn, every input reminds the model until it sets a
+    /// title. The title `/clear` sets counts as none.
     async fn before_prompt(&self, ctx: &Context, prompt: &mut PromptSetup) {
-        if ctx.session_info().requests > 0 && ctx.title().is_none() {
+        if ctx.session_info().requests > 0 && ctx.title().is_none_or(|t| t == crate::clear::TITLE) {
             prompt.content.push(Content::system_note(REMINDER));
         }
     }
@@ -125,6 +126,12 @@ mod tests {
         assert!(!reminded(&s));
         agent
             .run(&mut s, vec![Content::text("more")])
+            .await
+            .unwrap();
+        assert!(reminded(&s));
+        s.ctx.set_title(crate::clear::TITLE);
+        agent
+            .run(&mut s, vec![Content::text("cleared")])
             .await
             .unwrap();
         assert!(reminded(&s));

@@ -4,6 +4,8 @@
 use rho::extension::{CommandName, Context, Extension, SessionSetup, SlashCommand};
 
 const CLEAR: CommandName = CommandName::from_static("clear");
+/// The title after `/clear`, until the model sets a new one.
+pub const TITLE: &str = "New session";
 
 pub struct Clear;
 
@@ -21,6 +23,7 @@ impl Extension for Clear {
             return None;
         }
         ctx.request_clear();
+        ctx.set_title(TITLE);
         Some("Cleared the conversation.".into())
     }
 }
