@@ -217,6 +217,10 @@ async fn token_request(http: &reqwest::Client, grant: Grant<'_>) -> Result<Crede
     })
 }
 
+/// Held while refreshing: every store rewrites the whole file, and each
+/// refresh returns a new refresh token.
+static LOCK: Mutex<()> = Mutex::const_new(());
+
 /// Credential file with lazy refresh. Other keys in the file are preserved,
 /// so it can share pi's `~/.pi/agent/auth.json`.
 pub struct AuthStore {
@@ -224,17 +228,11 @@ pub struct AuthStore {
     http: reqwest::Client,
     /// Entry in the file, e.g. `anthropic`; also the `rho login` argument.
     key: ProviderName,
-    lock: Mutex<()>,
 }
 
 impl AuthStore {
     pub fn new(path: PathBuf, http: reqwest::Client, key: ProviderName) -> Self {
-        Self {
-            path,
-            http,
-            key,
-            lock: Mutex::new(()),
-        }
+        Self { path, http, key }
     }
 
     /// `$RHO_AUTH_FILE`, else `$XDG_CONFIG_HOME/rho/auth.json`, else `~/.config/rho/auth.json`.
@@ -262,22 +260,41 @@ impl AuthStore {
         &self,
         refresh: impl AsyncFn(&reqwest::Client, &Credentials) -> Result<Credentials>,
     ) -> Result<Credentials> {
-        let _guard = self.lock.lock().await;
         let key = &self.key;
-        let creds = self.load()?.with_context(|| {
+        self.refreshed(false, refresh).await?.with_context(|| {
             format!(
                 "not logged in (no {key} credentials in {}); run `rho login {key}`",
                 self.path.display()
             )
-        })?;
-        if !creds.is_expired() {
-            return Ok(creds);
+        })
+    }
+
+    /// Refreshes and saves the credentials even if they are still valid, so
+    /// the refresh token does not expire unused. `false` if not logged in.
+    pub async fn renew(
+        &self,
+        refresh: impl AsyncFn(&reqwest::Client, &Credentials) -> Result<Credentials>,
+    ) -> Result<bool> {
+        Ok(self.refreshed(true, refresh).await?.is_some())
+    }
+
+    async fn refreshed(
+        &self,
+        force: bool,
+        refresh: impl AsyncFn(&reqwest::Client, &Credentials) -> Result<Credentials>,
+    ) -> Result<Option<Credentials>> {
+        let _guard = LOCK.lock().await;
+        let Some(creds) = self.load()? else {
+            return Ok(None);
+        };
+        if !force && !creds.is_expired() {
+            return Ok(Some(creds));
         }
         let fresh = refresh(&self.http, &creds)
             .await
-            .with_context(|| format!("refreshing {key} token"))?;
+            .with_context(|| format!("refreshing {} token", self.key))?;
         self.save(&fresh)?;
-        Ok(fresh)
+        Ok(Some(fresh))
     }
 
     pub fn load(&self) -> Result<Option<Credentials>> {
@@ -397,6 +414,29 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[tokio::test]
+    async fn renew_refreshes_valid_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(
+            dir.path().join("auth.json"),
+            reqwest::Client::new(),
+            ANTHROPIC,
+        );
+        let expires = now_ms() + 60_000;
+        let creds = |token: &str| Credentials {
+            kind: CredentialKind::OAuth,
+            access: Secret::new(token),
+            refresh: Secret::new(token),
+            expires,
+        };
+        let renewed = async |_: &reqwest::Client, _: &Credentials| Ok(creds("new"));
+
+        assert!(!store.renew(renewed).await.unwrap());
+        store.save(&creds("old")).unwrap();
+        assert!(store.renew(renewed).await.unwrap());
+        assert_eq!(store.load().unwrap(), Some(creds("new")));
     }
 
     #[tokio::test]

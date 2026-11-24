@@ -19,6 +19,10 @@ shape requests.
 - Endpoints, client id and scopes as in pi-ai. Tokens are refreshed lazily
   behind a mutex, with a 5 minute margin, and saved atomically (temp file
   with mode 0600, then rename).
+- The daemon also renews the Anthropic and Copilot logins at start and then
+  once a day, so a refresh token does not expire while no session uses it.
+  One process-wide lock covers all refreshes, because every store rewrites
+  the whole credential file and each refresh returns a new refresh token.
 - Every request is shaped like Claude Code, following pi-ai and
   `@gotgenes/pi-anthropic-auth`:
   - headers `anthropic-beta: claude-code-20250219,oauth-2025-04-20`,

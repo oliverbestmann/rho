@@ -179,6 +179,7 @@ pub async fn run(options: Options) -> Result<()> {
                 return Ok(());
             };
             eprintln!("rho daemon: {}", crate::acp_ws::socket_path(&dir).display());
+            tokio::spawn(renew_logins(reqwest::Client::new()));
             let agent = Arc::new(acp_agent(options, model, thinking)?);
             let token = match &listen {
                 Some(_) => Some(crate::acp_ws::token(&config_dir)?),
@@ -227,6 +228,38 @@ pub async fn run(options: Options) -> Result<()> {
             );
             let app: axum::Router = crate::acp_ws::api_router(agent, Some(&token));
             axum::serve(listener, app).await.context("proxy")
+        }
+    }
+}
+
+/// Refreshes the logins at start and then once a day, so a refresh token
+/// does not expire while no session uses its account.
+async fn renew_logins(http: reqwest::Client) {
+    let store = |key| AuthStore::new(AuthStore::default_path(), http.clone(), key);
+    let (claude, github) = (store(anthropic::NAME), store(copilot::KEY));
+    let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+    loop {
+        daily.tick().await;
+        let results = [
+            (
+                anthropic::NAME,
+                claude
+                    .renew(async |http, c| auth::refresh(http, &c.refresh).await)
+                    .await,
+            ),
+            (
+                copilot::KEY,
+                github
+                    .renew(async |http, c| copilot::copilot_token(http, &c.refresh).await)
+                    .await,
+            ),
+        ];
+        for (name, result) in results {
+            match result {
+                Ok(true) => eprintln!("rho daemon: renewed the {name} login"),
+                Ok(false) => {}
+                Err(e) => eprintln!("rho daemon: {e:#}"),
+            }
         }
     }
 }
