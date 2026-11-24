@@ -81,8 +81,10 @@
                       aria-label="Comment"
                       cdkTextareaAutosize
                       cdkAutosizeMinRows="2"
+                      appAutofocus
                       [value]="comment ?? ''"
                       (input)="set(k, $any($event.target).value)"
+                      (keydown.control.enter)="selected.set(undefined)"
                     ></textarea>
                     <div class="comment-actions">
                       <button matButton (click)="set(k, ''); selected.set(undefined)">

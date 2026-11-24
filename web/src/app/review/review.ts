@@ -7,6 +7,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, Ask } from '../acp';
+import { Autofocus } from '../autofocus';
 import { loadHighlighter } from '../highlight';
 import { DiffFile, highlightFile } from './diff';
 import { diffLink, Diffs, totals } from './diffs';
@@ -29,6 +30,7 @@ const OVERALL = 'overall';
     MatIconModule,
     MatProgressSpinnerModule,
     MatToolbarModule,
+    Autofocus,
   ],
   templateUrl: './review.html',
   styleUrl: './review.scss',

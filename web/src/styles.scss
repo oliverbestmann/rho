@@ -120,6 +120,18 @@ pre {
   margin-top: 8px;
 }
 
+// Plan blocks come from innerHTML, out of reach of the component styles.
+app-plan-comments .block {
+  > :first-child,
+  > * > li > :first-child {
+    margin-top: 0;
+  }
+  > :last-child,
+  > * > li > :last-child {
+    margin-bottom: 0;
+  }
+}
+
 .comment-text {
   cursor: pointer;
   white-space: pre-wrap;

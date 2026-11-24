@@ -101,9 +101,13 @@ describe('AskCard', () => {
     blocks[2].click();
     await stable();
     const area = el.querySelector('textarea')!;
+    expect(document.activeElement).toBe(area);
     area.value = 'why?';
     area.dispatchEvent(new Event('input'));
+    area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }));
     await stable();
+    expect(el.querySelector('textarea')).toBeNull();
+    expect(el.querySelector('.comment-text')?.textContent).toBe('why?');
     const request = buttons(el).find((b) => b.textContent?.includes('Request changes (1)'))!;
     request.click();
     expect(answer).toHaveBeenCalledWith({ outcome: { outcome: 'selected', optionId: 'reject' } });

@@ -4,6 +4,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { lexer } from 'marked';
 import { MarkdownPipe } from '../markdown';
 import { Comments, written } from '../review/drafts';
+import { Autofocus } from '../autofocus';
 
 /** A top-level block of the plan, or one item of a top-level list. */
 export interface Block {
@@ -18,7 +19,7 @@ export interface Block {
  */
 @Component({
   selector: 'app-plan-comments',
-  imports: [MarkdownPipe, TextFieldModule, MatButtonModule],
+  imports: [MarkdownPipe, TextFieldModule, MatButtonModule, Autofocus],
   template: `
     @for (b of blocks(); track $index; let i = $index) {
       <div
@@ -39,8 +40,10 @@ export interface Block {
             aria-label="Comment"
             cdkTextareaAutosize
             cdkAutosizeMinRows="2"
+            appAutofocus
             [value]="comments()[i] ?? ''"
             (input)="set(i, $any($event.target).value)"
+            (keydown.control.enter)="selected.set(undefined)"
           ></textarea>
           <div class="comment-actions">
             <button matButton (click)="set(i, ''); selected.set(undefined)">Delete</button>
@@ -58,31 +61,44 @@ export interface Block {
     :host {
       display: block;
     }
+    /* The spacing is padding, so the highlight covers it and the comment joins it. */
     .block {
       cursor: pointer;
+      margin-inline: -8px;
+      padding: 0.5em 8px;
       border-radius: var(--mat-sys-corner-small);
       transition: background 0.15s;
     }
-    .block.commented {
+    .item {
+      padding-block: 0.25em;
+    }
+    .item.first {
+      padding-top: 0.5em;
+    }
+    .item.last {
+      padding-bottom: 0.5em;
+    }
+    .commented,
+    .commented + .thread {
       background: color-mix(in srgb, var(--mat-sys-tertiary) 10%, transparent);
     }
-    .block.selected {
+    .selected,
+    .selected + .thread {
       background: color-mix(in srgb, var(--mat-sys-tertiary) 22%, transparent);
     }
-    .item > :is(ul, ol) {
-      margin-block: 0;
-    }
-    .item.first > :is(ul, ol) {
-      margin-top: 1em;
-    }
-    .item.last > :is(ul, ol) {
-      margin-bottom: 1em;
+    .block:has(+ .thread) {
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
     }
     .thread {
-      margin: 4px 0 12px;
+      margin: 0 -8px 0.5em;
+      padding: 0 8px 8px;
+      border-radius: 0 0 var(--mat-sys-corner-small) var(--mat-sys-corner-small);
+    }
+    .comment-text {
       padding: 8px 12px;
       border-radius: var(--mat-sys-corner-small);
-      background: var(--mat-sys-surface-container);
+      background: var(--mat-sys-surface);
     }
   `,
 })
