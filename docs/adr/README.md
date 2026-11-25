@@ -84,3 +84,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0074](0074-transcripts-kept-in-indexeddb.md) | Transcripts kept in IndexedDB, saved transcripts in rho | Accepted |
 | [0075](0075-request-log-for-stats.md) | Request log for stats | Accepted |
 | [0076](0076-review-comments-on-plans-and-diffs.md) | Review comments on plans and diffs | Accepted |
+| [0077](0077-web-search-via-duckduckgo-html.md) | Web search via DuckDuckGo's HTML page | Accepted |

@@ -62,7 +62,7 @@ Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). Its only extensions are the built-in tools (`rho::builtin()`), `GrantCommands` and `FeatureCommands`.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
-  `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `Mcp`, `Memory`, `History`, `SessionTitle`,
+  `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `WebSearch`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `Discards`, `AskUser`, `PlanMode`, `Ponytail`,
   `Skills`, `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
@@ -514,6 +514,8 @@ Ports of the other pi extensions:
   search directory if none above it is readable (ADR 0056).
 - `FetchUrl` (pi's `fetch_url`) fetches a URL; HTML becomes markdown via
   `htmd`. The network is not sandboxed.
+- `WebSearch` searches DuckDuckGo's HTML page and lists title, URL and
+  snippet per result, at most one search per 10 seconds (ADR 0077).
 - `Memory` (pi's `memory`) stores memories in `memory.db` in the config dir,
   embedded locally with fastembed (all-MiniLM-L6-v2, downloaded on first use
   to `~/.cache/rho/fastembed`) and ranked with sqlite-vec (ADR 0030).

@@ -22,6 +22,7 @@ mod secrets;
 mod semantic_search;
 mod session_title;
 mod skills;
+mod web_search;
 
 use std::sync::Arc;
 
@@ -44,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(go_doc::GoDoc),
                 Arc::new(semantic_search::SemanticSearch),
                 Arc::new(fetch_url::FetchUrl),
+                Arc::new(web_search::WebSearch),
                 Arc::new(mcp::Mcp::from_config()),
                 Arc::new(memory::Memory::default()),
                 Arc::new(history::History::default()),
