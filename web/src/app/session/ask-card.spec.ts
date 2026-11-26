@@ -158,13 +158,15 @@ describe('AskCard', () => {
   });
 
   it('summarizes a pending review with one link to it', async () => {
+    let fetched = '';
     TestBed.configureTestingModule({
       providers: [
         provideRouter([]),
         {
           provide: Diffs,
           useValue: {
-            get: () =>
+            get: (link: string) =>
+              (fetched = link) &&
               Promise.resolve(parseDiff('--- a/x.rs\n+++ b/x.rs\n@@ -1 +1,2 @@\n-a\n+b\n+c\n')),
           },
         },
@@ -204,6 +206,8 @@ describe('AskCard', () => {
       a.textContent?.includes('Open review'),
     );
     expect(links.length).toBe(1);
+    // Per call, so a later review of the same file is not served from the cache.
+    expect(fetched).toBe('/share/x.patch?call=r');
   });
 
   it('submits a form once the required fields are filled', async () => {

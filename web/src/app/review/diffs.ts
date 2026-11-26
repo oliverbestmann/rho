@@ -22,12 +22,15 @@ export class Diffs {
 }
 
 /** The share link to a `PresentDiff` call's diff file. */
-export function diffLink(call: { content?: unknown[] | null } | undefined) {
+export function diffLink(call: { toolCallId?: string; content?: unknown[] | null } | undefined) {
   for (const c of (call?.content ?? []) as {
     type: string;
     content?: { type: string; uri?: string };
   }[]) {
-    if (c.type === 'content' && c.content?.type === 'resource_link') return c.content.uri;
+    const uri = c.type === 'content' && c.content?.type === 'resource_link' && c.content.uri;
+    // The daemon ignores the query; it keeps a later call on the same file from
+    // getting this one's cached diff.
+    if (uri) return `${uri}?call=${encodeURIComponent(call?.toolCallId ?? '')}`;
   }
   return undefined;
 }
