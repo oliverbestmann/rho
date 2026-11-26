@@ -97,8 +97,10 @@ pre {
 // Review comments on plans and diffs (ADR 0076): a plain box, not a pill field.
 .comment-input {
   display: block;
-  width: 100%;
-  box-sizing: border-box;
+  // cdkTextareaAutosize sets `height` to the text's height, so padding and
+  // border must come on top of it: content-box, with them taken off the width.
+  box-sizing: content-box;
+  width: calc(100% - 26px);
   resize: none;
   padding: 8px 12px;
   border: 1px solid var(--mat-sys-outline);

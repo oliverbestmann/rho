@@ -113,6 +113,11 @@ main > * {
   box-sizing: border-box;
 }
 
+// Content-box (styles.scss): the padding and border come on top.
+main > .comment-input {
+  max-width: calc(1100px - 26px);
+}
+
 .loading {
   margin: 32px auto;
 }
