@@ -520,10 +520,10 @@ Ports of the other pi extensions:
   embedded locally with fastembed (all-MiniLM-L6-v2, downloaded on first use
   to `~/.cache/rho/fastembed`) and ranked with sqlite-vec (ADR 0030).
   onnxruntime comes from nixpkgs, so build inside `nix develop`.
-- `History` searches earlier conversations of a project: the nearest
-  directory above the cwd with a `.rho-project-root` file, and every session
-  whose cwd is in it (older epochs included). Without the file there is no
-  tool. Chunks of ~800 bytes with ~150 bytes overlap are embedded like
+- `History` searches earlier conversations of a project: every session
+  whose cwd is in the root (the nearest directory above the cwd with a
+  `.rho-project-root` file, else the cwd), and the sessions of the project
+  joined with `/project` (older epochs included). Chunks of ~800 bytes with ~150 bytes overlap are embedded like
   `Memory` and put into FTS5 in `~/.cache/rho/history.db`; search fuses both
   rankings and merges hits on neighbouring chunks. `summarizeOver: n` lets
   the compaction model (else the session's) answer from more than n results

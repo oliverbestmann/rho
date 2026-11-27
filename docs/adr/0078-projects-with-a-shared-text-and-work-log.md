@@ -44,18 +44,19 @@ The `Projects` extension (agent crate, `project.rs`) adds named projects.
 - **Compaction log line:** after a compaction the cheap model turns the
   summary into one line, logged as a `compaction` entry, so the log shows
   the course of a session even when the model logs nothing.
-- **Going back:** a log entry names its session and message number; the
-  `History` tool's `read` accepts sessions of the same project in any
-  directory.
+- **Going back:** a log entry names its session and message number. The
+  `History` tool searches and reads the sessions of the joined project in
+  any directory, besides those under its root. It is now always offered:
+  without a `.rho-project-root` marker, the root is the session's cwd
+  (amends ADR 0032).
 
 ## Consequences
 
 - The project text is limited only by a reminder to condense it above 8 KB;
   it is sent in full with each full reminder and after each change by another
   session.
-- `History` exists only under a `.rho-project-root` marker. Without it, a
-  log entry's session can still be continued with `/session:join`, but the
-  model cannot read it.
+- Without a marker, `History` in a parent directory also searches the
+  sessions of all directories below it.
 - `/redact` also masks project texts and log entries.
 - Several sessions editing at once are safe only through the version check;
   there is no lock or merge.

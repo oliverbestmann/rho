@@ -1,7 +1,8 @@
 //! `History`: searches the earlier conversations of a project (ADR 0032).
-//! The project is the nearest directory above the cwd with a
-//! `.rho-project-root` file; sessions whose cwd is in it are searched, older
-//! epochs (compacted away) included. Without the file there is no tool.
+//! The root is the nearest directory above the cwd with a
+//! `.rho-project-root` file, else the cwd; sessions whose cwd is in it are
+//! searched, and the sessions of the project the session joined with
+//! `/project` (ADR 0078), older epochs (compacted away) included.
 //!
 //! The index is `history.db` in `$XDG_CACHE_HOME/rho`, built from the
 //! session store: each epoch's text is cut into overlapping windows,
@@ -108,11 +109,47 @@ impl History {
     }
 }
 
-/// The nearest directory at or above `cwd` with the marker file.
-fn project_root(cwd: &Path) -> Option<PathBuf> {
+/// The nearest directory at or above `cwd` with the marker file, else `cwd`.
+fn project_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
         .find(|d| d.join(MARKER).exists())
-        .map(Path::to_path_buf)
+        .unwrap_or(cwd)
+        .to_path_buf()
+}
+
+/// The sessions a session searches: those under `root`, and those of its
+/// `project`.
+struct Scope {
+    root: PathBuf,
+    project: Option<String>,
+}
+
+impl Scope {
+    fn of(ctx: &Context) -> Scope {
+        Scope {
+            root: project_root(ctx.cwd()),
+            project: ctx.stored(rho::store::PROJECT_KEY),
+        }
+    }
+
+    fn contains(&self, s: &SessionInfo) -> bool {
+        s.cwd.starts_with(&self.root)
+            || self.project.is_some()
+                && s.extension_state
+                    .get(rho::store::PROJECT_KEY)
+                    .and_then(Value::as_str)
+                    == self.project.as_deref()
+    }
+}
+
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.root.display())?;
+        match &self.project {
+            Some(p) => write!(f, " and project {p}"),
+            None => Ok(()),
+        }
+    }
 }
 
 impl Extension for History {
@@ -120,29 +157,29 @@ impl Extension for History {
         if session.ctx.store().is_none() {
             return;
         }
-        if let Some(root) = project_root(session.ctx.cwd()) {
-            session.commands.push(SlashCommand {
-                name: HISTORY,
-                description: "Search earlier conversations of the project (not shown to the model)"
-                    .into(),
-                hint: Some("query".into()),
-            });
-            session.tools.push(Arc::new(HistoryTool {
-                inner: self.0.clone(),
-                root,
-            }));
-        }
+        session.commands.push(SlashCommand {
+            name: HISTORY,
+            description: "Search earlier conversations of the project (not shown to the model)"
+                .into(),
+            hint: Some("query".into()),
+        });
+        session.tools.push(Arc::new(HistoryTool {
+            inner: self.0.clone(),
+            root: project_root(session.ctx.cwd()),
+        }));
     }
 
     async fn command(&self, ctx: &Context, name: &CommandName, query: &str) -> Option<String> {
         if *name != HISTORY {
             return None;
         }
-        let root = project_root(ctx.cwd())?;
         if query.trim().is_empty() {
             return Some("Usage: /history <query>".into());
         }
-        let found = self.0.find(ctx, &root, query, Mode::Hybrid, 10).await;
+        let found = self
+            .0
+            .find(ctx, &Scope::of(ctx), query, Mode::Hybrid, 10)
+            .await;
         Some(found.map_or_else(|e| format!("{e:#}"), |(_, results)| results))
     }
 
@@ -158,12 +195,12 @@ impl Extension for History {
     }
 
     async fn run_end(&self, ctx: &Context, _run: &RunEnd) {
-        let (Some(root), Some(store)) = (project_root(ctx.cwd()), ctx.store().cloned()) else {
+        let Some(store) = ctx.store().cloned() else {
             return;
         };
-        let (inner, ctx) = (self.0.clone(), ctx.clone());
+        let (inner, scope, ctx) = (self.0.clone(), Scope::of(ctx), ctx.clone());
         tokio::spawn(async move {
-            if let Err(e) = inner.sync(&store, &root).await {
+            if let Err(e) = inner.sync(&store, &scope).await {
                 ctx.notify(
                     NoteType::Info,
                     "History not indexed",
@@ -218,6 +255,7 @@ struct Input {
 
 struct HistoryTool {
     inner: Arc<Inner>,
+    /// For the description; calls use `Scope::of`.
     root: PathBuf,
 }
 
@@ -235,7 +273,7 @@ impl Tool for HistoryTool {
             name: ToolName::from_static("History"),
             description: format!(
                 "Search earlier conversations of the project in {root}: all sessions whose working directory is {root} or below it, \
-                 including parts that were compacted away. Use it to find what was decided, tried, or fixed before. \
+                 and the sessions of the project this session joined with /project, including parts that were compacted away. Use it to find what was decided, tried, or fixed before. \
                  Search matches by meaning and by keywords; overlapping hits are merged. `summarizeOver` gets a short answer with citations instead of many results. `read` shows the {READ} messages from a result's session and message number on. \
                  Output is cut at {kb}KB.",
                 root = self.root.display(),
@@ -258,7 +296,7 @@ impl Tool for HistoryTool {
                 let mode = i.mode.unwrap_or_default();
                 let (hits, results) = self
                     .inner
-                    .find(ctx, &self.root, &query, mode, limit)
+                    .find(ctx, &Scope::of(ctx), &query, mode, limit)
                     .await?;
                 let info = ctx.session_info();
                 match (i.summarize_over, info.cheap_model()) {
@@ -279,19 +317,10 @@ impl Tool for HistoryTool {
             Action::Read => {
                 let id = i.session.context("session is required for read")?;
                 let seq = i.seq.context("seq is required for read")?;
+                let scope = Scope::of(ctx);
                 let info = store.session(&id).await?;
-                // Log entries of a project point at its sessions in any directory.
-                let project = ctx.stored::<String>(rho::store::PROJECT_KEY);
-                let same_project = |s: &SessionInfo| {
-                    project.is_some()
-                        && s.extension_state
-                            .get(rho::store::PROJECT_KEY)
-                            .and_then(Value::as_str)
-                            == project.as_deref()
-                };
-                let Some(info) = info.filter(|s| s.cwd.starts_with(&self.root) || same_project(s))
-                else {
-                    bail!("no session {id} in {}", self.root.display());
+                let Some(info) = info.filter(|s| scope.contains(s)) else {
+                    bail!("no session {id} in {scope}");
                 };
                 let messages = store.messages(&id).await?;
                 // `seq` counts blocks, so messages have gaps.
@@ -328,26 +357,23 @@ impl Inner {
     async fn find(
         self: &Arc<Self>,
         ctx: &Context,
-        root: &Path,
+        scope: &Scope,
         query: &str,
         mode: Mode,
         limit: usize,
     ) -> Result<(Vec<Hit>, String)> {
         let store = ctx.store().context("sessions are not saved")?;
-        self.sync(store, root).await?;
+        let ids = self.sync(store, scope).await?;
         let epoch = store
             .session(ctx.session_id())
             .await?
             .map_or(-1, |s| s.epoch);
         let current = (ctx.session_id().to_string(), epoch);
-        let (inner, r, q) = (self.clone(), root.to_path_buf(), query.to_string());
-        let hits = tokio::task::spawn_blocking(move || inner.search(&r, &current, &q, mode, limit))
-            .await??;
-        let found = format!(
-            "Found {} results for {query:?} in {}.",
-            hits.len(),
-            root.display()
-        );
+        let (inner, r, q) = (self.clone(), scope.root.clone(), query.to_string());
+        let hits =
+            tokio::task::spawn_blocking(move || inner.search(&r, &ids, &current, &q, mode, limit))
+                .await??;
+        let found = format!("Found {} results for {query:?} in {scope}.", hits.len());
         let mut parts = vec![found];
         parts.extend(hits.iter().enumerate().map(|(n, h)| h.show(n + 1)));
         Ok((hits, parts.join("\n\n")))
@@ -387,18 +413,15 @@ impl Inner {
         })
     }
 
-    /// Indexes the sessions under `root` that changed since the last pass.
-    async fn sync(self: &Arc<Self>, store: &Store, root: &Path) -> Result<()> {
+    /// Indexes the sessions in `scope` that changed since the last pass and
+    /// returns the ids of all sessions in it.
+    async fn sync(self: &Arc<Self>, store: &Store, scope: &Scope) -> Result<Vec<SessionId>> {
         let _one = self.syncing.lock().await;
         let mut sessions = vec![];
         let mut cursor = None;
         loop {
             let page = store.list(None, cursor.as_deref(), 500).await?;
-            sessions.extend(
-                page.sessions
-                    .into_iter()
-                    .filter(|s| s.cwd.starts_with(root)),
-            );
+            sessions.extend(page.sessions.into_iter().filter(|s| scope.contains(s)));
             match page.next {
                 Some(next) => cursor = Some(next),
                 None => break,
@@ -414,6 +437,7 @@ impl Inner {
                 })
             })
             .await??;
+        let ids = sessions.iter().map(|s| s.id.clone()).collect();
         for s in sessions {
             // `set_title` does not touch `updated_at`.
             if indexed.get(&s.id) == Some(&(s.updated_at, s.title.clone())) {
@@ -423,7 +447,7 @@ impl Inner {
             let inner = self.clone();
             tokio::task::spawn_blocking(move || inner.index(&s, &messages)).await??;
         }
-        Ok(())
+        Ok(ids)
     }
 
     /// Replaces the session's chunks; unchanged ones keep their embedding.
@@ -490,19 +514,19 @@ impl Inner {
         })
     }
 
-    /// Chunks of sessions under `root` best matching `query`, without the
-    /// `current` (session, epoch). Hits on consecutive chunks are merged
+    /// Chunks of the sessions `ids` best matching `query`, without the
+    /// `current` (session, epoch). Directories are shown relative to `root`. Hits on consecutive chunks are merged
     /// into one, ranked by its best chunk; then the best `limit` are kept.
     fn search(
         &self,
         root: &Path,
+        ids: &[SessionId],
         current: &(String, i64),
         query: &str,
         mode: Mode,
         limit: usize,
     ) -> Result<Vec<Hit>> {
-        let root_str = root.to_str().context("project root is not UTF-8")?;
-        let prefix = format!("{}/", root_str.trim_end_matches('/'));
+        let ids = serde_json::to_string(ids)?;
         let words = keywords(query);
         if mode == Mode::Keyword && words.is_none() {
             bail!("no keywords in {query:?}");
@@ -512,14 +536,14 @@ impl Inner {
             _ => Some(index::blob(&(self.embed)(&[query.to_string()])?.remove(0))),
         };
         self.with_conn(|c| {
-            let scope = "(s.cwd = ?1 OR substr(s.cwd, 1, length(?2)) = ?2)
-                AND NOT (c.session_id = ?3 AND c.epoch = ?4)";
+            let scope = "c.session_id IN (SELECT value FROM json_each(?1))
+                AND NOT (c.session_id = ?2 AND c.epoch = ?3)";
             let ranked = |sql: &str, query: &dyn rusqlite::ToSql| -> Result<Vec<i64>> {
                 let mut stmt = c.prepare(sql)?;
-                let rows = stmt.query_map(
-                    params![root_str, prefix, current.0, current.1, query, CANDIDATES],
-                    |r| r.get(0),
-                )?;
+                let rows = stmt
+                    .query_map(params![ids, current.0, current.1, query, CANDIDATES], |r| {
+                        r.get(0)
+                    })?;
                 Ok(rows.collect::<rusqlite::Result<_>>()?)
             };
             let mut lists = vec![];
@@ -527,7 +551,7 @@ impl Inner {
                 lists.push(ranked(
                     &format!(
                         "SELECT c.id FROM chunks c JOIN sessions s ON s.id = c.session_id
-                         WHERE {scope} ORDER BY vec_distance_cosine(c.embedding, ?5) LIMIT ?6"
+                         WHERE {scope} ORDER BY vec_distance_cosine(c.embedding, ?4) LIMIT ?5"
                     ),
                     e,
                 )?);
@@ -537,7 +561,7 @@ impl Inner {
                     &format!(
                         "SELECT c.id FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
                          JOIN sessions s ON s.id = c.session_id
-                         WHERE chunks_fts MATCH ?5 AND {scope} ORDER BY chunks_fts.rank LIMIT ?6"
+                         WHERE chunks_fts MATCH ?4 AND {scope} ORDER BY chunks_fts.rank LIMIT ?5"
                     ),
                     w,
                 )?);
@@ -943,6 +967,31 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("session out"), "{out}");
+        let out = run(json!({"action": "search", "query": "zebra", "mode": "keyword"}))
+            .await
+            .unwrap();
+        assert!(out.contains("/foo/bar and project rho."), "{out}");
+        assert!(out.contains("session out"), "{out}");
+        session.ctx.set_stored(rho::store::PROJECT_KEY, Value::Null);
+
+        // Without a marker, the root is the cwd.
+        let above = agent
+            .start_session(SessionId::new("a"), &outside, vec![], Arc::new(NoFrontend))
+            .await
+            .unwrap();
+        let tool = above.tool(&ToolName::from_static("History")).unwrap();
+        let out = tool
+            .run(
+                json!({"action": "search", "query": "zebra", "mode": "keyword"}),
+                &above.ctx,
+            )
+            .await
+            .unwrap()
+            .output;
+        assert!(
+            out.contains("session out") && out.contains("session in"),
+            "{out}"
+        );
 
         // All chunks of the long session match: one result, the whole text.
         let out = run(json!({"action": "search", "query": "okapi", "mode": "keyword"}))
@@ -996,12 +1045,5 @@ mod tests {
             .output;
         assert!(!out.contains("zebra"), "{out}");
         assert!(out.contains(rho::store::MASK), "{out}");
-
-        // No marker, no tool.
-        let session = agent
-            .start_session(SessionId::new("o"), &outside, vec![], Arc::new(NoFrontend))
-            .await
-            .unwrap();
-        assert!(session.tool(&ToolName::from_static("History")).is_none());
     }
 }

@@ -1,6 +1,6 @@
 # 32. Project history search
 
-- Status: Accepted, amended by 0049
+- Status: Accepted, amended by 0049 and 0078
 - Date: 2026-10-11
 
 ## Context
@@ -19,7 +19,9 @@ outside the project.
   is the root or below it (compared by path components) are searched.
   The tool description names the root. Without a marker there is no
   fallback to the cwd: a cwd alone doesn't say where a project starts,
-  and a guess could mix in other projects' sessions.
+  and a guess could mix in other projects' sessions. (Since ADR 0078 the
+  tool is always there: without a marker the root is the cwd, and the
+  sessions of the joined project are searched too.)
 - With the tool comes `/history <query>` for the user: the same hybrid
   search (10 results), shown as a command reply and not added to the
   conversation, so the model does not see it.
