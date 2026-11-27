@@ -20,6 +20,11 @@ A slash command cannot add to a queue: while a turn runs, every
   `_rho/unqueue {sessionId, id}` removes one (an id that is gone is fine,
   it may just have started). Only connections that opened the session may
   use them, like `session/cancel`.
+- `_rho/unqueue {..., steer: true}` removes a queued prompt and steers it
+  into the running turn, like `_rho/queue {steer: true}` (ADR 0076): the
+  model gets it with the next tool results, and viewers see a "Steered"
+  note. Both happen in one request, so a prompt that started meanwhile is
+  not sent twice. The web client has a steer button on each queued message.
 - The queue lives in the hub entry of the session (`rho/src/acp/hub.rs`).
   When a turn ends, the next queued prompt starts as a run without a client:
   it is echoed to every viewer as a user message, slash commands work, and

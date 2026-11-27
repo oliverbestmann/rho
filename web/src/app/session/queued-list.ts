@@ -14,6 +14,13 @@ import { MatIconModule } from '@angular/material/icon';
           <span class="text">{{ text }}</span>
           <button
             matIconButton
+            aria-label="Steer into the running turn"
+            (click)="steer.emit($index)"
+          >
+            <mat-icon>call_merge</mat-icon>
+          </button>
+          <button
+            matIconButton
             aria-label="Stop the turn and send now"
             (click)="sendNow.emit($index)"
           >
@@ -60,4 +67,6 @@ export class QueuedList {
   readonly remove = output<number>();
   /** The index of the message to send in place of the running turn. */
   readonly sendNow = output<number>();
+  /** The index of the message to give the model with the next tool results. */
+  readonly steer = output<number>();
 }

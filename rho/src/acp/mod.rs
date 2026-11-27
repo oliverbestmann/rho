@@ -442,12 +442,17 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
             async move |req: queue::UnqueueRequest,
                         responder: Responder<queue::QueueResponse>,
                         _cx| {
-                if !unqueue_state
-                    .hub
-                    .unqueue(&req.session_id, unqueue_state.conn, req.id)
-                {
+                let (hub, sid, conn) = (&unqueue_state.hub, &req.session_id, unqueue_state.conn);
+                let Some(text) = hub.unqueue(sid, conn, req.id) else {
                     return responder
                         .respond_with_error(Error::invalid_params().data("unknown session"));
+                };
+                if req.steer
+                    && let Some(text) = text
+                    && let Some((_, ctx, _)) = hub.session(sid, conn)
+                {
+                    ctx.notify(NoteType::Text, "Steered", &text, false);
+                    ctx.send(text, true);
                 }
                 responder.respond(queue::QueueResponse {})
             },

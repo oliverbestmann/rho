@@ -231,16 +231,16 @@ impl Hub {
         true
     }
 
-    /// Removes queued prompt `id` of `sid`, if `conn` opened it.
-    pub(super) fn unqueue(&self, sid: &SessionId, conn: ConnId, id: u64) -> bool {
+    /// Removes queued prompt `id` of `sid` and returns its text, if `conn`
+    /// opened it. `Some(None)`: it started or is gone already.
+    pub(super) fn unqueue(&self, sid: &SessionId, conn: ConnId, id: u64) -> Option<Option<String>> {
         let sid = &self.resolve(sid);
         let mut sessions = self.sessions.lock().unwrap();
-        let Some(entry) = sessions.get_mut(sid).filter(|e| e.frontend.viewing(conn)) else {
-            return false;
-        };
-        entry.queue.retain(|q| q.id != id);
+        let entry = sessions.get_mut(sid).filter(|e| e.frontend.viewing(conn))?;
+        let pos = entry.queue.iter().position(|q| q.id == id);
+        let text = pos.and_then(|i| entry.queue.remove(i)).map(|q| q.text);
         entry.publish_queue();
-        true
+        Some(text)
     }
 
     /// The next queued prompt, unless the queue is held. `ended`: a turn

@@ -247,6 +247,11 @@ export class Session {
     if (queued) void this.acp.unqueue(this.id(), queued.id);
   }
 
+  protected steer(index: number) {
+    const queued = this.opened()?.state.queue()[index];
+    if (queued) void this.acp.steerQueued(this.id(), queued.id);
+  }
+
   protected sendNow(index: number) {
     const queued = this.opened()?.state.queue()[index];
     if (!queued) return;

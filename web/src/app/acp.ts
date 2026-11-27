@@ -291,6 +291,14 @@ export class Acp {
   }
 
   /**
+   * Takes a queued prompt out and steers it into the running turn, in one
+   * step in rho, so a prompt that started meanwhile is not sent twice.
+   */
+  async steerQueued(sessionId: string, id: number) {
+    await this.extRequest('_rho/unqueue', { sessionId, id, steer: true });
+  }
+
+  /**
    * Takes a queued prompt out, stops the turn and sends the prompt once the
    * turn ended; rho holds the rest of the queue after a stop.
    */

@@ -26,6 +26,10 @@ pub(super) struct QueueRequest {
 pub(super) struct UnqueueRequest {
     pub session_id: SessionId,
     pub id: u64,
+    /// Steers the removed prompt into the running turn, like `_rho/queue`
+    /// with `steer`. Nothing happens if it started already.
+    #[serde(default)]
+    pub steer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonRpcResponse)]

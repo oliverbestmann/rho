@@ -340,6 +340,12 @@ describe('Acp prompts', () => {
     expect(request).toHaveBeenCalledWith('_rho/unqueue', { sessionId: 's', id: 7 });
   });
 
+  it('steers a queued prompt with one request', async () => {
+    const { a, request } = await setup();
+    await a.steerQueued('s', 7);
+    expect(request).toHaveBeenCalledWith('_rho/unqueue', { sessionId: 's', id: 7, steer: true });
+  });
+
   it('sends a queued prompt now: unqueue, stop, prompt once the turn ended', async () => {
     const { a, request, opened } = await setup();
     opened.state.running.set(true);
