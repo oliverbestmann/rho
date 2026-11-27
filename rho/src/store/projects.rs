@@ -28,7 +28,7 @@ CREATE TABLE project_log (
     id INTEGER PRIMARY KEY,
     project TEXT NOT NULL REFERENCES projects (name) ON DELETE CASCADE,
     session_id TEXT NOT NULL,
-    -- The session's next message number when it was written.
+    -- The session's next message number (`items.seq`) when it was written.
     seq INTEGER NOT NULL CHECK (seq >= 0),
     kind TEXT NOT NULL CHECK (kind IN ('entry', 'compaction')),
     title TEXT NOT NULL CHECK (title <> ''),
@@ -173,12 +173,12 @@ impl Store {
         .await
     }
 
-    /// Adds a log entry to the project and returns its id.
+    /// Adds a log entry to the project and returns its id. Its `seq` is the
+    /// session's next message number in the store.
     pub async fn add_log(
         &self,
         name: &str,
         session: &SessionId,
-        seq: i64,
         kind: LogKind,
         title: &str,
         text: &str,
@@ -188,8 +188,11 @@ impl Store {
         self.call(move |c| {
             Ok(c.query_row(
                 "INSERT INTO project_log (project, session_id, seq, kind, title, text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
-                params![name, session, seq, kind.as_str(), title, text, now_ms()],
+                 VALUES (?1, ?2,
+                     (SELECT coalesce(max(seq) + 1, 0) FROM items WHERE session_id = ?2),
+                     ?3, ?4, ?5, ?6)
+                 RETURNING id",
+                params![name, session, kind.as_str(), title, text, now_ms()],
                 |r| r.get(0),
             )?)
         })
@@ -314,11 +317,11 @@ mod tests {
         let s = SessionId::new("s1");
         store.open_project("rho").await.unwrap();
         let a = store
-            .add_log("rho", &s, 3, LogKind::Entry, "WebSearch", "100% done")
+            .add_log("rho", &s, LogKind::Entry, "WebSearch", "100% done")
             .await
             .unwrap();
         let b = store
-            .add_log("rho", &s, 9, LogKind::Compaction, "Compacted", "diff cache")
+            .add_log("rho", &s, LogKind::Compaction, "Compacted", "diff cache")
             .await
             .unwrap();
         let ids = |l: Vec<LogEntry>| l.iter().map(|e| e.id).collect::<Vec<_>>();
@@ -329,7 +332,7 @@ mod tests {
         );
         assert_eq!(ids(store.search_log("rho", "%", 10).await.unwrap()), [a]);
         let e = store.log_entry("rho", a).await.unwrap().unwrap();
-        assert_eq!((e.seq, e.kind), (3, LogKind::Entry));
+        assert_eq!((e.seq, e.kind), (0, LogKind::Entry));
         assert_eq!(store.log_entry("other", a).await.unwrap(), None);
 
         assert_eq!(store.redact_projects("done", "X").await.unwrap(), 1);
