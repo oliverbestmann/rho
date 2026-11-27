@@ -85,3 +85,4 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0075](0075-request-log-for-stats.md) | Request log for stats | Accepted |
 | [0076](0076-review-comments-on-plans-and-diffs.md) | Review comments on plans and diffs | Accepted |
 | [0077](0077-web-search-via-duckduckgo-html.md) | Web search via DuckDuckGo's HTML page | Accepted |
+| [0078](0078-projects-with-a-shared-text-and-work-log.md) | Projects with a shared text and a work log | Accepted |

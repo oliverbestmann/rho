@@ -63,7 +63,7 @@ Cargo workspace:
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). Its only extensions are the built-in tools (`rho::builtin()`), `GrantCommands` and `FeatureCommands`.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
   `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `WebSearch`, `Mcp`, `Memory`, `History`, `SessionTitle`,
-  `BackgroundTasks`, `ContextNotice`, `Discards`, `AskUser`, `PlanMode`, `Ponytail`,
+  `BackgroundTasks`, `ContextNotice`, `Discards`, `AskUser`, `PlanMode`, `Projects`, `Ponytail`,
   `Skills`, `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
 - `web/` - the Angular web client (ADR 0043, `web/README.md`).
@@ -530,6 +530,11 @@ Ports of the other pi extensions:
   instead. `read` shows the
   messages around a result (ADR 0032). The user can search too with
   `/history <query>`; the results are not shown to the model.
+- `Projects` lets sessions join a named project (`/project <name>`) that
+  keeps a shared text and a work log in `sessions.db`. The model gets the
+  text and the last 50 log titles as a reminder after joining, a resume, a
+  compaction or `/clear`, and changes it with the `Project` tool. A new
+  session gets a hint with the last project used in its directory (ADR 0078).
 - `Mcp` adds the tools of MCP servers over Streamable HTTP from `"mcps"`
   in the config (by name, servers as in Claude's `mcpServers`, `type: "http"`, headers
   with `${VAR}` from the environment) as `mcp__<server>__<tool>` (ADR 0031).
