@@ -280,7 +280,17 @@ impl Tool for HistoryTool {
                 let id = i.session.context("session is required for read")?;
                 let seq = i.seq.context("seq is required for read")?;
                 let info = store.session(&id).await?;
-                let Some(info) = info.filter(|s| s.cwd.starts_with(&self.root)) else {
+                // Log entries of a project point at its sessions in any directory.
+                let project = ctx.stored::<String>(rho::store::PROJECT_KEY);
+                let same_project = |s: &SessionInfo| {
+                    project.is_some()
+                        && s.extension_state
+                            .get(rho::store::PROJECT_KEY)
+                            .and_then(Value::as_str)
+                            == project.as_deref()
+                };
+                let Some(info) = info.filter(|s| s.cwd.starts_with(&self.root) || same_project(s))
+                else {
                     bail!("no session {id} in {}", self.root.display());
                 };
                 let messages = store.messages(&id).await?;
@@ -866,6 +876,9 @@ mod tests {
                 .start_session(SessionId::new(id), cwd, vec![], Arc::new(NoFrontend))
                 .await
                 .unwrap();
+            if id == "out" {
+                s.ctx.set_stored(rho::store::PROJECT_KEY, "rho");
+            }
             agent
                 .run(&mut s, vec![Content::text(prompt)])
                 .await
@@ -924,6 +937,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().starts_with("no session out in"), "{err}");
+        // Unless it is in the same project.
+        session.ctx.set_stored(rho::store::PROJECT_KEY, "rho");
+        let out = run(json!({"action": "read", "session": "out", "seq": 0}))
+            .await
+            .unwrap();
+        assert!(out.contains("session out"), "{out}");
 
         // All chunks of the long session match: one result, the whole text.
         let out = run(json!({"action": "search", "query": "okapi", "mode": "keyword"}))
