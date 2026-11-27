@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::{AvailableCommand, SessionId};
+use agent_client_protocol::v1::schema::{AvailableCommand, SessionId};
 use futures::future::{AbortHandle, AbortRegistration};
 
 use crate::extension::{Context, NoteType};

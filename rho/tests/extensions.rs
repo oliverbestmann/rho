@@ -3,13 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::util::MatchDispatch;
+use agent_client_protocol::v1::schema::{
     ContentBlock, ContentChunk, InitializeRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, SessionUpdate, ToolCallContent,
 };
-use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{Client, Responder, SessionMessage};
+use agent_client_protocol::{Client, v1, v1::Responder, v1::SessionMessage};
 use anyhow::Result;
 use rho::agent::Agent;
 use rho::extension::{
@@ -421,13 +421,13 @@ async fn confirm_without_ui_denies() {
 
 /// Collects agent text until it contains `until`.
 async fn read_text<'a>(
-    session: &mut agent_client_protocol::ActiveSession<'a, agent_client_protocol::Agent>,
+    session: &mut agent_client_protocol::v1::ActiveSession<'a, agent_client_protocol::Agent>,
     until: &str,
 ) -> Result<String, agent_client_protocol::Error> {
     let mut text = String::new();
     while !text.contains(until) {
-        if let SessionMessage::SessionMessage(dispatch) = session.read_update().await? {
-            MatchDispatch::new(dispatch)
+        if let SessionMessage::Message(dispatch) = session.read_update().await? {
+            MatchDispatch::new(dispatch.into_raw())
                 .if_notification(async |n: SessionNotification| {
                     if let SessionUpdate::AgentMessageChunk(ContentChunk {
                         content: ContentBlock::Text(t),
@@ -463,7 +463,7 @@ async fn acp_confirm(
     let asked_in_client = asked.clone();
 
     let client = Client
-        .builder()
+        .v1()
         .on_receive_request(
             async move |req: RequestPermissionRequest,
                         responder: Responder<RequestPermissionResponse>,
@@ -493,7 +493,7 @@ async fn acp_confirm(
                 .await?;
             cx.build_session_cwd()?
                 .block_task()
-                .run_until(async |mut session| {
+                .run_until(async |v1::SessionSetup { mut session, .. }| {
                     session.send_prompt("hi")?;
                     read_text(&mut session, "ok").await?;
                     Ok(())
@@ -524,14 +524,14 @@ async fn acp_background_message_starts_a_turn_without_prompt() {
     };
 
     let client = Client
-        .builder()
+        .v1()
         .connect_with(rho::acp::agent(Arc::new(agent)), async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
                 .await?;
             cx.build_session_cwd()?
                 .block_task()
-                .run_until(async |mut session| {
+                .run_until(async |v1::SessionSetup { mut session, .. }| {
                     session.send_prompt("start")?;
                     assert_eq!(session.read_to_string().await?, "waiting");
                     // No prompt is open now; the background message still runs a turn.

@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     CancelNotification, ContentBlock, ContentChunk, InitializeRequest, ListSessionsRequest,
     LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionConfigKind, SessionConfigOption, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, TextContent,
 };
-use agent_client_protocol::{Client, ConnectionTo, Responder};
+use agent_client_protocol::{Client, v1::ConnectionTo, v1::Responder};
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use rho::acp::Hub;
@@ -82,7 +82,7 @@ fn running(updates: &Updates) -> Vec<bool> {
 macro_rules! client {
     ($updates:expr) => {{
         let record = $updates.clone();
-        Client.builder().on_receive_notification(
+        Client.v1().on_receive_notification(
             async move |n: SessionNotification, _cx| {
                 record.lock().unwrap().push(n.update);
                 Ok(())
@@ -175,7 +175,7 @@ async fn other_connections_see_prompts_but_not_commands() {
     let (sid_tx, sid_rx) = oneshot::channel();
     let (go_tx, go_rx) = oneshot::channel::<()>();
     let a_cwd = cwd.clone();
-    let a = tokio::spawn(Client.builder().connect_with(
+    let a = tokio::spawn(Client.v1().connect_with(
         rho::acp::agent_in(agent.clone(), hub.clone(), false),
         async move |cx: ConnectionTo<_>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -266,7 +266,7 @@ async fn a_turn_outlives_its_connection() {
     let a_cwd = cwd.clone();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -349,7 +349,7 @@ async fn a_connection_joining_a_running_turn_gets_the_usage() {
     let a_cwd = cwd.clone();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -463,7 +463,7 @@ async fn a_question_waits_for_the_next_connection() {
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_request(
                 async move |_: RequestPermissionRequest,
                             _: Responder<RequestPermissionResponse>,
@@ -503,7 +503,7 @@ async fn a_question_waits_for_the_next_connection() {
     tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     if let SessionUpdate::ToolCall(call) = &n.update {
@@ -669,7 +669,7 @@ async fn web_connections_start_sessions_only_under_home_or_tmp() {
     let hub = Arc::new(Hub::default());
     for web_limits in [true, false] {
         let started = Client
-            .builder()
+            .v1()
             .connect_with(
                 rho::acp::agent_in(agent.clone(), hub.clone(), web_limits),
                 async |cx: ConnectionTo<_>| {
@@ -747,7 +747,7 @@ async fn a_question_open_at_a_restart_is_asked_again() {
     tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     updates.lock().unwrap().push(n.update);
@@ -831,7 +831,7 @@ async fn two_connections_opening_a_stored_session_at_once_share_it() {
         b_loaded.clone(),
         a_loaded.clone(),
     );
-    let a = Client.builder().connect_with(
+    let a = Client.v1().connect_with(
         rho::acp::agent_in(a_agent, a_hub, false),
         async move |cx: ConnectionTo<_>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -988,7 +988,7 @@ async fn stats_report_the_recorded_requests() {
     let agent = agent(Scripted::new(vec![]), &db);
     let stats = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent, Arc::default(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1189,7 +1189,7 @@ async fn a_stop_holds_the_queue_until_a_turn_ends() {
     // the queue go on.
     tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1206,7 +1206,7 @@ async fn a_stop_holds_the_queue_until_a_turn_ends() {
                 cx.send_notification(CancelNotification::new(sid.clone()))?;
                 assert_eq!(
                     one.block_task().await?.stop_reason,
-                    agent_client_protocol::schema::v1::StopReason::Cancelled
+                    agent_client_protocol::v1::schema::StopReason::Cancelled
                 );
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 assert_eq!(prompts(&inner), ["one"], "held after the stop");
@@ -1239,7 +1239,7 @@ async fn a_held_queue_runs_once_everyone_left() {
     let cwd = dir.path().to_path_buf();
     tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent, Arc::new(Hub::default()), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1307,7 +1307,7 @@ async fn an_unused_session_is_unloaded_after_the_idle_timeout() {
     let cwd = dir.path().to_path_buf();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1360,7 +1360,7 @@ async fn an_unused_session_is_unloaded_after_the_idle_timeout() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
     tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent, hub, false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1393,7 +1393,7 @@ async fn a_prompt_queued_while_idle_runs_right_away() {
     let hub = Arc::new(Hub::default());
     tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent, hub, false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1438,7 +1438,7 @@ async fn load_since(
     tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     record.lock().unwrap().push(n);
@@ -1500,7 +1500,7 @@ async fn loading_again_with_a_cursor_sends_only_what_came_after() {
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     record.lock().unwrap().push(n);
@@ -1532,7 +1532,7 @@ async fn loading_again_with_a_cursor_sends_only_what_came_after() {
     // Meanwhile another client goes on.
     tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1587,7 +1587,7 @@ async fn a_cursor_stays_valid_after_a_restart_while_the_session_is_unchanged() {
     let hub = Arc::new(Hub::default());
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1640,7 +1640,7 @@ async fn a_session_joins_another_and_stands_for_it() {
     let cwd = web_cwd.clone();
     let joined = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async move |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -1667,7 +1667,7 @@ async fn a_session_joins_another_and_stands_for_it() {
     let (sid, listed) = tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     record.lock().unwrap().push(n);

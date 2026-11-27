@@ -2,7 +2,7 @@
 //! even when the client that queued them is gone, e.g. a phone with its
 //! screen off. Zed keeps its own queue.
 
-use agent_client_protocol::schema::v1::SessionId;
+use agent_client_protocol::v1::schema::SessionId;
 use agent_client_protocol::{JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 

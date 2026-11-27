@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, ContentChunk, ImageContent, InitializeRequest, ListSessionsRequest,
     LoadSessionRequest, NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate,
     TextContent, ToolCallContent,
 };
-use agent_client_protocol::{Client, ConnectionTo};
+use agent_client_protocol::{Client, v1::ConnectionTo};
 use rho::agent::Agent;
 use rho::extension::{Context, Extension, NoFrontend};
 use rho::provider::{
@@ -603,7 +603,7 @@ async fn acp_saves_notices_when_the_session_is_dropped() {
     let new_cwd = cwd.clone();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -630,7 +630,7 @@ async fn acp_saves_notices_when_the_session_is_dropped() {
     let load_cwd = cwd.clone();
     tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent_in(agent.clone(), hub.clone(), false),
             async |cx: ConnectionTo<_>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -666,7 +666,7 @@ async fn load(agent: Arc<Agent>, cwd: &Path) -> Vec<SessionUpdate> {
 
 /// `load` by a client that shows terminals if `terminal`.
 async fn load_with(agent: Arc<Agent>, cwd: &Path, terminal: bool) -> Vec<SessionUpdate> {
-    let mut caps = agent_client_protocol::schema::v1::ClientCapabilities::new();
+    let mut caps = agent_client_protocol::v1::schema::ClientCapabilities::new();
     caps.meta = terminal.then(|| {
         json!({"terminal_output": true})
             .as_object()
@@ -679,7 +679,7 @@ async fn load_with(agent: Arc<Agent>, cwd: &Path, terminal: bool) -> Vec<Session
     tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     record.lock().unwrap().push(n.update);
@@ -710,7 +710,7 @@ async fn load_with(agent: Arc<Agent>, cwd: &Path, terminal: bool) -> Vec<Session
 
 type Updates = Arc<Mutex<Vec<SessionUpdate>>>;
 
-fn prompt(sid: &agent_client_protocol::schema::v1::SessionId, text: &str) -> PromptRequest {
+fn prompt(sid: &agent_client_protocol::v1::schema::SessionId, text: &str) -> PromptRequest {
     PromptRequest::new(
         sid.clone(),
         vec![ContentBlock::Text(TextContent::new(text))],
@@ -730,7 +730,7 @@ async fn acp_lists_and_loads_saved_sessions() {
     let first_cwd = cwd.clone();
     let sid = tokio::time::timeout(
         Duration::from_secs(10),
-        Client.builder().connect_with(
+        Client.v1().connect_with(
             rho::acp::agent(agent.clone()),
             async |cx: ConnectionTo<_>| {
                 let init = cx
@@ -764,7 +764,7 @@ async fn acp_lists_and_loads_saved_sessions() {
     tokio::time::timeout(
         Duration::from_secs(10),
         Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     record.lock().unwrap().push(n.update);

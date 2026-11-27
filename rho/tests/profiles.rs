@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     InitializeRequest, NewSessionRequest, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionValue, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
 };
-use agent_client_protocol::{Client, ConnectionTo};
+use agent_client_protocol::{Client, v1::ConnectionTo};
 use anyhow::Result;
 use rho::agent::Agent;
 use rho::extension::{
@@ -242,7 +242,7 @@ fn profile_option(options: &[SessionConfigOption]) -> (String, Vec<String>) {
     let SessionConfigKind::Select(select) = &option.kind else {
         panic!("not a select");
     };
-    let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(values) =
+    let agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(values) =
         &select.options
     else {
         panic!("grouped");
@@ -267,7 +267,7 @@ async fn acp_offers_a_profile_selector_and_follows_switches() {
     let record = updates.clone();
 
     let client = Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
                 if let SessionUpdate::ConfigOptionUpdate(u) = n.update {
@@ -323,13 +323,13 @@ async fn acp_offers_a_profile_selector_and_follows_switches() {
 }
 
 fn rho_prompt(
-    sid: &agent_client_protocol::schema::v1::SessionId,
+    sid: &agent_client_protocol::v1::schema::SessionId,
     text: &str,
-) -> agent_client_protocol::schema::v1::PromptRequest {
-    agent_client_protocol::schema::v1::PromptRequest::new(
+) -> agent_client_protocol::v1::schema::PromptRequest {
+    agent_client_protocol::v1::schema::PromptRequest::new(
         sid.clone(),
-        vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new(text),
+        vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+            agent_client_protocol::v1::schema::TextContent::new(text),
         )],
     )
 }
@@ -340,21 +340,20 @@ async fn sessions_without_profiles_have_no_selector() {
         Scripted::new(vec![]),
         ModelSpec::new("test", "m"),
     ));
-    let client =
-        Client
-            .builder()
-            .connect_with(rho::acp::agent(agent), async |cx: ConnectionTo<_>| {
-                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
-                let session = cx
-                    .send_request(NewSessionRequest::new(std::env::current_dir().unwrap()))
-                    .block_task()
-                    .await?;
-                let options = session.config_options.unwrap();
-                assert!(options.iter().all(|o| &*o.id.0 != "mode"));
-                Ok(())
-            });
+    let client = Client
+        .v1()
+        .connect_with(rho::acp::agent(agent), async |cx: ConnectionTo<_>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(std::env::current_dir().unwrap()))
+                .block_task()
+                .await?;
+            let options = session.config_options.unwrap();
+            assert!(options.iter().all(|o| &*o.id.0 != "mode"));
+            Ok(())
+        });
     tokio::time::timeout(Duration::from_secs(10), client)
         .await
         .unwrap()

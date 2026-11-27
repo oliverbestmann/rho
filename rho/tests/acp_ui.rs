@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ClientCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAcceptAction, ElicitationCapabilities, ElicitationContentValue,
     ElicitationFormCapabilities, ImageContent, InitializeRequest, Meta, NewSessionRequest,
     PromptRequest, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionId,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
 };
-use agent_client_protocol::{Client, ConnectionTo, Responder};
+use agent_client_protocol::{Client, v1::ConnectionTo, v1::Responder};
 use anyhow::Result;
 use futures::stream::BoxStream;
 use rho::agent::Agent;
@@ -87,7 +87,7 @@ fn select_value(options: &[SessionConfigOption], id: &str) -> (String, Vec<Strin
         panic!("{id} is not a select");
     };
     let values = match &select.options {
-        agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(v) => {
+        agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(v) => {
             v.iter().map(|o| o.value.0.to_string()).collect()
         }
         _ => panic!("grouped"),
@@ -126,7 +126,7 @@ async fn model_and_thinking_are_session_config_options() {
     let record = recording(&updates);
 
     let client = Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
                 record(n);
@@ -156,7 +156,7 @@ async fn model_and_thinking_are_session_config_options() {
             let SessionConfigKind::Select(select) = &model.kind else {
                 panic!("model is not a select");
             };
-            let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(models) =
+            let agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(models) =
                 &select.options
             else {
                 panic!("grouped");
@@ -242,7 +242,7 @@ async fn models_config_limits_and_defaults_models_by_path() {
     agent.models = models.clone();
 
     let (cwd2, key2) = (cwd.clone(), key.clone());
-    let client = Client.builder().connect_with(
+    let client = Client.v1().connect_with(
         rho::acp::agent(Arc::new(agent)),
         async |cx: ConnectionTo<_>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -280,7 +280,7 @@ async fn models_config_limits_and_defaults_models_by_path() {
     let mut agent = Arc::into_inner(agent_with(Scripted::new(vec![]), vec![])).unwrap();
     agent.models = models;
     agent.model_pinned = true;
-    let client = Client.builder().connect_with(
+    let client = Client.v1().connect_with(
         rho::acp::agent(Arc::new(agent)),
         async |cx: ConnectionTo<_>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -323,7 +323,7 @@ async fn run_bash(client_meta: Option<Meta>) -> Vec<SessionUpdate> {
     capabilities.meta = client_meta;
 
     let client = Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
                 record(n);
@@ -492,7 +492,7 @@ async fn ask_with(form_support: bool, reply: Option<(&'static str, &'static str)
     }
 
     let client = Client
-        .builder()
+        .v1()
         .on_receive_request(
             async move |req: CreateElicitationRequest,
                         responder: Responder<CreateElicitationResponse>,
@@ -512,7 +512,7 @@ async fn ask_with(form_support: bool, reply: Option<(&'static str, &'static str)
                         ),
                     ),
                     None => CreateElicitationResponse::new(
-                        agent_client_protocol::schema::v1::OtherElicitationAction::new(
+                        agent_client_protocol::v1::schema::OtherElicitationAction::new(
                             "_never",
                             Default::default(),
                         ),
@@ -565,42 +565,41 @@ async fn images_go_to_the_model_and_bad_ones_are_refused() {
     // A 1x1 PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-    let client =
-        Client
-            .builder()
-            .connect_with(rho::acp::agent(agent), async |cx: ConnectionTo<_>| {
-                let init = cx
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
-                assert!(init.agent_capabilities.prompt_capabilities.image);
-                let session = cx
-                    .send_request(NewSessionRequest::new(std::env::current_dir().unwrap()))
-                    .block_task()
-                    .await?;
-                let sid = session.session_id;
+    let client = Client
+        .v1()
+        .connect_with(rho::acp::agent(agent), async |cx: ConnectionTo<_>| {
+            let init = cx
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            assert!(init.agent_capabilities.prompt_capabilities.image);
+            let session = cx
+                .send_request(NewSessionRequest::new(std::env::current_dir().unwrap()))
+                .block_task()
+                .await?;
+            let sid = session.session_id;
 
-                // Refused before it reaches the history, so the session goes on.
-                let tiff = PromptRequest::new(
-                    sid.clone(),
-                    vec![ContentBlock::Image(ImageContent::new(PNG, "image/tiff"))],
-                );
-                let err = cx.send_request(tiff).block_task().await.unwrap_err();
-                assert!(
-                    format!("{err:?}").contains("unsupported image type"),
-                    "{err:?}"
-                );
+            // Refused before it reaches the history, so the session goes on.
+            let tiff = PromptRequest::new(
+                sid.clone(),
+                vec![ContentBlock::Image(ImageContent::new(PNG, "image/tiff"))],
+            );
+            let err = cx.send_request(tiff).block_task().await.unwrap_err();
+            assert!(
+                format!("{err:?}").contains("unsupported image type"),
+                "{err:?}"
+            );
 
-                let prompt = PromptRequest::new(
-                    sid,
-                    vec![
-                        ContentBlock::Text(TextContent::new("what is this?")),
-                        ContentBlock::Image(ImageContent::new(PNG, "image/png")),
-                    ],
-                );
-                cx.send_request(prompt).block_task().await?;
-                Ok(())
-            });
+            let prompt = PromptRequest::new(
+                sid,
+                vec![
+                    ContentBlock::Text(TextContent::new("what is this?")),
+                    ContentBlock::Image(ImageContent::new(PNG, "image/png")),
+                ],
+            );
+            cx.send_request(prompt).block_task().await?;
+            Ok(())
+        });
     timed(client).await;
 
     let requests = scripted.requests.lock().unwrap();
@@ -640,7 +639,7 @@ async fn read_image_sends_the_image_to_model_and_client() {
     let cwd = dir.path().to_path_buf();
 
     let client = Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
                 record(n);

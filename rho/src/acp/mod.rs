@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
     CancelNotification, CloseSessionRequest, CloseSessionResponse, ConfigOptionUpdate,
     ContentBlock, ContentChunk, EmbeddedResourceResource, Implementation, InitializeRequest,
@@ -16,7 +16,7 @@ use agent_client_protocol::schema::v1::{
     SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, StopReason, TextContent, UnstructuredCommandInput,
 };
-use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Error, Responder};
+use agent_client_protocol::{Client, ConnectTo, Error, v1::ConnectionTo, v1::Responder};
 use futures::future::{AbortHandle, AbortRegistration, Abortable};
 
 use crate::agent::{Agent, Session};
@@ -129,7 +129,7 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
     let close_state = state;
 
     agent_client_protocol::Agent
-        .builder()
+        .v1()
         .name("rho")
         .on_receive_request(
             async move |req: InitializeRequest, responder: Responder<InitializeResponse>, _cx| {
@@ -854,7 +854,7 @@ fn to_content(blocks: Vec<ContentBlock>) -> anyhow::Result<Vec<Content>> {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::v1::TextContent;
+    use agent_client_protocol::v1::schema::TextContent;
 
     use super::*;
 

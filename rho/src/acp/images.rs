@@ -2,7 +2,7 @@
 //! with a `rho-image:` uri instead of their data, and fetch the data with
 //! `_rho/image` when they show the image.
 
-use agent_client_protocol::schema::v1::SessionId;
+use agent_client_protocol::v1::schema::SessionId;
 use agent_client_protocol::{JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 

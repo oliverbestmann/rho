@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ConfigOptionUpdate, ContentBlock, ContentChunk, Cost, Diff, ElicitationContentValue,
     ElicitationSchema, EnumOption, ImageContent, Meta, MultiSelectPropertySchema, ResourceLink,
     SessionConfigKind, SessionInfoUpdate, SessionUpdate, StopReason, StringPropertySchema,

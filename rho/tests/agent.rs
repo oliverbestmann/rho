@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::util::MatchDispatch;
+use agent_client_protocol::v1::schema::{
     CancelNotification, ContentBlock, ContentChunk, InitializeRequest, SessionNotification,
     SessionUpdate, StopReason as StopReasonAcp, ToolCallStatus,
 };
-use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{Client, SessionMessage};
+use agent_client_protocol::{Client, v1::SessionMessage, v1::SessionSetup};
 use anyhow::Result;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
@@ -223,14 +223,14 @@ async fn acp_session_streams_text_and_tool_calls() {
     });
 
     let client = Client
-        .builder()
+        .v1()
         .connect_with(rho::acp::agent(agent), async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
                 .await?;
             cx.build_session_cwd()?
                 .block_task()
-                .run_until(async |mut session| {
+                .run_until(async |SessionSetup { mut session, .. }| {
                     session.send_prompt("hi")?;
                     let mut text = String::new();
                     let mut tool_statuses = Vec::new();
@@ -238,8 +238,8 @@ async fn acp_session_streams_text_and_tool_calls() {
                     let mut used = Vec::new();
                     loop {
                         match session.read_update().await? {
-                            SessionMessage::SessionMessage(dispatch) => {
-                                MatchDispatch::new(dispatch)
+                            SessionMessage::Message(dispatch) => {
+                                MatchDispatch::new(dispatch.into_raw())
                                     .if_notification(async |n: SessionNotification| {
                                         match n.update {
                                             SessionUpdate::AgentMessageChunk(ContentChunk {
@@ -266,7 +266,7 @@ async fn acp_session_streams_text_and_tool_calls() {
                                     .await
                                     .otherwise_ignore()?
                             }
-                            SessionMessage::StopReason(_) => break,
+                            SessionMessage::PromptResponse(_) => break,
                             _ => {}
                         }
                     }
@@ -311,14 +311,14 @@ async fn acp_cancel_stops_a_running_prompt() {
     let agent = Arc::new(Agent::new(Arc::new(Hangs), ModelSpec::new("test", "m")));
 
     let client = Client
-        .builder()
+        .v1()
         .connect_with(rho::acp::agent(agent), async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
                 .await?;
             cx.build_session_cwd()?
                 .block_task()
-                .run_until(async |mut session| {
+                .run_until(async |SessionSetup { mut session, .. }| {
                     session.send_prompt("hi")?;
                     // First update proves the turn is running; then cancel it.
                     let _ = session.read_update().await?;
@@ -326,8 +326,8 @@ async fn acp_cancel_stops_a_running_prompt() {
                     let mut titles = vec![];
                     loop {
                         match session.read_update().await? {
-                            SessionMessage::SessionMessage(dispatch) => {
-                                MatchDispatch::new(dispatch)
+                            SessionMessage::Message(dispatch) => {
+                                MatchDispatch::new(dispatch.into_raw())
                                     .if_notification(async |n: SessionNotification| {
                                         if let SessionUpdate::ToolCall(t) = n.update {
                                             titles.push(t.title);
@@ -337,8 +337,8 @@ async fn acp_cancel_stops_a_running_prompt() {
                                     .await
                                     .otherwise_ignore()?
                             }
-                            SessionMessage::StopReason(r) => {
-                                assert_eq!(r, StopReasonAcp::Cancelled);
+                            SessionMessage::PromptResponse(r) => {
+                                assert_eq!(r?.stop_reason, StopReasonAcp::Cancelled);
                                 assert_eq!(titles, vec!["Interrupted by the user"]);
                                 return Ok(());
                             }

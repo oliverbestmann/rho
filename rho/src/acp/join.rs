@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ConfigOptionUpdate, PromptResponse, SessionId, SessionUpdate, StopReason,
 };
-use agent_client_protocol::{Client, ConnectionTo, Error, Responder};
+use agent_client_protocol::{Client, Error, v1::ConnectionTo, v1::Responder};
 use anyhow::{Context as _, bail};
 
 use crate::agent::Agent;

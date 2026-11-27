@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AvailableCommand, ContentBlock, ContentChunk, SessionConfigOption, SessionId, SessionUpdate,
 };
-use agent_client_protocol::{Client, ConnectionTo, Error, JsonRpcResponse, Responder};
+use agent_client_protocol::{Client, Error, JsonRpcResponse, v1::ConnectionTo, v1::Responder};
 
 use crate::agent::{Agent, AgentEvent};
 use crate::extension::Context;
@@ -33,7 +33,7 @@ pub(super) enum Replay {
 impl Replay {
     /// For `session/load`. A `since` that cannot be read is in no
     /// transcript: the client gets a reset and everything.
-    pub(super) fn of_load(meta: Option<&agent_client_protocol::schema::v1::Meta>) -> Self {
+    pub(super) fn of_load(meta: Option<&agent_client_protocol::v1::schema::Meta>) -> Self {
         let since = meta.and_then(|m| m.get("rho")?.get("since"));
         Replay::Since(since.map(|s| serde_json::from_value(s.clone()).unwrap_or_default()))
     }

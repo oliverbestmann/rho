@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     Content, ContentBlock, ContentChunk, CreateElicitationRequest, ElicitationAction,
     ElicitationFormMode, ElicitationSessionScope, ImageContent, PermissionOption,
     PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
     SessionId, SessionInfoUpdate, SessionNotification, SessionUpdate, ToolCallContent,
     ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol::{Client, ConnectionTo, JsonRpcRequest};
+use agent_client_protocol::{Client, JsonRpcRequest, v1::ConnectionTo};
 use futures::StreamExt;
 use futures::future::{AbortHandle, Abortable};
 use futures::stream::FuturesUnordered;
