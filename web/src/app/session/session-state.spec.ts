@@ -58,6 +58,17 @@ describe('SessionState', () => {
     expect(e.map((x) => (x.kind === 'tool' ? '' : x.text()))).toEqual(['a', 'n1', 'n2', 'b']);
   });
 
+  it('keeps the class of a hint note', () => {
+    const s = new SessionState();
+    s.apply({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'h' },
+      _meta: { rho: { note: true, class: 'hint' } },
+    });
+    const e = s.entries()[0];
+    expect(e.kind === 'note' && e.cls).toBe('hint');
+  });
+
   it('keeps a resent tool call in place', () => {
     const s = new SessionState();
     s.apply({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Bash', status: 'in_progress' });

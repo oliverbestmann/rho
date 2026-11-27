@@ -2,8 +2,9 @@ import { signal, WritableSignal } from '@angular/core';
 import type * as acp from '@agentclientprotocol/sdk';
 
 export type Entry =
-  /** `note`: a notice from rho shown as text, from `_meta.rho.note`. */
-  | { kind: 'user' | 'agent' | 'thought' | 'note'; text: WritableSignal<string> }
+  | { kind: 'user' | 'agent' | 'thought'; text: WritableSignal<string> }
+  /** A notice from rho shown as text, from `_meta.rho.note`; `cls` from `_meta.rho.class`, e.g. `hint`. */
+  | { kind: 'note'; text: WritableSignal<string>; cls?: string }
   | {
       kind: 'tool';
       call: WritableSignal<acp.ToolCall>;
@@ -61,11 +62,16 @@ export class SessionState {
       case 'user_message_chunk':
         this.chunk('user', u.content);
         break;
-      case 'agent_message_chunk':
+      case 'agent_message_chunk': {
         // A note comes whole, in one chunk: never merged with its neighbors.
-        if (rhoMeta(u._meta)?.['note'] === true) this.add('note', blockText(u.content));
+        const rho = rhoMeta(u._meta);
+        const text = blockText(u.content);
+        const cls = typeof rho?.['class'] === 'string' ? rho['class'] : undefined;
+        if (rho?.['note'] === true)
+          this.entries.update((e) => [...e, { kind: 'note', text: signal(text), cls }]);
         else this.chunk('agent', u.content);
         break;
+      }
       case 'agent_thought_chunk':
         this.chunk('thought', u.content);
         break;
@@ -112,7 +118,7 @@ export class SessionState {
     this.add('user', text);
   }
 
-  private add(kind: 'user' | 'note', text: string) {
+  private add(kind: 'user', text: string) {
     this.entries.update((e) => [...e, { kind, text: signal(text) }]);
   }
 

@@ -47,7 +47,7 @@
                   <app-message from="agent" [text]="entry.text()" />
                 }
                 @case ('note') {
-                  <app-message from="note" [text]="entry.text()" />
+                  <app-message from="note" [text]="entry.text()" [cls]="entry.cls ?? ''" />
                 }
                 @case ('thought') {
                   <app-thought-card [text]="entry.text()" [done]="!newest().has(entry)" />

@@ -83,6 +83,8 @@ pub enum NoteType {
     Info,
     /// A longer message, like a slash command's reply: shown as text.
     Text,
+    /// A suggestion to the user: shown as text, highlighted.
+    Hint,
 }
 
 impl Content {

@@ -327,21 +327,24 @@ pub(super) fn to_update(
             }
             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(published.options.clone()))
         }
-        // A whole note in one chunk; `_meta.rho.note` lets clients style it.
+        // A whole note in one chunk; `_meta.rho.note` and `class` let clients style it.
         AgentEvent::Notice {
-            kind: NoteType::Text,
+            kind: kind @ (NoteType::Text | NoteType::Hint),
             title,
             text,
             ..
         } => {
+            let mut rho = serde_json::json!({ "note": true });
+            if kind == NoteType::Hint {
+                rho["class"] = "hint".into();
+            }
             let text = match (title.is_empty(), text.is_empty()) {
                 (true, _) => text.to_string(),
                 (false, true) => format!("**{title}**"),
                 (false, false) => format!("**{title}**\n\n{text}"),
             };
             SessionUpdate::AgentMessageChunk(
-                ContentChunk::new(text.into())
-                    .meta(meta(serde_json::json!({ "rho": { "note": true } }))),
+                ContentChunk::new(text.into()).meta(meta(serde_json::json!({ "rho": rho }))),
             )
         }
         // Rendered as a finished tool call, like pi-acp does for extension messages.
@@ -571,6 +574,25 @@ mod tests {
     fn update(ev: AgentEvent, shown: Option<&Shown>) -> serde_json::Value {
         let mut last = Published::default();
         serde_json::to_value(to_update(ev, 0, shown, Path::new("/w"), &mut last)).unwrap()
+    }
+    #[test]
+    fn hints_are_notes_with_a_class() {
+        let note = |kind| {
+            update(
+                AgentEvent::Notice {
+                    kind,
+                    title: "T",
+                    text: "x",
+                    is_error: false,
+                    card: None,
+                },
+                None,
+            )
+        };
+        let hint = note(NoteType::Hint);
+        assert_eq!(hint["content"]["text"], "**T**\n\nx");
+        assert_eq!(hint["_meta"]["rho"], json!({"note": true, "class": "hint"}));
+        assert_eq!(note(NoteType::Text)["_meta"]["rho"], json!({"note": true}));
     }
     #[test]
     fn tool_end_sends_the_diff() {

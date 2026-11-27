@@ -10,7 +10,7 @@ import { Speech } from './speech';
 @Component({
   selector: 'app-message',
   imports: [ClipboardModule, HighlightCode, MarkdownPipe, MatIconModule],
-  host: { '[class]': 'from()' },
+  host: { '[class]': "from() + ' ' + cls()" },
   template: `
     @let html = text() | markdown;
     @if (from() === 'agent') {
@@ -133,10 +133,18 @@ import { Speech } from './speech';
       background: var(--mat-sys-surface-container);
       color: var(--mat-sys-on-surface-variant);
     }
+    /* A suggestion from rho, e.g. which project to join. */
+    :host(.note.hint) {
+      font-style: normal;
+      background: var(--mat-sys-secondary-container);
+      color: var(--mat-sys-on-secondary-container);
+    }
   `,
 })
 export class ChatMessage {
   readonly from = input.required<'user' | 'agent' | 'note'>();
+  /** Extra classes, e.g. `hint` for a note. */
+  readonly cls = input('');
   readonly text = input.required<string>();
   protected readonly done = signal(false);
   protected readonly speech = signal<Speech | undefined>(undefined);
