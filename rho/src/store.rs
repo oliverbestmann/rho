@@ -8,7 +8,8 @@
 //! summary history under it. A session's history is the messages of its
 //! current epoch; older epochs stay for search. `seq` grows across epochs.
 //!
-//! Extensions get read access through `Context::store`; writes are crate-only.
+//! Extensions get read access through `Context::store`; writes are crate-only,
+//! except for projects (`projects.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,8 +25,10 @@ use crate::extension::{Diff, ProfileId};
 use crate::feature::FeatureId;
 use crate::provider::{Content, Message, ModelSpec, Role, Thinking, ToolCallId, Usage};
 
+mod projects;
 mod requests;
 mod stats;
+pub use projects::{LogEntry, LogKind, PROJECT_KEY, Project};
 pub use requests::RequestRecord;
 pub use stats::{SessionUsage, Stats};
 
@@ -218,6 +221,7 @@ CREATE INDEX requests_by_time ON requests (created_at);
 -- For a session's usage, and the ON DELETE SET NULL of sessions.
 CREATE INDEX requests_by_session ON requests (session_id);
 "#,
+    projects::MIGRATION,
 ];
 
 /// The migration that adds `requests`; it is filled from turn notes once.
@@ -1363,7 +1367,7 @@ mod tests {
         }
     }
 
-    fn state(id: &str, cwd: &str) -> State {
+    pub(super) fn state(id: &str, cwd: &str) -> State {
         State {
             id: SessionId::new(id),
             cwd: cwd.into(),
