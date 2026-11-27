@@ -15,6 +15,7 @@ mod mcp;
 mod memory;
 mod plan_mode;
 mod ponytail;
+mod project;
 mod project_context;
 mod review;
 mod ripgrep_find;
@@ -57,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(ask_user::AskUser),
                 Arc::new(plan_mode::PlanMode),
                 Arc::new(review::Review),
+                Arc::new(project::Projects),
                 Arc::new(ponytail::Ponytail),
                 Arc::new(skills::Skills::from_config()),
                 // After every extension that adds features, so all are listed.

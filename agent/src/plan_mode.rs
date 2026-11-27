@@ -18,7 +18,7 @@ use serde_json::Value;
 
 pub const PLAN: ProfileId = ProfileId::from_static("plan");
 const ENTER: ToolName = ToolName::from_static("EnterPlanMode");
-const PRESENT: ToolName = ToolName::from_static("PresentPlan");
+pub(crate) const PRESENT: ToolName = ToolName::from_static("PresentPlan");
 
 const INSTRUCTIONS: &str = "You are in plan mode. Explore the code (Read, Bash, Glob, Grep, ...) and ask the user questions, \
 but do not change anything: no file edits, no commits, no commands with side effects. \

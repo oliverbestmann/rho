@@ -19,7 +19,7 @@ const ALLOW: CommandName = CommandName::from_static("git:allow");
 const ALLOWED: &str = "git-gate.allowed";
 
 /// Tools whose `command` input runs in a shell.
-const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
+pub(crate) const SHELL_TOOLS: [ToolName; 2] = [rho::tools::BASH, BACKGROUND_TASK];
 const MUTATIONS: [&str; 3] = ["commit", "push", "tag"];
 /// Options of `git` itself that take the next word as value (lowercased).
 const VALUE_OPTIONS: [&str; 5] = [
@@ -34,9 +34,14 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Like the regex `\bgit\s+(commit|push|tag)\b`, case-insensitive, but
-/// skipping git's own options (`git -C dir push`, `git -c k=v commit`).
 fn mutates_git(command: &str) -> bool {
+    runs_git(command, &MUTATIONS)
+}
+
+/// Like the regex `\bgit\s+(commit|push|...)\b` for `subcommands`,
+/// case-insensitive, but skipping git's own options (`git -C dir push`,
+/// `git -c k=v commit`).
+pub(crate) fn runs_git(command: &str, subcommands: &[&str]) -> bool {
     let lower = command.to_lowercase();
     lower.match_indices("git").any(|(at, _)| {
         if lower[..at].chars().next_back().is_some_and(is_word) {
@@ -54,7 +59,7 @@ fn mutates_git(command: &str) -> bool {
                 words.next();
             } else if !word.starts_with('-') {
                 let sub: String = word.chars().take_while(|c| is_word(*c)).collect();
-                return MUTATIONS.contains(&sub.as_str());
+                return subcommands.contains(&sub.as_str());
             }
         }
         false

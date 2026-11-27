@@ -78,6 +78,8 @@ pub struct LogEntry {
     pub text: String,
     /// Unix milliseconds.
     pub created_at: i64,
+    /// `created_at` as `YYYY-MM-DD`, in UTC.
+    pub date: String,
 }
 
 fn read_project(r: &Row) -> rusqlite::Result<Project> {
@@ -101,10 +103,12 @@ fn read_entry(r: &Row) -> rusqlite::Result<LogEntry> {
         title: r.get(4)?,
         text: r.get(5)?,
         created_at: r.get(6)?,
+        date: r.get(7)?,
     })
 }
 
-const ENTRY: &str = "id, session_id, seq, kind, title, text, created_at";
+const ENTRY: &str =
+    "id, session_id, seq, kind, title, text, created_at, date(created_at / 1000, 'unixepoch')";
 
 fn project(c: &Connection, name: &str) -> Result<Option<Project>> {
     Ok(c.query_row(
