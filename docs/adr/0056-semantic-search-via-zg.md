@@ -1,6 +1,7 @@
 # 56. Semantic code search via the zg CLI
 
-- Status: Accepted
+- Status: Withdrawn on 2026-11-27. The tool and `zg` were removed: in the
+  saved sessions it was called 4 times (about 9 s each), Grep 1,852 times.
 - Date: 2026-10-18
 
 ## Context

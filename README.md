@@ -62,7 +62,7 @@ Cargo workspace:
 
 - `rho/` - the library: agent loop, providers, tools, ACP, CLI (`rho::run(rho::Options)`). Its only extensions are the built-in tools (`rho::builtin()`), `GrantCommands` and `FeatureCommands`.
 - `agent/` - the `rho` binary: its extensions (`GitGate`,
-  `GoCheck`, `RipgrepFind`, `GoDoc`, `SemanticSearch`, `FetchUrl`, `WebSearch`, `Mcp`, `Memory`, `History`, `SessionTitle`,
+  `GoCheck`, `RipgrepFind`, `GoDoc`, `FetchUrl`, `WebSearch`, `Mcp`, `Memory`, `History`, `SessionTitle`,
   `BackgroundTasks`, `ContextNotice`, `Discards`, `AskUser`, `PlanMode`, `Projects`, `Ponytail`,
   `Skills`, `ProjectContext`, `Secrets`) and a `main` that calls
   `rho::run` with its `rho::Options`.
@@ -508,10 +508,6 @@ Ports of the other pi extensions:
   Code's. Both run `rg`, sandboxed like `Bash`, 50 lines by default.
 - `GoDoc` adds `GoDoc` (pi's `go_doc`) in Go modules: `go doc [-src] [-all]`,
   sandboxed, so the module cache and `GOCACHE` must be accessible.
-- `SemanticSearch` searches code by meaning with zvec-grep when `zg` is on
-  `PATH`. It runs `zg --mode direct` sandboxed, with access to
-  `~/.zvec-grep` and the index added per call, and creates an index at the
-  search directory if none above it is readable (ADR 0056).
 - `FetchUrl` (pi's `fetch_url`) fetches a URL; HTML becomes markdown via
   `htmd`. The network is not sandboxed.
 - `WebSearch` searches DuckDuckGo's HTML page and lists title, URL and

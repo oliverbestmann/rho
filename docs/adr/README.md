@@ -63,7 +63,7 @@ add a new one and mark the old one `Superseded by NNNN`.
 | [0053](0053-commands-in-the-agent-and-a-redact-hook.md) | Slash commands run in the agent; extensions redact through a hook | Accepted |
 | [0054](0054-plan-approval-as-permission-request.md) | Plan approval is a permission request on the tool call again | Accepted |
 | [0055](0055-streamed-bash-output.md) | Bash output streams into Zed's terminal card | Accepted, amended by 0060 |
-| [0056](0056-semantic-search-via-zg.md) | Semantic code search via the zg CLI | Accepted |
+| [0056](0056-semantic-search-via-zg.md) | Semantic code search via the zg CLI | Withdrawn |
 | [0057](0057-new-sessions-from-the-web.md) | New sessions from the web client, under ~ or /tmp | Accepted |
 | [0058](0058-extension-state-saved-with-the-session.md) | Extension state saved with the session | Accepted |
 | [0059](0059-notes-in-the-history.md) | System and user notes in the history | Accepted |
