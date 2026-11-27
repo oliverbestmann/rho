@@ -26,7 +26,6 @@ import { ago } from '../time';
         <a
           mat-menu-item
           [routerLink]="['/session', s.sessionId]"
-          [queryParams]="{ cwd: s.cwd, title: s.title }"
           [class.current]="s.sessionId === current()"
           [attr.aria-current]="s.sessionId === current() ? 'page' : null"
         >

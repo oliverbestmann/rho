@@ -16,6 +16,8 @@ export type Entry =
 export class SessionState {
   readonly entries = signal<Entry[]>([]);
   readonly title = signal<string | undefined>(undefined);
+  /** The working directory, from `session/list`. */
+  readonly cwd = signal<string | undefined>(undefined);
   readonly usage = signal<acp.UsageUpdate | undefined>(undefined);
   /** Model, thinking level and other session settings. */
   readonly options = signal<acp.SessionConfigOption[]>([]);

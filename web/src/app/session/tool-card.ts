@@ -59,7 +59,6 @@ import { hasBody, toolIcon, toolLogo, ToolBodyPipe } from './tool-body';
               aria-label="Open review"
               title="Open review"
               [routerLink]="['review', c.toolCallId]"
-              queryParamsHandling="preserve"
               (click)="$event.stopPropagation()"
             >
               <mat-icon>rate_review</mat-icon>

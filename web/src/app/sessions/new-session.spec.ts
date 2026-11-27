@@ -18,8 +18,12 @@ function setup() {
     if (method === '_rho/mkdir') return { dir: '/home/me/sr' };
     return { sessionId: 's1' };
   });
+  const remember = vi.fn();
   TestBed.configureTestingModule({
-    providers: [provideRouter([]), { provide: Acp, useValue: { agent: signal({ request }) } }],
+    providers: [
+      provideRouter([]),
+      { provide: Acp, useValue: { agent: signal({ request }), remember } },
+    ],
   });
   localStorage.clear();
   const navigate = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
@@ -34,7 +38,7 @@ function setup() {
   };
   const button = (text: string) =>
     [...el.querySelectorAll('button')].find((b) => b.textContent?.includes(text));
-  return { request, navigate, fixture, type, button };
+  return { request, remember, navigate, fixture, type, button };
 }
 
 describe('NewSession', () => {
@@ -52,14 +56,13 @@ describe('NewSession', () => {
   });
 
   it('starts a session in the canonical directory', async () => {
-    const { request, navigate, type, button, fixture } = setup();
+    const { request, remember, navigate, type, button, fixture } = setup();
     await type('~/src');
     expect(button('Create folder')).toBeUndefined();
     button('Start')!.click();
     await fixture.whenStable();
     expect(request).toHaveBeenCalledWith('session/new', { cwd: '/home/me/src', mcpServers: [] });
-    expect(navigate).toHaveBeenCalledWith(['/session', 's1'], {
-      queryParams: { cwd: '/home/me/src' },
-    });
+    expect(remember).toHaveBeenCalledWith({ sessionId: 's1', cwd: '/home/me/src' });
+    expect(navigate).toHaveBeenCalledWith(['/session', 's1']);
   });
 });

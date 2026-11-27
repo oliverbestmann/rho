@@ -91,14 +91,7 @@ interface Field {
         <mat-card-actions align="end">
           @let commented = plan() ? planCount() : 0;
           @if (review()) {
-            <a
-              class="open"
-              matButton="filled"
-              [routerLink]="['review', callId]"
-              queryParamsHandling="preserve"
-            >
-              Open review
-            </a>
+            <a class="open" matButton="filled" [routerLink]="['review', callId]"> Open review </a>
           }
           @for (o of a.request.options; track o.optionId) {
             @if (commented && o.kind.startsWith('reject')) {

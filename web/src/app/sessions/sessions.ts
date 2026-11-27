@@ -9,7 +9,7 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { Acp, errorText } from '../acp';
 import { Working } from '../session/working';
 import { ago } from '../time';
-import { dir, hue, isRunning, listSessions } from './list';
+import { dir, hue, isRunning } from './list';
 
 @Component({
   selector: 'app-sessions',
@@ -46,12 +46,7 @@ import { dir, hue, isRunning, listSessions } from './list';
     }
     <mat-nav-list>
       @for (s of sessions.value(); track s.sessionId) {
-        <a
-          mat-list-item
-          [routerLink]="['/session', s.sessionId]"
-          [queryParams]="{ cwd: s.cwd, title: s.title }"
-          [style.--hue]="hue(s.cwd)"
-        >
+        <a mat-list-item [routerLink]="['/session', s.sessionId]" [style.--hue]="hue(s.cwd)">
           @if (waiting().has(s.sessionId)) {
             <span matListItemAvatar class="avatar waiting" aria-label="Waiting for an answer">
               <mat-icon>help</mat-icon>
@@ -148,7 +143,7 @@ export class Sessions {
 
   protected readonly sessions = resource({
     params: () => this.acp.agent(),
-    loader: ({ params: agent }) => listSessions(agent),
+    loader: ({ params: agent }) => this.acp.listSessions(agent),
   });
 
   /** Sessions with a question for the user. */

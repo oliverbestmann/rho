@@ -39,8 +39,6 @@ export class Review {
   /** Route parameters. */
   readonly id = input.required<string>();
   readonly callId = input.required<string>();
-  /** Query parameter, `session/load` needs it. */
-  readonly cwd = input.required<string>();
 
   private readonly acp = inject(Acp);
   private readonly router = inject(Router);
@@ -49,7 +47,7 @@ export class Review {
 
   private readonly opened = computed(() => {
     const agent = this.acp.agent();
-    return agent && this.acp.session(agent, this.id(), this.cwd());
+    return agent && this.acp.session(agent, this.id());
   });
 
   /** The share link to the diff file, from the call's content. */
@@ -162,10 +160,7 @@ export class Review {
 
   private done() {
     this.comments.set({});
-    void this.router.navigate(['../..'], {
-      relativeTo: this.route,
-      queryParamsHandling: 'preserve',
-    });
+    void this.router.navigate(['../..'], { relativeTo: this.route });
   }
 }
 

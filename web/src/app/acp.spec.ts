@@ -1,3 +1,4 @@
+import { computed } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import * as acp from '@agentclientprotocol/sdk';
 import { Acp, errorText } from './acp';
@@ -11,11 +12,13 @@ describe('Acp.session', () => {
     const agent = { request } as unknown as acp.ClientContext;
     const a = TestBed.inject(Acp);
     TestBed.tick(); // the connecting effect, which starts with an empty cache
+    a.remember({ sessionId: 's', cwd: '/x' });
 
-    const first = a.session(agent, 's', '/x');
+    // The view opens it inside a `computed`, where writing signals throws.
+    const first = computed(() => a.session(agent, 's'))();
     expect(first.loading()).toBe(true);
     await vi.waitFor(() => expect(first.loading()).toBe(false));
-    expect(a.session(agent, 's', '/x')).toBe(first);
+    expect(a.session(agent, 's')).toBe(first);
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -24,10 +27,47 @@ describe('Acp.session', () => {
     const agent = { request } as unknown as acp.ClientContext;
     const a = TestBed.inject(Acp);
     TestBed.tick(); // the connecting effect, which starts with an empty cache
+    a.remember({ sessionId: 's', cwd: '/x' });
 
-    const first = a.session(agent, 's', '/x');
+    const first = a.session(agent, 's');
     await vi.waitFor(() => expect(first.error()).toBe('gone'));
-    expect(a.session(agent, 's', '/x')).not.toBe(first);
+    expect(a.session(agent, 's')).not.toBe(first);
+  });
+});
+
+describe('Acp session lookup', () => {
+  it('gets the directory and title from session/list', async () => {
+    const request = vi.fn((method: string) =>
+      Promise.resolve(
+        method === acp.methods.agent.session.list
+          ? { sessions: [{ sessionId: 's', cwd: '/y', title: 'Listed' }] }
+          : { configOptions: [] },
+      ),
+    );
+    const agent = { request } as unknown as acp.ClientContext;
+    const a = TestBed.inject(Acp);
+    TestBed.tick(); // the connecting effect, which starts with an empty cache
+
+    const opened = a.session(agent, 's');
+    await vi.waitFor(() => expect(opened.loading()).toBe(false));
+    expect(opened.state.cwd()).toBe('/y');
+    expect(opened.state.title()).toBe('Listed');
+    expect(request).toHaveBeenLastCalledWith(acp.methods.agent.session.load, {
+      sessionId: 's',
+      cwd: '/y',
+      mcpServers: [],
+    });
+  });
+
+  it('fails for a session rho does not list', async () => {
+    const request = vi.fn().mockResolvedValue({ sessions: [] });
+    const agent = { request } as unknown as acp.ClientContext;
+    const a = TestBed.inject(Acp);
+    TestBed.tick(); // the connecting effect, which starts with an empty cache
+
+    const opened = a.session(agent, 's');
+    await vi.waitFor(() => expect(opened.error()).toBe('Unknown session'));
+    expect(opened.loading()).toBe(false);
   });
 });
 
@@ -37,15 +77,17 @@ describe('Acp reconnects', () => {
     const agent = { request } as unknown as acp.ClientContext;
     const a = TestBed.inject(Acp);
     TestBed.tick(); // the connecting effect, which starts with an empty cache
+    a.remember({ sessionId: 's', cwd: '/x' });
 
-    const first = a.session(agent, 's', '/x');
+    const first = a.session(agent, 's');
     await vi.waitFor(() => expect(first.loading()).toBe(false));
     first.state.cursor = { transcript: 't', entry: 3, len: 0 };
     (a as unknown as { disconnected(): void }).disconnected();
 
-    const again = a.session(agent, 's', '/x');
+    const again = a.session(agent, 's');
     expect(again).not.toBe(first);
     expect(again.state).toBe(first.state);
+    await vi.waitFor(() => expect(again.loading()).toBe(false));
     expect(request).toHaveBeenLastCalledWith(acp.methods.agent.session.load, {
       sessionId: 's',
       cwd: '/x',
@@ -237,8 +279,9 @@ describe('Acp prompts', () => {
     const agent = { request, notify: vi.fn() } as unknown as acp.ClientContext;
     const a = TestBed.inject(Acp);
     TestBed.tick(); // the connecting effect, which starts with an empty cache
+    a.remember({ sessionId: 's', cwd: '/x' });
     a.agent.set(agent);
-    const opened = a.session(agent, 's', '/x');
+    const opened = a.session(agent, 's');
     await vi.waitFor(() => expect(opened.loading()).toBe(false));
     return { a, request, opened };
   }

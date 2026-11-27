@@ -16,6 +16,7 @@ import { Server, Settings } from './settings';
 import { blockText, rhoMeta, SessionState } from './session/session-state';
 import { cursorOf, HistoryDb } from './session/history-db';
 import type { Image } from './session/composer';
+import { listSessions } from './sessions/list';
 
 /** A session loaded over the current connection; its state follows the updates. */
 export interface Opened {
@@ -99,6 +100,8 @@ export class Acp {
   private readonly buffers = new Map<string, acp.SessionNotification[]>();
   /** Entries read from the kept copy, per session; `earlier` reads more. */
   private readonly windows = new Map<string, number>();
+  /** Directory and title per session, from `session/list`: `session/load` needs the directory. */
+  private readonly infos = new Map<string, acp.SessionInfo>();
   private url?: string;
   private connection?: acp.ClientConnection;
   private timer?: ReturnType<typeof setTimeout>;
@@ -167,7 +170,7 @@ export class Acp {
    * The session, loaded with `session/load` the first time it is asked for
    * on this connection. Later calls return the same, kept current.
    */
-  session(agent: acp.ClientContext, sessionId: string, cwd: string): Opened {
+  session(agent: acp.ClientContext, sessionId: string): Opened {
     const cached = this.opened.get(sessionId);
     if (cached) return cached;
     const kept = this.kept.get(sessionId);
@@ -178,8 +181,26 @@ export class Acp {
       error: signal(undefined),
     };
     this.opened.set(sessionId, opened);
-    void this.load(agent, opened, sessionId, cwd, !kept);
+    void this.load(agent, opened, sessionId, !kept);
     return opened;
+  }
+
+  /** All sessions, most recently updated first; their directories and titles are kept. */
+  async listSessions(agent: acp.ClientContext) {
+    const all = await listSessions(agent);
+    for (const s of all) this.remember(s);
+    return all;
+  }
+
+  /** A session's directory and title, from the list if not known yet. */
+  private async info(agent: acp.ClientContext, sessionId: string) {
+    if (!this.infos.has(sessionId)) await this.listSessions(agent).catch(() => undefined);
+    return this.infos.get(sessionId);
+  }
+
+  /** Keeps a session's directory and title, e.g. of a new session, so loading it needs no list. */
+  remember(info: acp.SessionInfo) {
+    this.infos.set(info.sessionId, info);
   }
 
   private key(sessionId: string) {
@@ -191,10 +212,20 @@ export class Acp {
     agent: acp.ClientContext,
     opened: Opened,
     sessionId: string,
-    cwd: string,
     restore: boolean,
   ) {
     const { state } = opened;
+    // Awaited even when known: `session` runs inside a `computed`, which must not write signals.
+    const info = await this.info(agent, sessionId);
+    if (!info) {
+      // Not kept, so the next visit lists again.
+      if (this.opened.get(sessionId) === opened) this.opened.delete(sessionId);
+      opened.error.set('Unknown session');
+      opened.loading.set(false);
+      return;
+    }
+    state.cwd.set(info.cwd);
+    if (!state.title()) state.title.set(info.title ?? undefined);
     if (restore) {
       const kept = await this.history.load(this.key(sessionId), WINDOW);
       if (kept.cursor) {
@@ -209,7 +240,7 @@ export class Acp {
     await agent
       .request(acp.methods.agent.session.load, {
         sessionId,
-        cwd,
+        cwd: info.cwd,
         mcpServers: [],
         ...(since !== undefined && { _meta: { rho: { since } } }),
       })
@@ -419,7 +450,10 @@ export class Acp {
     this.connection = undefined;
     this.disconnected();
     // Another rho has other transcripts.
-    if (server?.url !== this.url) this.kept.clear();
+    if (server?.url !== this.url) {
+      this.kept.clear();
+      this.infos.clear();
+    }
     this.url = server?.url;
     if (!server) {
       this.status.set('offline');

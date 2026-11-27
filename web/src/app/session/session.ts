@@ -25,7 +25,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { Acp, Ask, Opened } from '../acp';
 import type { Entry } from './session-state';
 import { loadHighlighter } from '../highlight';
-import { dir, listSessions } from '../sessions/list';
+import { dir } from '../sessions/list';
 import { AskCard } from './ask-card';
 import { Composer, Image } from './composer';
 import { ContextUsage } from './context-usage';
@@ -64,10 +64,6 @@ import { Working } from './working';
 export class Session {
   /** Route parameter. */
   readonly id = input.required<string>();
-  /** Query parameter, `session/load` needs it. */
-  readonly cwd = input.required<string>();
-  /** Query parameter, the title from the list until rho sends a new one. */
-  readonly listTitle = input<string | undefined>(undefined, { alias: 'title' });
 
   protected readonly acp = inject(Acp);
 
@@ -85,7 +81,7 @@ export class Session {
   /** Synchronous, unlike a resource: a session opened before shows at once. */
   protected readonly opened = computed(() => {
     const agent = this.acp.agent();
-    return agent && this.acp.session(agent, this.id(), this.cwd());
+    return agent && this.acp.session(agent, this.id());
   });
   /** What the view shows: the last loaded state while offline or reloading. */
   protected readonly shown = linkedSignal<
@@ -112,7 +108,7 @@ export class Session {
   /** For the switcher; reloaded each time it opens. */
   protected readonly sessions = resource({
     params: () => this.acp.agent(),
-    loader: ({ params: agent }) => listSessions(agent),
+    loader: ({ params: agent }) => this.acp.listSessions(agent),
   });
   /** The five last updated sessions, plus this one if it is older. */
   protected readonly recent = computed(() =>
@@ -170,9 +166,8 @@ export class Session {
 
   protected readonly dir = dir;
 
-  protected readonly title = computed(
-    () => this.shown()?.state.title() ?? this.listTitle() ?? 'Session',
-  );
+  protected readonly title = computed(() => this.shown()?.state.title() ?? 'Session');
+  protected readonly cwd = computed(() => this.shown()?.state.cwd() ?? '');
 
   protected readonly usage = computed(() => {
     const u = this.shown()?.state.usage();

@@ -160,7 +160,8 @@ export class NewSession {
         mcpServers: [],
       });
       localStorage.setItem(LAST_DIR, cwd);
-      await this.router.navigate(['/session', sessionId], { queryParams: { cwd } });
+      this.acp.remember({ sessionId, cwd });
+      await this.router.navigate(['/session', sessionId]);
     });
   }
 
