@@ -419,13 +419,10 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                         _cx| {
                 let (hub, sid) = (&queue_state.hub, &req.session_id);
                 if req.steer {
-                    let Some((_, ctx, _)) = hub.session(sid, queue_state.conn) else {
+                    if !steer(hub, sid, queue_state.conn, req.text) {
                         return responder
                             .respond_with_error(Error::invalid_params().data("unknown session"));
-                    };
-                    // Shown, since the model gets it outside of a prompt.
-                    ctx.notify(NoteType::Text, "Comment", &req.text, false);
-                    ctx.send(req.text, true);
+                    }
                     return responder.respond(queue::QueueResponse {});
                 }
                 if !hub.enqueue(sid, queue_state.conn, req.text) {
@@ -449,10 +446,8 @@ pub fn agent_in(agent: Arc<Agent>, hub: Arc<Hub>, web_limits: bool) -> impl Conn
                 };
                 if req.steer
                     && let Some(text) = text
-                    && let Some((_, ctx, _)) = hub.session(sid, conn)
                 {
-                    ctx.notify(NoteType::Text, "Steered", &text, false);
-                    ctx.send(text, true);
+                    steer(hub, sid, conn, text);
                 }
                 responder.respond(queue::QueueResponse {})
             },
@@ -754,6 +749,22 @@ async fn turn(
 /// The turn ended normally; a stopped or failed one holds the queue.
 fn ended_normally(result: &Option<anyhow::Result<provider::StopReason>>) -> bool {
     matches!(result, Some(Ok(provider::StopReason::EndTurn)))
+}
+
+/// Gives `text` to the model with the next tool results, or starts a turn
+/// if idle. Every viewer sees it as a user message right away; false if
+/// `conn` did not open the session.
+fn steer(hub: &Hub, sid: &SessionId, conn: ConnId, text: String) -> bool {
+    let Some((_, ctx, frontend)) = hub.session(sid, conn) else {
+        return false;
+    };
+    let block = ContentBlock::from(text.as_str());
+    frontend.echo(
+        SessionUpdate::UserMessageChunk(ContentChunk::new(block)),
+        None,
+    );
+    ctx.send(text, true);
+    true
 }
 
 /// The other connections on the session see a prompt from `conn` (all of

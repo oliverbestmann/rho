@@ -18,7 +18,8 @@ comments with a permission answer.
   line with its comment.
 - Approve with comments: the client first sends them with
   `_rho/queue {steer: true}`, then approves. The daemon shows them as a
-  "Comment" note and puts them into the session's inbox (`Context::send`),
+  user message (a "Comment" note at first) and puts them into the
+  session's inbox (`Context::send`),
   so the model gets them with the approved call's result, before it starts
   on the work.
 - Plans: the web client renders the plan of a `PresentPlan` call block by

@@ -1234,6 +1234,8 @@ async fn a_queued_prompt_can_be_steered_into_the_running_turn() {
     // One turn, and the queue is empty: "two" came with the tool result.
     assert_eq!(prompts(&inner), ["one", "two"]);
     assert_eq!(queued(&updates), Some(vec![]));
+    // Shown like a prompt, also to the connection that steered it.
+    assert_eq!(chunks(&updates), ["user: two", "agent: Done."]);
 }
 
 #[tokio::test]

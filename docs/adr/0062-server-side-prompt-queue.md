@@ -22,8 +22,8 @@ A slash command cannot add to a queue: while a turn runs, every
   use them, like `session/cancel`.
 - `_rho/unqueue {..., steer: true}` removes a queued prompt and steers it
   into the running turn, like `_rho/queue {steer: true}` (ADR 0076): the
-  model gets it with the next tool results, and viewers see a "Steered"
-  note. Both happen in one request, so a prompt that started meanwhile is
+  model gets it with the next tool results, and viewers see it as a user
+  message right away, as on reload. Both happen in one request, so a prompt that started meanwhile is
   not sent twice. The web client has a steer button on each queued message.
 - The queue lives in the hub entry of the session (`rho/src/acp/hub.rs`).
   When a turn ends, the next queued prompt starts as a run without a client:
