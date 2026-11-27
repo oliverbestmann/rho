@@ -164,7 +164,8 @@ mod tests {
     fn parses_results_without_ads() {
         assert_eq!(
             results(PAGE).unwrap(),
-            "1. [reqwest & Rust](https://docs.rs/reqwest/?a=1&b=2)\n   An **HTTP** client.\n\
+            // htmd 0.6 escapes `&`, also in link targets.
+            "1. [reqwest \\& Rust](https://docs.rs/reqwest/?a=1\\&b=2)\n   An **HTTP** client.\n\
              2. [Example](https://example.com/)\n   "
         );
         assert_eq!(results("<html></html>").unwrap(), "No results.");
@@ -211,7 +212,7 @@ mod tests {
 
         let out = search("/ok").run(input.clone(), &ctx).await.unwrap();
         assert!(
-            out.output.starts_with("1. [reqwest & Rust]"),
+            out.output.starts_with("1. [reqwest \\& Rust]"),
             "{}",
             out.output
         );
