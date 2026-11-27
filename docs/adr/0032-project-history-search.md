@@ -1,6 +1,7 @@
 # 32. Project history search
 
-- Status: Accepted, amended by 0049 and 0078
+- Status: Accepted, amended by 0049 and 0078, and on 2026-11-27 (title per
+  chunk, incremental indexing)
 - Date: 2026-10-11
 
 ## Context
@@ -26,7 +27,7 @@ outside the project.
   search (10 results), shown as a command reply and not added to the
   conversation, so the model does not see it.
 - The store gets one read method, `Store::messages`, which returns all
-  messages with their epoch.
+  messages with their epoch (`Store::messages_from` from a `seq` on).
 - The index is `history.db` in `$XDG_CACHE_HOME/rho`. It's derived data:
   deleting it means a rebuild. `sessions.db` is not changed.
 - Each epoch is rendered as `User: …` / `Assistant: …` text: text and tool
@@ -36,7 +37,10 @@ outside the project.
   new messages change only the last window.
 - Chunks are embedded with the session title in front, using the same
   model as `Memory` (one instance per process). Embeddings are reused by
-  the SHA-256 of what was embedded. FTS5 (external content, kept in sync by
+  the SHA-256 of the chunk text, so a chunk keeps the title it was
+  embedded with. Before 2026-11-27 the hash included the title, and a title
+  change re-embedded the whole session (minutes for a session with 6,000
+  chunks). FTS5 (external content, kept in sync by
   triggers) indexes the same chunks.
 - Search ranks with sqlite-vec's `vec_distance_cosine` and FTS5's rank,
   50 candidates each, fused by reciprocal rank (k = 60). The mode
@@ -52,9 +56,13 @@ outside the project.
   compaction model, else its model.)
 - `read` shows ten messages of a session from a given `seq` on, with tool
   outputs cut, only for sessions in the project.
-- Sessions whose `updated_at` or title changed are indexed after every run
-  (`run_end`, in the background) and before every search. An indexing
-  error after a run is shown as a notice.
+- After each run (`run_end`, in the background), the session is indexed
+  from the first `seq` of its last chunk on, since only that chunk can
+  have grown. Search indexes only sessions missing from the index (never
+  indexed, or dropped by redact). An indexing error after a run is shown
+  as a notice. Indexing that takes over 1 s is logged.
+- Rewrites before the last chunk (Discard, a replaced tail) are not
+  re-indexed; the index keeps the older text.
 
 ## Consequences
 

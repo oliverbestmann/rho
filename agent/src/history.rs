@@ -7,13 +7,16 @@
 //! The index is `history.db` in `$XDG_CACHE_HOME/rho`, built from the
 //! session store: each epoch's text is cut into overlapping windows,
 //! embedded like `Memory` and put into FTS5. Search merges the semantic and
-//! keyword rankings (reciprocal rank fusion). Changed sessions are indexed
-//! after every run and before every search.
+//! keyword rankings (reciprocal rank fusion). After each run, the session's
+//! last chunk and the messages after it are indexed; search only indexes
+//! sessions missing from the index. A chunk is embedded with the title the
+//! session had then; a later title does not change it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use rho::extension::{
@@ -61,7 +64,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     last_seq INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     text TEXT NOT NULL,
-    -- SHA-256 of what was embedded (title and text), to reuse embeddings.
+    -- SHA-256 of the text (not the title), to reuse embeddings.
     hash TEXT NOT NULL,
     -- f32 little-endian, as sqlite-vec reads it.
     embedding BLOB NOT NULL
@@ -198,9 +201,9 @@ impl Extension for History {
         let Some(store) = ctx.store().cloned() else {
             return;
         };
-        let (inner, scope, ctx) = (self.0.clone(), Scope::of(ctx), ctx.clone());
+        let (inner, ctx) = (self.0.clone(), ctx.clone());
         tokio::spawn(async move {
-            if let Err(e) = inner.sync(&store, &scope).await {
+            if let Err(e) = inner.update(&store, ctx.session_id()).await {
                 ctx.notify(
                     NoteType::Info,
                     "History not indexed",
@@ -382,7 +385,9 @@ impl Inner {
     fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.conn.lock().unwrap();
         if conn.is_none() {
-            *conn = Some(index::open(&self.path, SCHEMA)?);
+            let mut c = index::open(&self.path, SCHEMA)?;
+            rehash(&mut c)?;
+            *conn = Some(c);
         }
         f(conn.as_mut().unwrap())
     }
@@ -413,8 +418,18 @@ impl Inner {
         })
     }
 
-    /// Indexes the sessions in `scope` that changed since the last pass and
-    /// returns the ids of all sessions in it.
+    /// Indexes the new messages of session `id`, after a run.
+    async fn update(self: &Arc<Self>, store: &Store, id: &SessionId) -> Result<()> {
+        let _one = self.syncing.lock().await;
+        match store.session(id).await? {
+            Some(s) => self.index_new(store, s).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Indexes the sessions in `scope` missing from the index (never indexed
+    /// or redacted) and returns the ids of all sessions in it. Others are
+    /// indexed when their runs end.
     async fn sync(self: &Arc<Self>, store: &Store, scope: &Scope) -> Result<Vec<SessionId>> {
         let _one = self.syncing.lock().await;
         let mut sessions = vec![];
@@ -428,59 +443,85 @@ impl Inner {
             }
         }
         let inner = self.clone();
-        let indexed: HashMap<SessionId, (i64, Option<String>)> =
-            tokio::task::spawn_blocking(move || {
-                inner.with_conn(|c| {
-                    let mut stmt = c.prepare("SELECT id, updated_at, title FROM sessions")?;
-                    let rows = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
-                    Ok(rows.collect::<rusqlite::Result<_>>()?)
-                })
+        let indexed: HashSet<SessionId> = tokio::task::spawn_blocking(move || {
+            inner.with_conn(|c| {
+                let mut stmt = c.prepare("SELECT id FROM sessions")?;
+                let rows = stmt.query_map([], |r| r.get(0))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
             })
-            .await??;
+        })
+        .await??;
         let ids = sessions.iter().map(|s| s.id.clone()).collect();
         for s in sessions {
-            // `set_title` does not touch `updated_at`.
-            if indexed.get(&s.id) == Some(&(s.updated_at, s.title.clone())) {
-                continue;
+            if !indexed.contains(&s.id) {
+                self.index_new(store, s).await?;
             }
-            let messages = store.messages(&s.id).await?;
-            let inner = self.clone();
-            tokio::task::spawn_blocking(move || inner.index(&s, &messages)).await??;
         }
         Ok(ids)
     }
 
-    /// Replaces the session's chunks; unchanged ones keep their embedding.
-    fn index(&self, s: &SessionInfo, messages: &[StoredMessage]) -> Result<()> {
-        let chunks = chunks(messages);
-        let embedded: Vec<String> = chunks
-            .iter()
-            .map(|c| match &s.title {
-                Some(t) => format!("{t}\n\n{}", c.text),
-                None => c.text.clone(),
+    /// Indexes the session from its last chunk on (it may have grown), or
+    /// all of it if it has none.
+    async fn index_new(self: &Arc<Self>, store: &Store, s: SessionInfo) -> Result<()> {
+        let start = Instant::now();
+        let (inner, id) = (self.clone(), s.id.clone());
+        let from: i64 = tokio::task::spawn_blocking(move || {
+            inner.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT coalesce(max(first_seq), 0) FROM chunks WHERE session_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )?)
             })
-            .collect();
-        let hashes: Vec<ChunkHash> = embedded
-            .iter()
-            .map(|t| ChunkHash::new(hex(&Sha256::digest(t))))
-            .collect();
+        })
+        .await??;
+        let messages = store.messages_from(&s.id, from).await?;
+        let (inner, id) = (self.clone(), s.id.clone());
+        let n = tokio::task::spawn_blocking(move || inner.index(&s, from, &messages)).await??;
+        if start.elapsed() > Duration::from_secs(1) {
+            eprintln!(
+                "History: indexed session {id} from seq {from} in {} ms, {n} chunks embedded",
+                start.elapsed().as_millis()
+            );
+        }
+        Ok(())
+    }
+
+    /// Replaces the session's chunks from seq `from` on with those of
+    /// `messages`; unchanged ones keep their embedding. Returns the number
+    /// of chunks embedded.
+    fn index(&self, s: &SessionInfo, from: i64, messages: &[StoredMessage]) -> Result<usize> {
+        let chunks = chunks(messages);
+        let hashes: Vec<ChunkHash> = chunks.iter().map(|c| text_hash(&c.text)).collect();
         let mut known: HashMap<ChunkHash, Vec<u8>> = self.with_conn(|c| {
-            let mut stmt = c.prepare("SELECT hash, embedding FROM chunks WHERE session_id = ?1")?;
-            let rows = stmt.query_map([&s.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut stmt = c.prepare(
+                "SELECT hash, embedding FROM chunks WHERE session_id = ?1 AND first_seq >= ?2",
+            )?;
+            let rows = stmt.query_map(params![s.id, from], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
         let missing: Vec<usize> = (0..chunks.len())
             .filter(|&n| !known.contains_key(&hashes[n]))
             .collect();
         if !missing.is_empty() {
-            let texts: Vec<String> = missing.iter().map(|&n| embedded[n].clone()).collect();
+            // The title of now goes with the text of now.
+            let texts: Vec<String> = missing
+                .iter()
+                .map(|&n| match &s.title {
+                    Some(t) => format!("{t}\n\n{}", chunks[n].text),
+                    None => chunks[n].text.clone(),
+                })
+                .collect();
             for (n, v) in missing.iter().zip((self.embed)(&texts)?) {
                 known.insert(hashes[*n].clone(), index::blob(&v));
             }
         }
         self.with_conn(|c| {
             let tx = c.transaction()?;
-            tx.execute("DELETE FROM chunks WHERE session_id = ?1", [&s.id])?;
+            tx.execute(
+                "DELETE FROM chunks WHERE session_id = ?1 AND first_seq >= ?2",
+                params![s.id, from],
+            )?;
             let mut insert = tx.prepare(
                 "INSERT INTO chunks (session_id, epoch, first_seq, last_seq, created_at, text,
                      hash, embedding)
@@ -510,7 +551,7 @@ impl Inner {
                 ],
             )?;
             tx.commit()?;
-            Ok(())
+            Ok(missing.len())
         })
     }
 
@@ -691,6 +732,32 @@ fn keywords(query: &str) -> Option<String> {
     (!words.is_empty()).then(|| words.join(" OR "))
 }
 
+fn text_hash(text: &str) -> ChunkHash {
+    ChunkHash::new(hex(&Sha256::digest(text)))
+}
+
+/// Version 1: hashes are of the text only, so a new title does not
+/// re-embed the chunks before it. Older embeddings keep their title.
+fn rehash(c: &mut Connection) -> Result<()> {
+    let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= 1 {
+        return Ok(());
+    }
+    let tx = c.transaction()?;
+    let rows: Vec<(i64, String)> = tx
+        .prepare("SELECT id, text FROM chunks")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut update = tx.prepare("UPDATE chunks SET hash = ?2 WHERE id = ?1")?;
+    for (id, text) in rows {
+        update.execute(params![id, text_hash(&text)])?;
+    }
+    drop(update);
+    tx.pragma_update(None, "user_version", 1)?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -868,6 +935,75 @@ mod tests {
                 v
             })
             .collect())
+    }
+
+    #[tokio::test]
+    async fn indexes_only_what_a_run_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let answers = ["fine", "ok"]
+            .map(|t| vec![Event::TextDelta(t.into()), Event::Done(StopReason::EndTurn)]);
+        let mut agent = Agent::new(
+            Arc::new(Scripted(Mutex::new(answers.to_vec()))),
+            ModelSpec::new("test", "m"),
+        );
+        agent.sessions_db = Some(Arc::new(move |_| db.clone()));
+        let embedded: Arc<Mutex<Vec<String>>> = Default::default();
+        let seen = embedded.clone();
+        let history = History::new(
+            dir.path().join("history.db"),
+            Box::new(move |t| {
+                seen.lock().unwrap().extend_from_slice(t);
+                letters(t)
+            }),
+        );
+        let mut s = agent
+            .start_session(
+                SessionId::new("s"),
+                dir.path(),
+                vec![],
+                Arc::new(NoFrontend),
+            )
+            .await
+            .unwrap();
+        let store = s.ctx.store().unwrap().clone();
+        let long: String = (0..300).map(|n| format!("okapi w{n} ")).collect();
+        agent.run(&mut s, vec![Content::text(&long)]).await.unwrap();
+        history.0.update(&store, s.ctx.session_id()).await.unwrap();
+        let first = std::mem::take(&mut *embedded.lock().unwrap());
+        assert!(first.len() > 3, "{first:?}");
+
+        s.ctx.set_title("new title");
+        agent
+            .run(&mut s, vec![Content::text("zebra")])
+            .await
+            .unwrap();
+        history.0.update(&store, s.ctx.session_id()).await.unwrap();
+        let second = std::mem::take(&mut *embedded.lock().unwrap());
+        // Only the grown last chunk, under the new title.
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert!(second[0].starts_with("new title\n\n"), "{second:?}");
+        assert!(
+            second[0].ends_with("User: zebra\n\nAssistant: ok"),
+            "{second:?}"
+        );
+
+        // Version 0 hashes included the title.
+        history
+            .0
+            .with_conn(|c| {
+                c.execute_batch("UPDATE chunks SET hash = 'old'; PRAGMA user_version = 0;")?;
+                rehash(c)?;
+                let old: i64 =
+                    c.query_row("SELECT count(*) FROM chunks WHERE hash = 'old'", [], |r| {
+                        r.get(0)
+                    })?;
+                assert_eq!(old, 0);
+                Ok(())
+            })
+            .unwrap();
+        history.0.update(&store, s.ctx.session_id()).await.unwrap();
+        assert!(embedded.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

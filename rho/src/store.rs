@@ -599,13 +599,18 @@ impl Store {
     /// All messages of the session, older epochs included, by `seq`. A
     /// message's `seq` is that of its first block, so they have gaps.
     pub async fn messages(&self, id: &SessionId) -> Result<Vec<StoredMessage>> {
+        self.messages_from(id, 0).await
+    }
+
+    /// `messages` from `seq` on; `seq` should start a message.
+    pub async fn messages_from(&self, id: &SessionId, seq: i64) -> Result<Vec<StoredMessage>> {
         let id = id.clone();
         self.call(move |c| {
             let mut stmt = c.prepare(
                 "SELECT seq, epoch, role, block, created_at FROM items
-                 WHERE session_id = ?1 ORDER BY seq",
+                 WHERE session_id = ?1 AND seq >= ?2 ORDER BY seq",
             )?;
-            let rows = read_blocks(&mut stmt.query([&id])?, &id)?;
+            let rows = read_blocks(&mut stmt.query(params![id, seq])?, &id)?;
             Ok(group(rows))
         })
         .await
