@@ -130,6 +130,12 @@ pub trait Extension: Send + Sync {
         async {}
     }
 
+    /// A new epoch started: the history is now the compaction `summary`, or
+    /// empty after `/clear` (`None`). Messages the model saw are gone.
+    fn compacted(&self, _ctx: &Context, _summary: Option<&str>) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// The model stopped. Return a message to continue the run with it
     /// (e.g. failing test output), or `None` to let the run end.
     fn before_settle(
@@ -186,6 +192,7 @@ pub trait DynExtension: Send + Sync {
     ) -> BoxFuture<'a, ()>;
     fn turn_end<'a>(&'a self, ctx: &'a Context, turn: &'a TurnEnd<'_>) -> BoxFuture<'a, ()>;
     fn run_end<'a>(&'a self, ctx: &'a Context, run: &'a RunEnd) -> BoxFuture<'a, ()>;
+    fn compacted<'a>(&'a self, ctx: &'a Context, summary: Option<&'a str>) -> BoxFuture<'a, ()>;
     fn before_settle<'a>(
         &'a self,
         ctx: &'a Context,
@@ -244,6 +251,9 @@ impl<T: Extension> DynExtension for T {
     }
     fn run_end<'a>(&'a self, ctx: &'a Context, run: &'a RunEnd) -> BoxFuture<'a, ()> {
         Box::pin(Extension::run_end(self, ctx, run))
+    }
+    fn compacted<'a>(&'a self, ctx: &'a Context, summary: Option<&'a str>) -> BoxFuture<'a, ()> {
+        Box::pin(Extension::compacted(self, ctx, summary))
     }
     fn before_settle<'a>(
         &'a self,

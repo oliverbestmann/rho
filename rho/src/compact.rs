@@ -333,6 +333,9 @@ impl Agent {
             false,
         );
         session.save_compacted().await;
+        for ext in &self.extensions {
+            ext.compacted(&session.ctx, Some(&summary)).await;
+        }
         Ok(())
     }
 }
@@ -346,6 +349,9 @@ impl Agent {
         session.save().await;
         new_epoch(session, vec![]);
         session.save_compacted().await;
+        for ext in &self.extensions {
+            ext.compacted(&session.ctx, None).await;
+        }
     }
 }
 

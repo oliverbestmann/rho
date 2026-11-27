@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use rho::agent::Agent;
-use rho::extension::NoFrontend;
+use rho::extension::{Context, Extension, NoFrontend};
 use rho::provider::{
     Content, Event, Message, ModelSpec, NoteType, Role, StopReason, ToolCallId, ToolName, Usage,
 };
@@ -330,13 +330,25 @@ async fn changed_additional_directories_are_announced() {
     assert_eq!(info.additional_dirs, [b]);
 }
 
+/// The `compacted` hook's summaries.
+#[derive(Default)]
+struct Epochs(Mutex<Vec<Option<String>>>);
+
+impl Extension for Epochs {
+    async fn compacted(&self, _ctx: &Context, summary: Option<&str>) {
+        self.0.lock().unwrap().push(summary.map(str::to_string));
+    }
+}
+
 #[tokio::test]
 async fn compaction_starts_a_new_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("sessions.db");
     let mut responses = tool_then_answer();
     responses.push(vec![text("## Goal\nsummary")]);
-    let agent = agent(Scripted::new(responses), &db);
+    let mut agent = agent(Scripted::new(responses), &db);
+    let epochs = Arc::new(Epochs::default());
+    agent.extensions.push(epochs.clone());
 
     let mut session = agent
         .start_session(
@@ -353,6 +365,7 @@ async fn compaction_starts_a_new_epoch() {
         .unwrap();
     agent.compact(&mut session, "").await.unwrap();
     let summary = session.history.clone();
+    assert_eq!(*epochs.0.lock().unwrap(), [Some("## Goal\nsummary".into())]);
     drop(session);
 
     let resumed = agent
@@ -1144,6 +1157,8 @@ async fn clear_starts_an_empty_epoch() {
     let provider = Scripted::new(vec![vec![text("One.")], vec![text("Two.")]]);
     let mut agent = agent(provider.clone(), &db);
     agent.extensions.push(Arc::new(ClearCommand));
+    let epochs = Arc::new(Epochs::default());
+    agent.extensions.push(epochs.clone());
     let mut session = agent
         .start_session(SessionId::new("s"), &cwd, vec![], Arc::new(NoFrontend))
         .await
@@ -1157,6 +1172,7 @@ async fn clear_starts_an_empty_epoch() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(*epochs.0.lock().unwrap(), [None]);
     agent
         .run(&mut session, vec![Content::text("second")])
         .await
